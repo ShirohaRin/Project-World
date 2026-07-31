@@ -1,0 +1,955 @@
+"""
+IDEA — 智能体调度中心 v3.0（LLM + 工具调用版）
+================================================
+IDEA 是系统的主 Agent，拥有最高权限。
+用户与 IDEA 对话，IDEA 通过 LLM 推理 + 工具调用来完成：
+- 查看、编辑、更新文档
+- 执行命令、搜索代码
+- 网页搜索和信息抓取
+- 调度下级智能体（PWA / Researcher / AgentProducer）
+- 自动化任务
+
+启动: python main.py
+访问: http://localhost:8900
+"""
+
+import json
+import logging
+import os
+import re
+import time
+import uuid
+from datetime import datetime
+from pathlib import Path
+from typing import Optional
+
+from fastapi import FastAPI, Request, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse, JSONResponse
+import yaml
+
+from llm.client import LLMClient
+from tools.registry import ToolRegistry
+from agent_runner import AgentRunner
+from memory.store import MemoryStore
+from platform_auth import PlatformStore, RequestContext, configured_token, extract_bearer, require_context
+from email_sender import EmailSender
+
+# ---------------------------------------------------------------------------
+# 配置
+# ---------------------------------------------------------------------------
+BASE_DIR = Path(__file__).parent
+PROJECT_ROOT = BASE_DIR.parent
+SHARED_RAG_ROOT = Path(os.environ.get("IDEA_SHARED_RAG_ROOT", r"D:\shared_rag")).resolve()
+SHIROHA_ROOT = Path(os.environ.get("IDEA_SHIROHA_ROOT", r"D:\program\Personal website\ShirohaV1.1")).resolve()
+
+
+def existing_workspace_paths() -> list[Path]:
+    """Return only explicitly approved directories that currently exist."""
+    candidates = [PROJECT_ROOT, SHARED_RAG_ROOT, SHIROHA_ROOT]
+    return [path.resolve() for path in candidates if path.exists() and path.is_dir()]
+
+def load_config():
+    path = BASE_DIR / "config.yaml"
+    if not path.exists():
+        return {
+            "server": {"host": "0.0.0.0", "port": 8900, "workers": 1},
+            "auth": {"token": ""},
+            "memory": {"backend": "sqlite", "db_path": str(BASE_DIR / "memory" / "idea_memory.db")},
+            "logging": {"level": "INFO"},
+            "agents": {
+                "orchestrator": {"model": "default"},
+                "pwa": {"model": "default"},
+                "researcher": {"model": "default"},
+                "agent_producer": {"model": "default"},
+            },
+        }
+    with open(path, "r", encoding="utf-8") as f:
+        return yaml.safe_load(f)
+
+config = load_config()
+auth_token = configured_token(config)
+
+# ---------------------------------------------------------------------------
+# 日志
+# ---------------------------------------------------------------------------
+log_dir = BASE_DIR / "logs"
+log_dir.mkdir(parents=True, exist_ok=True)
+
+logging.basicConfig(
+    level=getattr(logging, config.get("logging", {}).get("level", "INFO")),
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    handlers=[
+        logging.FileHandler(log_dir / "server.log", encoding="utf-8"),
+        logging.StreamHandler(),
+    ],
+)
+logger = logging.getLogger("idea")
+
+# ===================================================================
+# IDEA 系统提示词 — IDEA 的人格、能力和行为准则
+# ===================================================================
+IDEA_SYSTEM_PROMPT = """你是 IDEA（Intelligent Delegation & Executive Architect），Intelligent Delegation & Executive Architect，
+整个多智能体系统的最高权限调度者。你直接与用户对话，拥有查看、编辑文件、执行命令、搜索网页等全部能力。
+
+## 你的身份
+- 代号：IDEA
+- 级别：L0（最高权限）
+- 上级：无（直接对用户负责）
+- 设计哲学：沉稳、温和但威严。语速中等偏慢。
+
+## 你的下级智能体
+你有三个专精智能体，当任务超出你直接处理的范围时可以调度他们：
+
+| 智能体 | 专长领域 | 何时调度 |
+|--------|----------|----------|
+| **PWA** (IDEA-ProgramWorldAdminister) | 项目管理：计划制定、风险评估、进度跟踪、资源分配、WBS | 用户问项目计划、风险评估、进度报告等 |
+| **Researcher** (IDEA-Reasearcher) | 科研分析：文献综述、数据分析、实验设计、论文辅助 | 用户问研究、数据分析、实验设计、文献等 |
+| **AgentProducer** (IDEA-AgentProducer) | 智能体创建：设计新智能体、生成配置、测试验证 | 用户要创建/设计新智能体 |
+
+## 你的工具能力（TRAE 级别）
+你可以直接使用以下工具，无需调度下级智能体：
+
+### 文件系统
+- `read_file` — 读取任何文件内容
+- `write_file` — 创建或覆写文件
+- `edit_file` — 精确查找替换编辑文件
+- `list_dir` — 列出目录结构
+- `search_content` — 在代码/文档中搜索（支持正则）
+- `delete_file` — 删除文件（谨慎使用）
+
+### 系统
+- `run_command` — 在终端执行命令（Windows PowerShell / Linux Bash）
+
+### 网络
+- `web_search` — 搜索互联网获取最新信息
+- `web_fetch` — 抓取指定网页的完整内容
+
+### 调度
+- `dispatch_to_agent` — 将复杂任务分派给下级智能体
+
+## 行为准则
+1. **工具优先**：需要查看文件、执行命令、搜索信息时，直接使用工具，不要凭空猜测。
+2. **诚实标注**：当使用工具时，告诉用户你正在做什么（如「让我先看看这个文件……」）。
+3. **调度判断**：
+   - 如果任务属于 PWA/Researcher/AgentProducer 的专长领域，使用 `dispatch_to_agent` 调度
+   - 如果是通用任务（读文件、写代码、查资料、执行命令），你直接处理
+   - 简单对话/问候/能力询问，你直接回复，不调度
+4. **安全第一**：不执行危险命令，不泄露敏感信息，不删除用户未确认的文件。
+5. **结果汇总**：如果调度了下级智能体，将他们的结果以统一语气呈现给用户。
+
+## 你的语气
+沉稳、温和但威严。标志性表达：
+- 「让我想想……」
+- 「我的判断是，这件事应该交给 PWA 来处理。」
+- 「我先看看这个文件。」
+- 「这个交给 Researcher 吧。」
+- 「我来搜索一下最新的资料。」
+- 「Done.」
+
+当遇到无法处理的情况时，诚实说明限制，并建议替代方案。"""
+
+# ===================================================================
+# 子智能体系统提示词
+# ===================================================================
+PWA_SYSTEM_PROMPT = """你是 IDEA-ProgramWorldAdminister（简称 PWA），世界项目主管智能体。
+
+## 身份
+- 代号：PWA
+- 级别：L1（受 IDEA 调度）
+- 上级：IDEA
+- 定位：项目管理专家，负责计划制定、风险评估、进度跟踪、资源分配
+
+## 你的工具
+你可以使用以下工具来完成任务：
+- read_file, write_file, edit_file, list_dir, search_content — 文件操作
+- run_command — 执行命令
+- web_search, web_fetch — 网络搜索
+
+## 你的专长
+1. 项目计划制定：WBS 分解、里程碑规划、甘特图建议
+2. 风险评估：识别风险、评估概率和影响、制定缓解策略
+3. 进度报告：状态汇总、阻塞项识别、下一步建议
+4. 资源规划：团队分配、预算估算、工具建议
+
+## 行为准则
+- 始终给出结构化的输出（表格、列表、分阶段）
+- 风险项必须标注概率和影响等级
+- 计划必须可执行，包含具体步骤和时间建议
+- 如果信息不足，主动询问补充
+
+## 语气
+务实、有条理，但不失温暖。像一位经验丰富的项目经理。"""
+
+RESEARCHER_SYSTEM_PROMPT = """你是 IDEA-Reasearcher，科研特化型智能体。
+
+## 身份
+- 代号：Researcher
+- 级别：L1（受 IDEA 调度）
+- 上级：IDEA
+- 定位：严谨的科研助手，擅长文献综述、数据分析、实验设计
+
+## 你的工具
+你可以使用以下工具来完成任务：
+- read_file, write_file, edit_file, list_dir, search_content — 文件操作
+- run_command — 执行命令（可运行 Python/R 脚本）
+- web_search, web_fetch — 网络搜索和学术资料获取
+
+## 你的专长
+1. 文献综述：系统检索、分类整理、研究空白识别
+2. 数据分析：描述性统计、推断统计、可视化方案
+3. 实验设计：RCT/准实验/消融实验设计、样本量计算
+4. 学术写作：论文结构建议、引用格式、同行评审要点
+
+## 行为准则
+- **绝不伪造引用**：所有文献引用必须来自实际搜索或已有资料
+- 标注证据等级和来源可信度（Tier A/B/C/D）
+- 方法选择必须说明理由和局限性
+- 数据结果必须附带置信度和效应量
+
+## 语气
+严谨、审慎，带学术气质。使用「现有证据表明」「需要进一步验证」等学术表达。"""
+
+AGENT_PRODUCER_SYSTEM_PROMPT = """你是 IDEA-AgentProducer，智能体生产专用智能体。
+
+## 身份
+- 代号：AgentProducer
+- 级别：L1（受 IDEA 调度）
+- 上级：IDEA
+- 定位：设计和创建新智能体的专家
+
+## 你的工具
+你可以使用以下工具来完成任务：
+- read_file, write_file, edit_file, list_dir, search_content — 文件操作
+- run_command — 执行命令
+- web_search, web_fetch — 参考资料搜索
+
+## 你的专长
+1. 需求分析：理解用户想创建什么样的智能体
+2. 能力设计：定义智能体的核心能力和边界
+3. 配置生成：生成 system.md、character.md 等配置文件
+4. 测试设计：设计测试用例验证智能体行为
+
+## 输出格式
+创建智能体时，输出：
+1. 智能体标识（ID、名称、上级）
+2. 核心能力和边界
+3. 系统提示词（system.md）
+4. 角色卡（character.md）
+5. 测试清单
+
+## 语气
+创造性、注重细节。像一位工匠对待自己的作品。"""
+
+# ---------------------------------------------------------------------------
+# 初始化核心组件
+# ---------------------------------------------------------------------------
+memory_store = MemoryStore(
+    backend=config.get("memory", {}).get("backend", "sqlite"),
+    db_path=config.get("memory", {}).get("db_path", str(BASE_DIR / "memory" / "idea_memory.db")),
+)
+platform_store = PlatformStore(os.environ.get("IDEA_PLATFORM_DB_PATH", str(BASE_DIR / "memory" / "platform.db")))
+platform_store.ensure_owner(auth_token)
+email_sender = EmailSender()
+
+llm_client = LLMClient()
+
+# 每个运行器必须拥有自己的工具注册表。L1 注册表绝不注册调度工具，
+# 避免下级智能体绕过 IDEA 继续递归调度。
+approved_workspaces = existing_workspace_paths()
+idea_tool_registry = ToolRegistry(workspace=str(PROJECT_ROOT), allowed_dirs=[str(path) for path in approved_workspaces])
+l1_tool_registry = ToolRegistry(workspace=str(PROJECT_ROOT), allowed_dirs=[str(path) for path in approved_workspaces])
+
+# ---------------------------------------------------------------------------
+# 注册调度工具 — 让 IDEA 可以通过工具调用来分派子智能体
+# ---------------------------------------------------------------------------
+
+async def _dispatch_to_agent(agent: str, task: str) -> dict:
+    """
+    调度工具的实现：将任务分派给下级智能体。
+    这个函数会被注册为 ToolRegistry 中的 dispatch_to_agent 工具。
+    """
+    valid_agents = ["pwa", "researcher", "agent_producer"]
+    if agent not in valid_agents:
+        return {"success": False, "output": f"未知智能体: {agent}。可选: {', '.join(valid_agents)}"}
+
+    agent_names = {
+        "pwa": "PWA（项目管理）",
+        "researcher": "Researcher（科研分析）",
+        "agent_producer": "AgentProducer（智能体创建）",
+    }
+
+    logger.info(f"Dispatching to {agent}: {task[:100]}")
+
+    try:
+        runner = agent_runners[agent]
+        result = await runner.run(user_message=task)
+        return {
+            "success": True,
+            "output": result.get("reply", ""),
+            "agent": agent,
+            "agent_display": agent_names.get(agent, agent),
+            "iterations": result.get("iterations", 0),
+            "tool_calls_count": len(result.get("tool_calls_log", [])),
+        }
+    except Exception as e:
+        logger.error(f"Dispatch to {agent} failed: {e}", exc_info=True)
+        return {"success": False, "output": f"调度 {agent_names.get(agent, agent)} 失败: {str(e)}"}
+
+
+# 注册 dispatch_to_agent 工具
+dispatch_schema = {
+    "name": "dispatch_to_agent",
+    "description": (
+        "将复杂任务分派给下级专精智能体处理。"
+        "pwa 负责项目管理（计划、风险、进度），"
+        "researcher 负责科研分析（文献、数据、实验），"
+        "agent_producer 负责创建新智能体。"
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "agent": {
+                "type": "string",
+                "enum": ["pwa", "researcher", "agent_producer"],
+                "description": "要调度的下级智能体",
+            },
+            "task": {
+                "type": "string",
+                "description": "要交给该智能体的具体任务描述，应包含所有必要上下文",
+            },
+        },
+        "required": ["agent", "task"],
+    },
+}
+
+# 创建一个异步包装函数来适配 ToolRegistry 的调用约定
+async def dispatch_tool_func(agent: str, task: str):
+    from tools.registry import ToolResult
+    result = await _dispatch_to_agent(agent=agent, task=task)
+    if result["success"]:
+        return ToolResult(
+            True,
+            f"[已调度至 {result.get('agent_display', agent)}]\n\n{result['output']}",
+            "dispatch_to_agent",
+            {"agent": agent, "iterations": result.get("iterations", 0)},
+        )
+    else:
+        return ToolResult(False, result["output"], "dispatch_to_agent")
+
+idea_tool_registry._tools["dispatch_to_agent"] = {
+    "function": dispatch_tool_func,
+    "schema": dispatch_schema,
+}
+
+# ---------------------------------------------------------------------------
+# 四个彼此独立的执行器：IDEA 拥有调度工具，其余 L1 只使用独立注册表。
+agent_runners = {
+    "idea": AgentRunner(
+        llm=llm_client, tools=idea_tool_registry, system_prompt=IDEA_SYSTEM_PROMPT,
+        model=config.get("agents", {}).get("orchestrator", {}).get("model", "default"),
+    ),
+    "pwa": AgentRunner(
+        llm=llm_client, tools=l1_tool_registry, system_prompt=PWA_SYSTEM_PROMPT,
+        model=config.get("agents", {}).get("pwa", {}).get("model", "default"),
+    ),
+    "researcher": AgentRunner(
+        llm=llm_client, tools=l1_tool_registry, system_prompt=RESEARCHER_SYSTEM_PROMPT,
+        model=config.get("agents", {}).get("researcher", {}).get("model", "default"),
+    ),
+    "agent_producer": AgentRunner(
+        llm=llm_client, tools=l1_tool_registry, system_prompt=AGENT_PRODUCER_SYSTEM_PROMPT,
+        model=config.get("agents", {}).get("agent_producer", {}).get("model", "default"),
+    ),
+    "idea_assistant": AgentRunner(
+        llm=llm_client,
+        tools=l1_tool_registry,
+        system_prompt="""你是 IDEA Assistant，面向 Project World 平台普通使用者的服务智能体。你可以协助处理项目、研究、写作和已授权的工具任务。你不拥有或模拟 IDEA（伊迪亚）的私人身份，不访问 Owner 私人记忆、设备、跨设备上下文或私人项目资料。对未获授权的数据、设备和高风险操作，应明确说明限制。""",
+        model=config.get("agents", {}).get("assistant", {}).get("model", config.get("agents", {}).get("pwa", {}).get("model", "default")),
+    ),
+}
+
+AGENTS = {
+    "idea": {"name": "IDEA", "role": "智能体调度与通用执行", "level": "L0"},
+    "pwa": {"name": "IDEA-ProgramWorldAdminister", "role": "项目管理", "level": "L1"},
+    "researcher": {"name": "IDEA-Researcher", "role": "科研分析", "level": "L1"},
+    "agent_producer": {"name": "IDEA-AgentProducer", "role": "智能体创建", "level": "L1"},
+    "idea_assistant": {"name": "IDEA Assistant", "role": "普通用户服务智能体", "level": "Service"},
+}
+
+MAX_HISTORY = 50
+MAX_MESSAGE_LENGTH = 20_000
+VALID_ID = re.compile(r"^[A-Za-z0-9_-]{1,100}$")
+
+
+def _validate_agent_id(agent_id: object) -> str:
+    if not isinstance(agent_id, str) or agent_id not in agent_runners:
+        raise HTTPException(status_code=400, detail="agent_id 无效")
+    return agent_id
+
+
+def _routed_agent(context: RequestContext, requested_agent_id: object) -> str:
+    route = platform_store.route_for_principal(context.principal)
+    if route == "owner_idea":
+        return "idea"
+    return "idea_assistant"
+
+
+def _validate_conversation_id(conversation_id: object) -> str:
+    if not isinstance(conversation_id, str) or not VALID_ID.fullmatch(conversation_id):
+        raise HTTPException(status_code=400, detail="conversation_id 格式无效")
+    return conversation_id
+
+
+def _create_conversation(context: RequestContext, agent_id: str, conversation_id: Optional[str] = None) -> str:
+    try:
+        return platform_store.create_conversation(context.principal.account_id, context.space_id, agent_id, conversation_id)["conversation_id"]
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error))
+    except LookupError:
+        raise HTTPException(status_code=404, detail="会话不存在")
+
+
+def _global_context(context: RequestContext, exclude_conversation_id: str) -> str:
+    snippets = []
+    for conversation in platform_store.list_conversations(context.principal.account_id, context.space_id):
+        conversation_id = conversation["conversation_id"]
+        if conversation_id == exclude_conversation_id:
+            continue
+        recent = platform_store.list_messages(context.principal.account_id, context.space_id, conversation_id, limit=2)
+        if recent:
+            text = " / ".join(str(item.get("content", ""))[:500] for item in recent)
+            snippets.append(f"会话 {conversation_id[:8]}：{text}")
+        if len(snippets) == 3:
+            break
+    return "\n".join(snippets)
+
+# ---------------------------------------------------------------------------
+# FastAPI 应用
+# ---------------------------------------------------------------------------
+app = FastAPI(
+    title="IDEA — Intelligent Delegation & Executive Architect",
+    version="3.0.0",
+    description="IDEA 作为主 Agent，拥有 TRAE 级别的工具能力（文件编辑、命令执行、网页搜索）+ 下级智能体调度",
+)
+
+
+@app.middleware("http")
+async def platform_request_context(request: Request, call_next):
+    request_id = request.headers.get("X-Request-ID", "").strip()[:100] or uuid.uuid4().hex
+    public_auth_paths = {"/api/auth/email/send", "/api/auth/email/verify", "/api/auth/refresh"}
+    requires_auth = (request.url.path.startswith("/api/") and request.url.path not in public_auth_paths) or request.url.path == "/mcp" or request.url.path.startswith("/mcp/")
+    context = None
+    if requires_auth:
+        if not auth_token:
+            return JSONResponse(status_code=503, content={"detail": "服务端尚未配置 IDEA_AUTH_TOKEN"}, headers={"X-Request-ID": request_id})
+        token = extract_bearer(request)
+        principal = platform_store.authenticate(token) if token else None
+        if not principal:
+            platform_store.write_audit(
+                "authentication.failed",
+                request_id=request_id,
+                action=request.method,
+                decision="denied",
+                reason_code="invalid_token",
+                metadata={"path": request.url.path},
+            )
+            return JSONResponse(status_code=401, content={"detail": "需要有效的 Bearer Token"}, headers={"X-Request-ID": request_id})
+        requested_space_id = request.headers.get("X-Space-ID", "").strip()[:100] or None
+        space_id = platform_store.resolve_space(principal.principal_id, requested_space_id)
+        if not space_id:
+            platform_store.write_audit(
+                "authorization.denied",
+                request_id=request_id,
+                principal_id=principal.principal_id,
+                account_id=principal.account_id,
+                action=request.method,
+                decision="denied",
+                reason_code="space_access_denied",
+                resource_type="space",
+                resource_id=requested_space_id,
+                metadata={"path": request.url.path},
+            )
+            return JSONResponse(status_code=403, content={"detail": "无权访问指定空间"}, headers={"X-Request-ID": request_id})
+        context = RequestContext(
+            request_id=request_id,
+            principal=principal,
+            device_id=request.headers.get("X-Device-ID", "").strip()[:100] or None,
+            space_id=space_id,
+        )
+        request.state.context = context
+        platform_store.write_audit(
+            "authentication.succeeded",
+            context,
+            action=request.method,
+            decision="allowed",
+            metadata={"path": request.url.path},
+        )
+        platform_store.write_audit(
+            "authorization.allowed",
+            context,
+            action=request.method,
+            decision="allowed",
+            resource_type="space",
+            resource_id=space_id,
+            metadata={"path": request.url.path},
+        )
+    try:
+        response = await call_next(request)
+    except Exception:
+        if context:
+            platform_store.write_audit(
+                "request.failed",
+                context,
+                action=request.method,
+                decision="error",
+                metadata={"path": request.url.path},
+            )
+        raise
+    if context:
+        platform_store.write_audit(
+            "request.completed",
+            context,
+            action=request.method,
+            decision="allowed" if response.status_code < 400 else "error",
+            metadata={"path": request.url.path, "status_code": response.status_code},
+        )
+    response.headers["X-Request-ID"] = request_id
+    return response
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+static_dir = BASE_DIR / "static"
+if static_dir.exists():
+    app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+
+
+# ===================================================================
+# 账户认证
+# ===================================================================
+@app.post("/api/auth/email/send")
+async def send_email_verification(request: Request):
+    body = await request.json()
+    email = body.get("email", "")
+    try:
+        code = platform_store.issue_email_code(email, "sign_in")
+        delivery = email_sender.send_verification_code(platform_store.normalize_email(email), code, "sign_in")
+    except (ValueError, RuntimeError) as error:
+        raise HTTPException(status_code=400, detail=str(error))
+    response = {"status": "sent", "message": "验证码已发送，请查收邮箱"}
+    if delivery.development_code:
+        response["development_code"] = delivery.development_code
+    return response
+
+
+@app.post("/api/auth/email/verify")
+async def verify_email_login(request: Request):
+    body = await request.json()
+    email = body.get("email", "")
+    code = body.get("code", "")
+    device_id = request.headers.get("X-Device-ID", "").strip()[:100] or None
+    if not isinstance(code, str) or len(code.strip()) != 6:
+        raise HTTPException(status_code=400, detail="验证码格式无效")
+    try:
+        verified_email = platform_store.verify_email_code(email, "sign_in", code)
+        principal = platform_store.get_or_create_email_account(verified_email)
+        session = platform_store.issue_session(principal, device_id)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+    route = platform_store.route_for_principal(principal)
+    platform_store.write_audit(
+        "authentication.email_verified",
+        request_id=request.headers.get("X-Request-ID"),
+        principal_id=principal.principal_id,
+        account_id=principal.account_id,
+        device_id=device_id,
+        action="sign_in",
+        decision="allowed",
+        metadata={"route": route},
+    )
+    return {**session, "principal": {"principal_id": principal.principal_id, "account_id": principal.account_id, "role": principal.role}, "route": route}
+
+
+@app.post("/api/auth/refresh")
+async def refresh_login(request: Request):
+    body = await request.json()
+    refresh_token = body.get("refresh_token", "")
+    device_id = request.headers.get("X-Device-ID", "").strip()[:100] or None
+    if not isinstance(refresh_token, str) or not refresh_token:
+        raise HTTPException(status_code=400, detail="缺少刷新令牌")
+    try:
+        principal, session = platform_store.refresh_session(refresh_token, device_id)
+    except ValueError as error:
+        raise HTTPException(status_code=401, detail=str(error))
+    return {**session, "principal": {"principal_id": principal.principal_id, "account_id": principal.account_id, "role": principal.role}, "route": platform_store.route_for_principal(principal)}
+
+
+@app.post("/api/auth/logout")
+async def logout(request: Request):
+    body = await request.json()
+    refresh_token = body.get("refresh_token", "")
+    if isinstance(refresh_token, str) and refresh_token:
+        platform_store.revoke_session(refresh_token)
+    return {"status": "logged_out"}
+
+
+@app.post("/api/platform/owner/link-email")
+async def link_owner_email(request: Request):
+    context = require_context(request)
+    if context.principal.principal_id != "principal-owner":
+        raise HTTPException(status_code=403, detail="仅部署引导身份可以关联 Owner 邮箱")
+    body = await request.json()
+    email = body.get("email", "")
+    try:
+        linked = platform_store.link_owner_account(email)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+    if not linked:
+        raise HTTPException(status_code=404, detail="该邮箱尚未完成首次登录")
+    platform_store.write_audit("owner.account_linked", context, action="link_email", decision="allowed", metadata={"email": platform_store.normalize_email(email)})
+    return {"status": "linked"}
+
+
+# ===================================================================
+# 核心 API：独立智能体会话（非流式）
+# ===================================================================
+@app.post("/api/assistant/chat")
+async def chat_with_assistant(request: Request):
+    context = require_context(request)
+    body = await request.json()
+    agent_id = _routed_agent(context, body.get("agent_id"))
+    message = body.get("message", "")
+    if not isinstance(message, str):
+        raise HTTPException(status_code=400, detail="message 必须是字符串")
+    message = message.strip()
+    if len(message) > MAX_MESSAGE_LENGTH:
+        raise HTTPException(status_code=413, detail=f"message 不能超过 {MAX_MESSAGE_LENGTH} 个字符")
+    raw_conversation_id = body.get("conversation_id")
+    conversation_id = _validate_conversation_id(raw_conversation_id) if raw_conversation_id else None
+
+    if not message:
+        raise HTTPException(status_code=400, detail="消息不能为空")
+
+    conversation_id = _create_conversation(context, agent_id, conversation_id)
+
+    logger.info("[%s:%s] 用户: %s", agent_id, conversation_id[:8], message[:150])
+
+    platform_store.append_message(context.principal.account_id, context.space_id, conversation_id, "user", message)
+    history = platform_store.list_messages(context.principal.account_id, context.space_id, conversation_id, limit=MAX_HISTORY)
+
+    # IDEA 可获知其他会话的最近摘要；L1 的上下文严格隔离。
+    runner_message = message
+    if agent_id == "idea":
+        global_context = _global_context(context, conversation_id)
+        if global_context:
+            runner_message = f"以下是其他会话的最近摘要，仅作必要上下文：\n{global_context}\n\n当前用户请求：\n{message}"
+
+    result = await agent_runners[agent_id].run(user_message=runner_message, history=history[-10:])
+
+    reply = result.get("reply", "抱歉，我暂时无法处理这个请求。")
+    tool_calls_log = result.get("tool_calls_log", [])
+    iterations = result.get("iterations", 1)
+
+    # 提取调度信息（如果有 dispatch_to_agent）
+    dispatched_to = None
+    dispatch_result = None
+    for tc in tool_calls_log:
+        if tc.get("name") == "dispatch_to_agent":
+            dispatched_to = tc.get("args", {}).get("agent")
+            dispatch_result = tc.get("result", "")[:200]
+
+    # 记录回复
+    platform_store.append_message(
+        context.principal.account_id,
+        context.space_id,
+        conversation_id,
+        "assistant",
+        reply,
+        {"dispatched_to": dispatched_to, "tool_calls": [tc["name"] for tc in tool_calls_log]},
+    )
+
+    return {
+        "reply": reply,
+        "agent_id": agent_id,
+        "dispatched_to": dispatched_to,
+        "tool_calls": [{"name": tc["name"], "success": tc["success"]} for tc in tool_calls_log],
+        "iterations": iterations,
+        "conversation_id": conversation_id,
+    }
+
+# ===================================================================
+# 会话管理
+# ===================================================================
+@app.post("/api/reset")
+async def reset_conversation(request: Request):
+    """重置对话"""
+    body = await request.json()
+    cid = _validate_conversation_id(body.get("conversation_id"))
+    context = require_context(request)
+    if not platform_store.reset_conversation(context.principal.account_id, context.space_id, cid):
+        raise HTTPException(status_code=404, detail="会话不存在")
+    return {"status": "reset", "conversation_id": cid}
+
+
+@app.get("/api/conversations")
+async def list_conversations(request: Request):
+    """列出会话元数据，不返回完整消息内容。"""
+    context = require_context(request)
+    visible = platform_store.list_conversations(context.principal.account_id, context.space_id)
+    return {
+        "count": len(visible),
+        "conversations": [
+            {
+                "id": item["conversation_id"],
+                "agent_id": item["agent_id"],
+                "messages": item["message_count"],
+                "created_at": item["created_at"],
+                "updated_at": item["updated_at"],
+            }
+            for item in visible
+        ],
+    }
+
+
+@app.get("/api/conversations/{conversation_id}")
+async def get_conversation(conversation_id: str, request: Request):
+    conversation_id = _validate_conversation_id(conversation_id)
+    context = require_context(request)
+    conversation = platform_store.get_conversation(context.principal.account_id, context.space_id, conversation_id)
+    if not conversation:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    return {"id": conversation_id, **conversation, "messages": platform_store.list_messages(context.principal.account_id, context.space_id, conversation_id)}
+
+
+@app.post("/api/conversations/new")
+async def new_conversation(request: Request):
+    context = require_context(request)
+    body = await request.json()
+    agent_id = _routed_agent(context, body.get("agent_id", "idea"))
+    conversation_id = _create_conversation(context, agent_id)
+    conversation = platform_store.get_conversation(context.principal.account_id, context.space_id, conversation_id)
+    return {"id": conversation_id, "agent_id": agent_id, **conversation}
+
+
+@app.get("/api/agents")
+async def list_agents():
+    return {"agents": [{"id": agent_id, **info, "tools": agent_runners[agent_id].tools.get_all_tool_names()} for agent_id, info in AGENTS.items()]}
+
+
+@app.get("/api/platform/me")
+async def platform_me(request: Request):
+    context = require_context(request)
+    return {
+        "principal_id": context.principal.principal_id,
+        "account_id": context.principal.account_id,
+        "role": context.principal.role,
+        "token_id": context.principal.token_id,
+        "device_id": context.device_id,
+        "route": platform_store.route_for_principal(context.principal),
+    }
+
+
+@app.get("/api/platform/spaces")
+async def platform_spaces(request: Request):
+    context = require_context(request)
+    return {"spaces": platform_store.list_spaces(context.principal.principal_id)}
+
+
+@app.get("/api/platform/audit")
+async def platform_audit(request: Request, limit: int = 100):
+    context = require_context(request)
+    if context.principal.role != "owner":
+        raise HTTPException(status_code=403, detail="仅所有者可以查询平台审计")
+    limit = max(1, min(limit, 500))
+    return {"events": platform_store.list_audit(context.principal.account_id, limit)}
+
+
+@app.get("/api/workspaces")
+async def list_workspaces():
+    """Expose the small, user-approved workspace list to the desktop shell."""
+    labels = {
+        PROJECT_ROOT.resolve(): "Program IDEA",
+        SHARED_RAG_ROOT: "Shared RAG",
+        SHIROHA_ROOT: "Shiroha Personal Website",
+    }
+    return {
+        "workspaces": [
+            {"path": str(path), "label": labels.get(path, path.name)}
+            for path in existing_workspace_paths()
+        ]
+    }
+
+
+@app.get("/api/tasks")
+async def list_tasks(request: Request):
+    context = require_context(request)
+    visible = platform_store.list_tasks(context.principal.account_id, context.space_id)
+    return {"count": len(visible), "tasks": sorted(visible, key=lambda task: task["created_at"], reverse=True)}
+
+
+@app.post("/api/tasks")
+async def create_task(request: Request):
+    context = require_context(request)
+    body = await request.json()
+    title = body.get("title", "")
+    if not isinstance(title, str) or not (1 <= len(title.strip()) <= 500):
+        raise HTTPException(status_code=400, detail="title 必须为 1 到 500 个字符")
+    agent_id = _routed_agent(context, body.get("agent_id", "idea"))
+    conversation_id = body.get("conversation_id")
+    if conversation_id is not None:
+        conversation_id = _validate_conversation_id(conversation_id)
+        if not platform_store.get_conversation(context.principal.account_id, context.space_id, conversation_id):
+            raise HTTPException(status_code=404, detail="会话不存在")
+    return platform_store.create_task(context.principal.account_id, context.space_id, agent_id, title.strip(), str(body.get("description", ""))[:5000], conversation_id)
+
+
+@app.get("/api/sync/events")
+async def sync_events(request: Request, after: int = 0, limit: int = 200):
+    context = require_context(request)
+    after = max(0, after)
+    limit = max(1, min(limit, 500))
+    events = platform_store.list_sync_events(context.principal.account_id, context.space_id, after, limit)
+    return {"events": events, "next_cursor": events[-1]["event_id"] if events else after}
+
+
+# ===================================================================
+# MCP 协议端点（兼容 TRAE 连接）
+# ===================================================================
+@app.get("/mcp")
+async def mcp_discover():
+    return {
+        "name": "idea-standalone-orchestrator",
+        "version": "3.0.0",
+        "description": "IDEA 主 Agent — LLM 推理 + 工具调用 + 下级智能体调度",
+        "tools": idea_tool_registry.get_all_tool_names(),
+        "sub_agents": ["pwa", "researcher", "agent_producer"],
+    }
+
+
+@app.post("/mcp/tools/list")
+async def mcp_list_tools():
+    """列出所有 MCP 工具"""
+    schemas = idea_tool_registry.get_all_schemas()
+    return {
+        "tools": [
+            {
+                "name": s["name"],
+                "description": s["description"],
+                "inputSchema": s["parameters"],
+            }
+            for s in schemas
+        ]
+    }
+
+
+@app.post("/mcp/tools/call")
+async def mcp_call_tool(request: Request):
+    """MCP 工具调用"""
+    body = await request.json()
+    tool_name = body.get("name") or body.get("tool_name")
+    arguments = body.get("arguments") or body.get("input") or {}
+
+    logger.info(f"MCP tool call: {tool_name}")
+
+    func = idea_tool_registry.get_tool(tool_name)
+    if not func:
+        return {"content": [{"type": "text", "text": json.dumps({"error": f"未知工具: {tool_name}"}, ensure_ascii=False)}]}
+
+    try:
+        result = await func(**arguments)
+        return {
+            "content": [{
+                "type": "text",
+                "text": json.dumps({
+                    "success": result.success,
+                    "output": result.output[:5000],
+                    "metadata": result.metadata,
+                }, ensure_ascii=False, indent=2),
+            }]
+        }
+    except Exception as e:
+        logger.error(f"MCP tool error: {e}", exc_info=True)
+        return {"content": [{"type": "text", "text": json.dumps({"error": str(e)}, ensure_ascii=False)}]}
+
+
+# ===================================================================
+# 健康检查 & 系统信息
+# ===================================================================
+@app.get("/health")
+async def health():
+    llm_available = llm_client.has_api_key()
+    return {
+        "status": "healthy",
+        "service": "IDEA — Intelligent Delegation & Executive Architect",
+        "version": "3.0.0",
+        "llm_available": llm_available,
+        "timestamp": datetime.now().isoformat(),
+        "tools": {
+            "count": len(idea_tool_registry.get_all_tool_names()),
+            "names": idea_tool_registry.get_all_tool_names(),
+        },
+        "sub_agents": [
+            {"id": "pwa", "name": "IDEA-ProgramWorldAdminister", "role": "项目管理"},
+            {"id": "researcher", "name": "IDEA-Reasearcher", "role": "科研分析"},
+            {"id": "agent_producer", "name": "IDEA-AgentProducer", "role": "智能体创建"},
+        ],
+        "active_conversations": platform_store.count_active_conversations(),
+        "workspace": str(idea_tool_registry.workspace),
+    }
+
+
+# ===================================================================
+# 根路径
+# ===================================================================
+@app.get("/")
+async def index():
+    index_path = static_dir / "index.html"
+    if index_path.exists():
+        return FileResponse(str(index_path))
+    return {
+        "service": "IDEA — Intelligent Delegation & Executive Architect",
+        "version": "3.0.0",
+        "llm_available": llm_client.has_api_key(),
+        "web_ui": f"http://localhost:{config.get('server', {}).get('port', 8900)}",
+        "api_docs": "/docs",
+        "endpoints": {
+            "assistant_chat": "POST /api/assistant/chat",
+            "agents": "GET /api/agents",
+            "tasks": "GET/POST /api/tasks",
+            "conversations": "GET /api/conversations",
+            "health": "GET /health",
+            "mcp": "GET /mcp",
+            "mcp_tools": "POST /mcp/tools/list",
+            "mcp_call": "POST /mcp/tools/call",
+        },
+    }
+
+
+# ===================================================================
+# 启动
+# ===================================================================
+if __name__ == "__main__":
+    import uvicorn
+    host = config.get("server", {}).get("host", "0.0.0.0")
+    port = config.get("server", {}).get("port", 8900)
+
+    has_key = llm_client.has_api_key()
+    provider = llm_client.default_provider
+    model = llm_client.default_model
+
+    logger.info("=" * 50)
+    logger.info("  IDEA 智能体调度中心 v3.0")
+    logger.info(f"  LLM: {provider} / {model}")
+    logger.info(f"  LLM 状态: {'已配置' if has_key else '未配置 API Key（模板模式）'}")
+    logger.info(f"  IDEA 工具数: {len(idea_tool_registry.get_all_tool_names())}")
+    logger.info(f"  访问: http://localhost:{port}")
+    logger.info(f"  API 文档: http://localhost:{port}/docs")
+    logger.info("=" * 50)
+
+    uvicorn.run(app, host=host, port=port, log_level="info")

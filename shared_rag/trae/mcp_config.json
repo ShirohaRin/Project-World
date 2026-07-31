@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "rag-knowledge-base": {
+      "command": "python",
+      "args": [
+        "D:\\shared_rag\\trae\\rag_mcp_proxy.py"
+      ],
+      "env": {
+        "RAG_SERVER_URL": "https://你的域名",
+        "RAG_AGENT_TOKEN": "从文件管理器的个人 Agent Token 中复制"
+      }
+    }
+  }
+}

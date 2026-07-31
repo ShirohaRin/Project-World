@@ -1,0 +1,17 @@
+[Unit]
+Description=IDEA Multi-Agent MCP Server
+After=network.target
+
+[Service]
+Type=simple
+User=idea
+WorkingDirectory=/opt/idea-mcp-server
+EnvironmentFile=/opt/idea-mcp-server/.env
+ExecStart=/opt/idea-mcp-server/venv/bin/python /opt/idea-mcp-server/main.py
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:/opt/idea-mcp-server/logs/server.log
+StandardError=append:/opt/idea-mcp-server/logs/error.log
+
+[Install]
+WantedBy=multi-user.target

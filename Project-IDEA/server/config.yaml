@@ -1,0 +1,42 @@
+# IDEA MCP Server 配置文件
+# 部署到 Linux 服务器后根据实际环境修改
+
+server:
+  host: "0.0.0.0"          # 监听地址（生产环境建议 Nginx 反向代理）
+  port: 8900               # 监听端口
+  workers: 4               # uvicorn worker 数
+
+auth:
+  token: "your-secret-token-here-change-in-production"   # 仅部署引导与受限 MCP 兼容用途；日常客户端使用邮箱登录会话
+
+memory:
+  backend: "sqlite"         # sqlite / chromadb（向量检索）/ redis
+  db_path: "./memory/idea_memory.db"
+  # 如果使用 ChromaDB 做语义记忆:
+  # backend: "chromadb"
+  # chroma_path: "./memory/chroma_db"
+
+logging:
+  level: "INFO"             # DEBUG / INFO / WARNING / ERROR
+  max_log_size_mb: 50
+
+agents:
+  orchestrator:
+    model: "gpt-5.6-terra"         # IDEA 使用的模型
+    max_chain_depth: 5              # 最大智能体调用链深度
+
+  pwa:
+    model: "glm-5.2"
+    max_plan_items: 50
+
+  researcher:
+    model: "Doubao-Seed-2.1-Pro"
+    search_timeout_seconds: 60
+    max_sources_per_review: 50
+
+  agent_producer:
+    model: "glm-5.2"
+    test_iterations: 3
+
+  assistant:
+    model: "glm-5.2"

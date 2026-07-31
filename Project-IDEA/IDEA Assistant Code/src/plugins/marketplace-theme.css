@@ -1,0 +1,27 @@
+:root {
+  --plugin-market-surface: #252526;
+  --plugin-market-border: #383838;
+  --plugin-market-text: #dce1e8;
+  --plugin-market-muted: #9ba4b0;
+  --plugin-market-input: #1e1e1e;
+  --plugin-market-accent: #3794ff;
+  --plugin-market-icon-bg: #173d68;
+  --plugin-market-icon-text: #8dc2ff;
+  --plugin-market-enabled-bg: #183a30;
+  --plugin-market-enabled-border: #1f805d;
+  --plugin-market-enabled-text: #8addba;
+}
+
+.theme-light {
+  --plugin-market-surface: #f7f8fa;
+  --plugin-market-border: #d8dce2;
+  --plugin-market-text: #252b35;
+  --plugin-market-muted: #687382;
+  --plugin-market-input: #ffffff;
+  --plugin-market-accent: #1674d1;
+  --plugin-market-icon-bg: #e4f0ff;
+  --plugin-market-icon-text: #1768bd;
+  --plugin-market-enabled-bg: #e5f7ef;
+  --plugin-market-enabled-border: #5ab88d;
+  --plugin-market-enabled-text: #176b4a;
+}

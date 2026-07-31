@@ -1,0 +1,40 @@
+{
+  "database": "papers.sqlite3",
+  "initial_lookback_days": 30,
+  "default_limit": 100,
+  "sources": {
+    "openalex": {
+      "enabled": true,
+      "limit": 100,
+      "cursor": "*",
+      "mailto": ""
+    },
+    "crossref": {
+      "enabled": true,
+      "limit": 100,
+      "mailto": ""
+    },
+    "semantic_scholar": {
+      "enabled": false,
+      "limit": 100,
+      "query": "large language model retrieval",
+      "api_key": ""
+    },
+    "core": {
+      "enabled": false,
+      "limit": 100,
+      "query": "large language model retrieval",
+      "api_key": ""
+    },
+    "europe_pmc": {
+      "enabled": false,
+      "limit": 100,
+      "query": "machine learning"
+    },
+    "arxiv": {
+      "enabled": true,
+      "limit": 50,
+      "query": "cat:cs.AI OR cat:cs.LG"
+    }
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "rag-admin-knowledge": {
+      "command": "python",
+      "args": [
+        "D:\\shared_rag\\trae\\rag_mcp_admin_proxy.py"
+      ],
+      "env": {
+        "RAG_SERVER_URL": "https://你的域名",
+        "RAG_ADMIN_KEY": "请在本机环境变量中配置，不要写入共享配置文件"
+      }
+    }
+  }
+}

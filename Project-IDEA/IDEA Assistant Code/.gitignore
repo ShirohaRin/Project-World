@@ -1,0 +1,14 @@
+# Dependencies and generated build output
+node_modules
+dist
+dist-electron
+release
+
+# Local logs and tooling state
+logs
+*.log
+*.local
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store

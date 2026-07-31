@@ -1,0 +1,82 @@
+# ============================================================
+# 共享 RAG 知识库 - Docker Compose 配置
+# ============================================================
+#
+# 部署指令（在服务器上执行）：
+#
+#   1) 上传文件到服务器：
+#      scp -r ./rag-server/ user@服务器IP:/opt/server/
+#
+#   2) SSH 登录服务器并进入目录：
+#      cd /opt/server
+#
+#   3) 创建文档目录（共 4 个集合）：
+#      mkdir -p knowledge_public knowledge_data knowledge_private knowledge_novel
+#
+#   4) 设置密码（在 .env 文件中）：
+#      RAG_FM_UPLOAD_PASSWORD=访客上传密码
+#      RAG_FM_ADMIN_PASSWORD=管理员密码
+#
+#   5) 启动服务：
+#      docker compose up -d
+#
+#   6) 查看日志：
+#      docker compose logs -f
+#
+#   7) 验证：
+#      curl http://localhost:8080/api/health
+# ============================================================
+
+version: "3.8"
+
+services:
+  rag-server:
+    build: .
+    container_name: rag-knowledge-server
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      # 四个知识库文档目录（挂载到容器内）
+      - ./knowledge_public:/app/knowledge_public
+      - ./knowledge_data:/app/knowledge_data
+      - ./knowledge_private:/app/knowledge_private
+      - ./knowledge_novel:/app/knowledge_novel
+      # FAISS 向量库持久化（重启不丢失）
+      - ./vector_data:/app/vector_data
+    environment:
+      # ===== API Key（MCP / LangBot 用，保持不变） =====
+      - RAG_ADMIN_KEY=${RAG_ADMIN_KEY:-b46cd3cf9e40c1e00897876dbd1a67874e17660df67db240}
+      - RAG_LANGBOT_KEY=${RAG_LANGBOT_KEY:-5ddff4eaa9e117ffc0096a3e2bc695bc146fd6bc5795f108}
+      - RAG_RESEARCH_KEY=${RAG_RESEARCH_KEY:-zMFucoCmfaUyW1QIbeglOkwL2RNsA7pdihKHnZVX}
+      - RAG_PUBLIC_KEY=${RAG_PUBLIC_KEY:-3nySGhzi0WFOK9XB7AkUpsTjHVQ8Yg6Dabru521P}
+      - RAG_INGEST_KEY=${RAG_INGEST_KEY:-6134bd3bfc06e81d1bef14b1e66d1c5a275a3916bec5e358}
+
+      # ===== 文件管理器密码（新增） =====
+      - RAG_FM_ADMIN_PASSWORD=${RAG_FM_ADMIN_PASSWORD:-}
+      - RAG_FM_ADMIN_USERNAME=${RAG_FM_ADMIN_USERNAME:-admin}
+      - RAG_FM_JWT_SECRET=${RAG_FM_JWT_SECRET:-}
+      - RAG_FM_JWT_EXPIRY_HOURS=${RAG_FM_JWT_EXPIRY_HOURS:-24}
+      - RAG_FM_USERS_FILE=${RAG_FM_USERS_FILE:-/app/vector_data/file_manager_users.json}
+      - RAG_FM_AGENT_TOKEN_EXPIRY_DAYS=${RAG_FM_AGENT_TOKEN_EXPIRY_DAYS:-30}
+
+      # ===== 可选：模型参数 =====
+      - RAG_EMBEDDING_MODEL=${RAG_EMBEDDING_MODEL:-BAAI/bge-small-zh-v1.5}
+
+      # ===== 可选：按集合独立分块参数 =====
+      - RAG_CHUNK_SIZE_NOVEL=${RAG_CHUNK_SIZE_NOVEL:-2000}
+      - RAG_CHUNK_OVERLAP_NOVEL=${RAG_CHUNK_OVERLAP_NOVEL:-300}
+      - RAG_CHUNK_SIZE_PUBLIC=${RAG_CHUNK_SIZE_PUBLIC:-1200}
+      - RAG_CHUNK_OVERLAP_PUBLIC=${RAG_CHUNK_OVERLAP_PUBLIC:-200}
+      - RAG_CHUNK_SIZE_PRIVATE=${RAG_CHUNK_SIZE_PRIVATE:-800}
+      - RAG_CHUNK_OVERLAP_PRIVATE=${RAG_CHUNK_OVERLAP_PRIVATE:-100}
+      - RAG_CHUNK_SIZE_DATA=${RAG_CHUNK_SIZE_DATA:-1200}
+      - RAG_CHUNK_OVERLAP_DATA=${RAG_CHUNK_OVERLAP_DATA:-200}
+
+      # ===== 国内服务器必设：HuggingFace 镜像 =====
+      - HF_ENDPOINT=${HF_ENDPOINT:-https://hf-mirror.com}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/api/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3

@@ -1,0 +1,42 @@
+# 共享 RAG 知识库 - Docker Compose 部署
+#
+# 启动：docker compose up -d
+# 停止：docker compose down
+# 查看日志：docker compose logs -f
+
+version: "3.8"
+
+services:
+  rag-server:
+    build: ./server
+    container_name: rag-knowledge-server
+    ports:
+      - "8080:8080"
+    volumes:
+      # 把你要索引的文档放到这个目录
+      - ./knowledge_docs:/app/knowledge_docs
+      # 向量数据库持久化（重启不丢失）
+      - ./chroma_data:/app/chroma_db
+    environment:
+      - RAG_API_KEY=${RAG_API_KEY:-}              # 可选，API Key 鉴权
+      - RAG_EMBEDDING_MODEL=paraphrase-multilingual-MiniLM-L12-v2
+      - RAG_CHUNK_SIZE=1200
+      - RAG_CHUNK_OVERLAP=200
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # 可选：如果你用 LangBot Docker 部署，可以加入
+  # langbot:
+  #   image: langbot/langbot:latest
+  #   container_name: langbot
+  #   ports:
+  #     - "5300:5300"
+  #   volumes:
+  #     - ./langbot_data:/app/data
+  #   depends_on:
+  #     - rag-server
+  #   restart: unless-stopped
