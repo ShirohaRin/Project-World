@@ -12,6 +12,9 @@ auth:
 memory:
   backend: "sqlite"         # sqlite / chromadb（向量检索）/ redis
   db_path: "./memory/idea_memory.db"
+  long_term:
+    default_chat_read: false
+    search_limit: 5
   # 如果使用 ChromaDB 做语义记忆:
   # backend: "chromadb"
   # chroma_path: "./memory/chroma_db"

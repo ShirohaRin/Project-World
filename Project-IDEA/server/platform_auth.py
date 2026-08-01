@@ -189,6 +189,20 @@ class PlatformStore:
                     created_at REAL NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_sync_events_scope ON sync_events(account_id, space_id, event_id);
+                CREATE TABLE IF NOT EXISTS long_term_memories (
+                    memory_id TEXT PRIMARY KEY,
+                    account_id TEXT NOT NULL,
+                    space_id TEXT NOT NULL,
+                    namespace TEXT NOT NULL,
+                    category TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'active',
+                    created_by TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    deleted_at REAL
+                );
+                CREATE INDEX IF NOT EXISTS idx_memories_scope ON long_term_memories(account_id, space_id, namespace, status, updated_at DESC);
                 """
             )
             columns = {row["name"] for row in connection.execute("PRAGMA table_info(accounts)").fetchall()}
@@ -418,6 +432,61 @@ class PlatformStore:
         with self._connect() as connection:
             rows = connection.execute("SELECT * FROM sync_events WHERE account_id = ? AND space_id = ? AND event_id > ? ORDER BY event_id LIMIT ?", (account_id, space_id, after_event_id, limit)).fetchall()
             return [{**dict(row), "payload": json.loads(row["payload_json"])} for row in rows]
+
+    def create_memory(self, account_id: str, space_id: str, namespace: str, category: str, content: str, created_by: str) -> dict:
+        memory_id, now = uuid.uuid4().hex, time.time()
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT INTO long_term_memories(memory_id, account_id, space_id, namespace, category, content, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (memory_id, account_id, space_id, namespace, category, content, created_by, now, now),
+            )
+            self._append_sync_event(connection, account_id, space_id, "memory", memory_id, "memory.created", {"namespace": namespace, "category": category, "created_at": now})
+        return {"id": memory_id, "namespace": namespace, "category": category, "content": content, "status": "active", "created_at": now, "updated_at": now}
+
+    def list_memories(self, account_id: str, space_id: str, namespaces: list[str], query: Optional[str] = None, limit: int = 50) -> list[dict]:
+        if not namespaces:
+            return []
+        personal_namespaces = [namespace for namespace in namespaces if not namespace.startswith("space/")]
+        space_namespace = f"space/{space_id}"
+        placeholders = ", ".join("?" for _ in personal_namespaces) or "''"
+        params: list = [space_id, space_namespace, account_id, *personal_namespaces]
+        query_sql = f"SELECT * FROM long_term_memories WHERE space_id = ? AND status = 'active' AND (namespace = ? OR (account_id = ? AND namespace IN ({placeholders})))"
+        if query:
+            query_sql += " AND content LIKE ?"
+            params.append(f"%{query}%")
+        query_sql += " ORDER BY updated_at DESC LIMIT ?"
+        params.append(limit)
+        with self._connect() as connection:
+            rows = connection.execute(query_sql, params).fetchall()
+            return [{"id": row["memory_id"], "namespace": row["namespace"], "category": row["category"], "content": row["content"], "status": row["status"], "created_at": row["created_at"], "updated_at": row["updated_at"]} for row in rows]
+
+    def update_memory(self, account_id: str, space_id: str, memory_id: str, namespaces: list[str], category: str, content: str) -> Optional[dict]:
+        if not namespaces:
+            return None
+        personal_namespaces = [namespace for namespace in namespaces if not namespace.startswith("space/")]
+        placeholders = ", ".join("?" for _ in personal_namespaces) or "''"
+        now = time.time()
+        with self._connect() as connection:
+            row = connection.execute(f"SELECT * FROM long_term_memories WHERE memory_id = ? AND space_id = ? AND status = 'active' AND (namespace = ? OR (account_id = ? AND namespace IN ({placeholders})))", (memory_id, space_id, f"space/{space_id}", account_id, *personal_namespaces)).fetchone()
+            if not row:
+                return None
+            connection.execute("UPDATE long_term_memories SET category = ?, content = ?, updated_at = ? WHERE memory_id = ?", (category, content, now, memory_id))
+            self._append_sync_event(connection, account_id, space_id, "memory", memory_id, "memory.updated", {"namespace": row["namespace"], "category": category, "updated_at": now})
+            return {"id": memory_id, "namespace": row["namespace"], "category": category, "content": content, "status": "active", "created_at": row["created_at"], "updated_at": now}
+
+    def delete_memory(self, account_id: str, space_id: str, memory_id: str, namespaces: list[str]) -> bool:
+        if not namespaces:
+            return False
+        personal_namespaces = [namespace for namespace in namespaces if not namespace.startswith("space/")]
+        placeholders = ", ".join("?" for _ in personal_namespaces) or "''"
+        now = time.time()
+        with self._connect() as connection:
+            row = connection.execute(f"SELECT namespace FROM long_term_memories WHERE memory_id = ? AND space_id = ? AND status = 'active' AND (namespace = ? OR (account_id = ? AND namespace IN ({placeholders})))", (memory_id, space_id, f"space/{space_id}", account_id, *personal_namespaces)).fetchone()
+            if not row:
+                return False
+            connection.execute("UPDATE long_term_memories SET status = 'deleted', deleted_at = ?, updated_at = ? WHERE memory_id = ?", (now, now, memory_id))
+            self._append_sync_event(connection, account_id, space_id, "memory", memory_id, "memory.deleted", {"namespace": row["namespace"], "deleted_at": now})
+            return True
 
     @staticmethod
     def _append_sync_event(connection, account_id: str, space_id: str, aggregate_type: str, aggregate_id: str, event_type: str, payload: dict) -> None:

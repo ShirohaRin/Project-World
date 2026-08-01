@@ -28,6 +28,12 @@ type StoredServiceConfig = ServiceConfig & { encryptedAccessToken?: string; encr
 type ServiceHealth = { status: string; version?: string; llmAvailable?: boolean }
 type ChatResponse = { reply: string; conversationId: string; agentId: string; dispatchedTo?: string | null }
 type LoginResponse = { route: string; principal: { account_id: string; role: string } }
+type ConversationSummary = { id: string; agent_id: string; messages: number; created_at: number; updated_at: number }
+type ConversationDetail = { id: string; messages: Array<{ id: string; role: 'user' | 'assistant'; content: string; timestamp: number }> }
+type TaskSummary = { id: string; title: string; conversation_id?: string | null; status: string; created_at: number }
+type SyncSnapshot = { events: Array<{ event_id: number; event_type: string }>; next_cursor: number }
+type MemoryScope = 'personal' | 'space' | 'owner'
+type MemoryRecord = { id: string; namespace: string; category: string; content: string; status: string; created_at: number; updated_at: number }
 
 function serviceConfigPath(): string {
   return join(app.getPath('userData'), 'service-config.json')
@@ -39,7 +45,9 @@ function createDeviceId(): string {
 
 function normalizeServiceUrl(value: string): string {
   const url = new URL(value.trim())
-  if (url.protocol !== 'https:' && url.protocol !== 'http:') throw new Error('服务地址必须使用 HTTP 或 HTTPS')
+  const isLoopback = url.hostname === 'localhost' || url.hostname === '127.0.0.1' || url.hostname === '[::1]'
+  if (url.protocol !== 'https:' && !(isDevelopment && isLoopback && url.protocol === 'http:')) throw new Error('生产环境服务地址必须使用 HTTPS')
+  if (!isDevelopment && url.hostname !== 'shiroha-rin.world') throw new Error('生产环境仅允许连接受信 IDEA 服务地址')
   return url.toString().replace(/\/$/, '')
 }
 
@@ -318,16 +326,59 @@ app.whenReady().then(async () => {
     }
     return { status: body.status ?? 'unknown', version: body.version, llmAvailable: body.llm_available }
   })
-  ipcMain.handle('service:chat', async (_event, request: { agentId: string; message: string; conversationId?: string }): Promise<ChatResponse> => {
+  ipcMain.handle('service:chat', async (_event, request: { agentId: string; message: string; conversationId?: string; useMemory?: boolean }): Promise<ChatResponse> => {
     const response = await serviceRequest('/api/assistant/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ agent_id: request.agentId, message: request.message, conversation_id: request.conversationId }),
+      body: JSON.stringify({ agent_id: request.agentId, message: request.message, conversation_id: request.conversationId, use_memory: request.useMemory === true }),
     }, true)
     const body = await response.json().catch(() => ({})) as { detail?: string; reply?: string; conversation_id?: string; agent_id?: string; dispatched_to?: string | null }
     if (!response.ok) throw new Error(body.detail || `服务请求失败 (${response.status})`)
     if (!body.reply || !body.conversation_id || !body.agent_id) throw new Error('服务返回了无效的聊天响应')
     return { reply: body.reply, conversationId: body.conversation_id, agentId: body.agent_id, dispatchedTo: body.dispatched_to }
+  })
+  ipcMain.handle('service:conversations', async (): Promise<ConversationSummary[]> => {
+    const response = await serviceRequest('/api/conversations', {}, true)
+    const body = await response.json().catch(() => ({})) as { detail?: string; conversations?: ConversationSummary[] }
+    if (!response.ok || !body.conversations) throw new Error(body.detail || `会话读取失败 (${response.status})`)
+    return body.conversations
+  })
+  ipcMain.handle('service:conversation', async (_event, conversationId: string): Promise<ConversationDetail> => {
+    const response = await serviceRequest(`/api/conversations/${encodeURIComponent(conversationId)}`, {}, true)
+    const body = await response.json().catch(() => ({})) as { detail?: string; id?: string; messages?: ConversationDetail['messages'] }
+    if (!response.ok || !body.id || !body.messages) throw new Error(body.detail || `会话读取失败 (${response.status})`)
+    return { id: body.id, messages: body.messages }
+  })
+  ipcMain.handle('service:tasks', async (): Promise<TaskSummary[]> => {
+    const response = await serviceRequest('/api/tasks', {}, true)
+    const body = await response.json().catch(() => ({})) as { detail?: string; tasks?: TaskSummary[] }
+    if (!response.ok || !body.tasks) throw new Error(body.detail || `任务读取失败 (${response.status})`)
+    return body.tasks
+  })
+  ipcMain.handle('service:sync-events', async (_event, after: number): Promise<SyncSnapshot> => {
+    const response = await serviceRequest(`/api/sync/events?after=${Math.max(0, after)}`, {}, true)
+    const body = await response.json().catch(() => ({})) as { detail?: string; events?: SyncSnapshot['events']; next_cursor?: number }
+    if (!response.ok || !body.events || typeof body.next_cursor !== 'number') throw new Error(body.detail || `同步读取失败 (${response.status})`)
+    return { events: body.events, next_cursor: body.next_cursor }
+  })
+  ipcMain.handle('service:memories', async (): Promise<MemoryRecord[]> => {
+    const response = await serviceRequest('/api/memories', {}, true)
+    const body = await response.json().catch(() => ({})) as { detail?: string; memories?: MemoryRecord[] }
+    if (!response.ok || !body.memories) throw new Error(body.detail || `记忆读取失败 (${response.status})`)
+    return body.memories
+  })
+  ipcMain.handle('service:create-memory', async (_event, memory: { scope: MemoryScope; category: string; content: string }): Promise<MemoryRecord> => {
+    const response = await serviceRequest('/api/memories', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...memory, confirmed: true }) }, true)
+    const body = await response.json().catch(() => ({})) as { detail?: string; id?: string }
+    if (!response.ok || !body.id) throw new Error(body.detail || `记忆保存失败 (${response.status})`)
+    return body as MemoryRecord
+  })
+  ipcMain.handle('service:delete-memory', async (_event, memoryId: string): Promise<void> => {
+    const response = await serviceRequest(`/api/memories/${encodeURIComponent(memoryId)}`, { method: 'DELETE' }, true)
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({})) as { detail?: string }
+      throw new Error(body.detail || `记忆删除失败 (${response.status})`)
+    }
   })
   ipcMain.handle('workspace:choose', async () => {
     const result = await dialog.showOpenDialog({ properties: ['openDirectory', 'createDirectory'] })

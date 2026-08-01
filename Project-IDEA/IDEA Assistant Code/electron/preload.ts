@@ -15,7 +15,14 @@ contextBridge.exposeInMainWorld('ideaDesktop', {
   verifyEmailCode: (email: string, code: string): Promise<{ route: string; principal: { account_id: string; role: string } }> => ipcRenderer.invoke('service:verify-email-code', email, code),
   logout: (): Promise<void> => ipcRenderer.invoke('service:logout'),
   testService: () => ipcRenderer.invoke('service:health'),
-  sendChat: (request: { agentId: string; message: string; conversationId?: string }) => ipcRenderer.invoke('service:chat', request),
+  sendChat: (request: { agentId: string; message: string; conversationId?: string; useMemory?: boolean }) => ipcRenderer.invoke('service:chat', request),
+  listConversations: () => ipcRenderer.invoke('service:conversations'),
+  getConversation: (conversationId: string) => ipcRenderer.invoke('service:conversation', conversationId),
+  listTasks: () => ipcRenderer.invoke('service:tasks'),
+  getSyncEvents: (after: number) => ipcRenderer.invoke('service:sync-events', after),
+  listMemories: () => ipcRenderer.invoke('service:memories'),
+  createMemory: (memory: { scope: 'personal' | 'space' | 'owner'; category: string; content: string }) => ipcRenderer.invoke('service:create-memory', memory),
+  deleteMemory: (memoryId: string) => ipcRenderer.invoke('service:delete-memory', memoryId),
   onExecutionOutput: (listener: (event: ExecutionEvent) => void) => {
     const handler = (_event: Electron.IpcRendererEvent, output: ExecutionEvent) => listener(output)
     ipcRenderer.on('execution:output', handler)

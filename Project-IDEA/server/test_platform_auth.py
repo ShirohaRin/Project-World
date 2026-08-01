@@ -141,6 +141,52 @@ class PlatformApiTests(unittest.TestCase):
         second = self.client.post("/api/auth/email/verify", json={"email": "member@example.com", "code": code})
         self.assertEqual(second.status_code, 400)
 
+    def test_long_term_memories_require_explicit_write_and_support_soft_delete(self):
+        denied = self.client.get("/api/memories")
+        self.assertEqual(denied.status_code, 401)
+
+        unconfirmed = self.client.post(
+            "/api/memories",
+            headers=self.headers,
+            json={"scope": "owner", "category": "preference", "content": "Do not save this."},
+        )
+        self.assertEqual(unconfirmed.status_code, 400)
+
+        created = self.client.post(
+            "/api/memories",
+            headers=self.headers,
+            json={"scope": "owner", "category": "preference", "content": "Use Chinese by default.", "confirmed": True},
+        )
+        self.assertEqual(created.status_code, 200)
+        memory_id = created.json()["id"]
+
+        listed = self.client.get("/api/memories?query=Chinese", headers=self.headers)
+        self.assertEqual(listed.status_code, 200)
+        self.assertTrue(any(item["id"] == memory_id for item in listed.json()["memories"]))
+
+        updated = self.client.put(
+            f"/api/memories/{memory_id}",
+            headers=self.headers,
+            json={"category": "preference", "content": "Use Simplified Chinese by default."},
+        )
+        self.assertEqual(updated.status_code, 200)
+        self.assertIn("Simplified", updated.json()["content"])
+
+        deleted = self.client.delete(f"/api/memories/{memory_id}", headers=self.headers)
+        self.assertEqual(deleted.status_code, 200)
+        self.assertFalse(any(item["id"] == memory_id for item in self.client.get("/api/memories", headers=self.headers).json()["memories"]))
+
+    def test_member_cannot_use_owner_memory_scope(self):
+        sent = self.client.post("/api/auth/email/send", json={"email": "memory-member@example.com"})
+        login = self.client.post("/api/auth/email/verify", json={"email": "memory-member@example.com", "code": sent.json()["development_code"]})
+        headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
+        denied = self.client.post(
+            "/api/memories",
+            headers=headers,
+            json={"scope": "owner", "category": "private", "content": "must not be written", "confirmed": True},
+        )
+        self.assertEqual(denied.status_code, 403)
+
 
 if __name__ == "__main__":
     unittest.main()

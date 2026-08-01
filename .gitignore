@@ -27,3 +27,8 @@ Project-IDEA/server/backups/
 Project-IDEA/server/static/
 ShirohaV1.1/
 paper-watcher/*.sqlite3
+**/*.sqlite3
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx

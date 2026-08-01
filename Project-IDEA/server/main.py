@@ -380,6 +380,7 @@ AGENTS = {
 
 MAX_HISTORY = 50
 MAX_MESSAGE_LENGTH = 20_000
+MAX_MEMORY_LENGTH = 10_000
 VALID_ID = re.compile(r"^[A-Za-z0-9_-]{1,100}$")
 
 
@@ -409,6 +410,35 @@ def _create_conversation(context: RequestContext, agent_id: str, conversation_id
         raise HTTPException(status_code=409, detail=str(error))
     except LookupError:
         raise HTTPException(status_code=404, detail="会话不存在")
+
+
+def _memory_namespaces(context: RequestContext) -> dict[str, str]:
+    namespaces = {
+        "personal": f"user/{context.principal.account_id}",
+        "space": f"space/{context.space_id}",
+    }
+    if platform_store.route_for_principal(context.principal) == "owner_idea":
+        namespaces["owner"] = f"owner/{context.principal.account_id}"
+    return namespaces
+
+
+def _memory_scope(context: RequestContext, scope: object) -> tuple[str, str]:
+    if not isinstance(scope, str) or scope not in _memory_namespaces(context):
+        raise HTTPException(status_code=403, detail="无权使用指定记忆范围")
+    return scope, _memory_namespaces(context)[scope]
+
+
+def _memory_context(context: RequestContext, query: str) -> str:
+    memories = platform_store.list_memories(
+        context.principal.account_id,
+        context.space_id,
+        list(_memory_namespaces(context).values()),
+        query=query,
+        limit=5,
+    )
+    if not memories:
+        return ""
+    return "\n".join(f"- [{item['category']}] {item['content']}" for item in memories)
 
 
 def _global_context(context: RequestContext, exclude_conversation_id: str) -> str:
@@ -649,6 +679,10 @@ async def chat_with_assistant(request: Request):
         global_context = _global_context(context, conversation_id)
         if global_context:
             runner_message = f"以下是其他会话的最近摘要，仅作必要上下文：\n{global_context}\n\n当前用户请求：\n{message}"
+    if body.get("use_memory") is True:
+        memory_context = _memory_context(context, message)
+        if memory_context:
+            runner_message = f"以下是用户明确保存的长期记忆，仅作必要上下文：\n{memory_context}\n\n当前用户请求：\n{runner_message}"
 
     result = await agent_runners[agent_id].run(user_message=runner_message, history=history[-10:])
 
@@ -807,6 +841,70 @@ async def create_task(request: Request):
         if not platform_store.get_conversation(context.principal.account_id, context.space_id, conversation_id):
             raise HTTPException(status_code=404, detail="会话不存在")
     return platform_store.create_task(context.principal.account_id, context.space_id, agent_id, title.strip(), str(body.get("description", ""))[:5000], conversation_id)
+
+
+@app.get("/api/memories")
+async def list_memories(request: Request, query: Optional[str] = None, limit: int = 50):
+    context = require_context(request)
+    if query is not None and not isinstance(query, str):
+        raise HTTPException(status_code=400, detail="query 必须是字符串")
+    limit = max(1, min(limit, 100))
+    memories = platform_store.list_memories(
+        context.principal.account_id,
+        context.space_id,
+        list(_memory_namespaces(context).values()),
+        query=query.strip() if query else None,
+        limit=limit,
+    )
+    return {"count": len(memories), "memories": memories}
+
+
+@app.post("/api/memories")
+async def create_memory(request: Request):
+    context = require_context(request)
+    body = await request.json()
+    if body.get("confirmed") is not True:
+        raise HTTPException(status_code=400, detail="长期记忆写入需要明确确认")
+    scope, namespace = _memory_scope(context, body.get("scope", "personal"))
+    content = body.get("content", "")
+    category = body.get("category", "general")
+    if not isinstance(content, str) or not (1 <= len(content.strip()) <= MAX_MEMORY_LENGTH):
+        raise HTTPException(status_code=400, detail=f"content 必须为 1 到 {MAX_MEMORY_LENGTH} 个字符")
+    if not isinstance(category, str) or not (1 <= len(category.strip()) <= 80):
+        raise HTTPException(status_code=400, detail="category 必须为 1 到 80 个字符")
+    memory = platform_store.create_memory(context.principal.account_id, context.space_id, namespace, category.strip(), content.strip(), context.principal.principal_id)
+    platform_store.write_audit("memory.created", context, resource_type="memory", resource_id=memory["id"], action="create", decision="allowed", metadata={"scope": scope, "category": memory["category"]})
+    return memory
+
+
+@app.put("/api/memories/{memory_id}")
+async def update_memory(memory_id: str, request: Request):
+    context = require_context(request)
+    if not VALID_ID.fullmatch(memory_id):
+        raise HTTPException(status_code=400, detail="memory_id 格式无效")
+    body = await request.json()
+    content = body.get("content", "")
+    category = body.get("category", "general")
+    if not isinstance(content, str) or not (1 <= len(content.strip()) <= MAX_MEMORY_LENGTH):
+        raise HTTPException(status_code=400, detail=f"content 必须为 1 到 {MAX_MEMORY_LENGTH} 个字符")
+    if not isinstance(category, str) or not (1 <= len(category.strip()) <= 80):
+        raise HTTPException(status_code=400, detail="category 必须为 1 到 80 个字符")
+    memory = platform_store.update_memory(context.principal.account_id, context.space_id, memory_id, list(_memory_namespaces(context).values()), category.strip(), content.strip())
+    if not memory:
+        raise HTTPException(status_code=404, detail="记忆不存在")
+    platform_store.write_audit("memory.updated", context, resource_type="memory", resource_id=memory_id, action="update", decision="allowed", metadata={"category": memory["category"]})
+    return memory
+
+
+@app.delete("/api/memories/{memory_id}")
+async def delete_memory(memory_id: str, request: Request):
+    context = require_context(request)
+    if not VALID_ID.fullmatch(memory_id):
+        raise HTTPException(status_code=400, detail="memory_id 格式无效")
+    if not platform_store.delete_memory(context.principal.account_id, context.space_id, memory_id, list(_memory_namespaces(context).values())):
+        raise HTTPException(status_code=404, detail="记忆不存在")
+    platform_store.write_audit("memory.deleted", context, resource_type="memory", resource_id=memory_id, action="delete", decision="allowed")
+    return {"id": memory_id, "status": "deleted"}
 
 
 @app.get("/api/sync/events")

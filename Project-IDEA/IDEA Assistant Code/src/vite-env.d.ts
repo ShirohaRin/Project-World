@@ -14,7 +14,14 @@ interface Window {
     verifyEmailCode: (email: string, code: string) => Promise<{ route: string; principal: { account_id: string; role: string } }>
     logout: () => Promise<void>
     testService: () => Promise<ServiceHealth>
-    sendChat: (request: { agentId: string; message: string; conversationId?: string }) => Promise<ServiceChatResponse>
+    sendChat: (request: { agentId: string; message: string; conversationId?: string; useMemory?: boolean }) => Promise<ServiceChatResponse>
+    listConversations: () => Promise<ConversationSummary[]>
+    getConversation: (conversationId: string) => Promise<ConversationDetail>
+    listTasks: () => Promise<TaskSummary[]>
+    getSyncEvents: (after: number) => Promise<SyncSnapshot>
+    listMemories: () => Promise<MemoryRecord[]>
+    createMemory: (memory: { scope: 'personal' | 'space' | 'owner'; category: string; content: string }) => Promise<MemoryRecord>
+    deleteMemory: (memoryId: string) => Promise<void>
     onExecutionOutput: (listener: (event: ExecutionOutput) => void) => () => void
   }
 }
@@ -52,3 +59,9 @@ interface ServiceChatResponse {
   agentId: string
   dispatchedTo?: string | null
 }
+
+interface ConversationSummary { id: string; agent_id: string; messages: number; created_at: number; updated_at: number }
+interface ConversationDetail { id: string; messages: Array<{ id: string; role: 'user' | 'assistant'; content: string; timestamp: number }> }
+interface TaskSummary { id: string; title: string; conversation_id?: string | null; status: string; created_at: number }
+interface SyncSnapshot { events: Array<{ event_id: number; event_type: string }>; next_cursor: number }
+interface MemoryRecord { id: string; namespace: string; category: string; content: string; status: string; created_at: number; updated_at: number }
