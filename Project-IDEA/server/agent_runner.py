@@ -41,6 +41,7 @@ class AgentRunner:
         user_message: str,
         history: list[dict] = None,
         stream: bool = False,
+        llm_model_config: Optional[dict] = None,
     ) -> dict:
         """
         执行 Agent 循环（非流式）
@@ -61,6 +62,7 @@ class AgentRunner:
                 model=self.model,
                 provider=self.provider,
                 system_prompt=self.system_prompt,
+                llm_model_config=llm_model_config,
             )
 
             # 如果 LLM 返回了文本 → 最终输出
@@ -123,6 +125,7 @@ class AgentRunner:
         self,
         user_message: str,
         history: list[dict] = None,
+        llm_model_config: Optional[dict] = None,
     ) -> AsyncIterator[dict]:
         """
         执行 Agent 循环（流式输出）
@@ -145,6 +148,7 @@ class AgentRunner:
                 model=self.model,
                 provider=self.provider,
                 system_prompt=self.system_prompt,
+                llm_model_config=llm_model_config,
             ):
                 if chunk["type"] == "text":
                     yield {"type": "text", "content": chunk["content"]}

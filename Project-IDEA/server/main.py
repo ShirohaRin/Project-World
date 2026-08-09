@@ -19,6 +19,7 @@ import os
 import re
 import time
 import uuid
+from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -29,12 +30,13 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 import yaml
 
-from llm.client import LLMClient
+from llm.client import LLMClient, selected_model_config
 from tools.registry import ToolRegistry
 from agent_runner import AgentRunner
 from memory.store import MemoryStore
 from platform_auth import PlatformStore, RequestContext, configured_token, extract_bearer, require_context
-from email_sender import EmailSender
+import memory_mcp
+import owner_agent_mcp
 
 # ---------------------------------------------------------------------------
 # 配置
@@ -77,14 +79,15 @@ auth_token = configured_token(config)
 log_dir = BASE_DIR / "logs"
 log_dir.mkdir(parents=True, exist_ok=True)
 
-logging.basicConfig(
-    level=getattr(logging, config.get("logging", {}).get("level", "INFO")),
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    handlers=[
-        logging.FileHandler(log_dir / "server.log", encoding="utf-8"),
-        logging.StreamHandler(),
-    ],
-)
+if not logging.getLogger().handlers:
+    logging.basicConfig(
+        level=getattr(logging, config.get("logging", {}).get("level", "INFO")),
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        handlers=[
+            logging.FileHandler(log_dir / "server.log", encoding="utf-8"),
+            logging.StreamHandler(),
+        ],
+    )
 logger = logging.getLogger("idea")
 
 # ===================================================================
@@ -251,7 +254,6 @@ memory_store = MemoryStore(
 )
 platform_store = PlatformStore(os.environ.get("IDEA_PLATFORM_DB_PATH", str(BASE_DIR / "memory" / "platform.db")))
 platform_store.ensure_owner(auth_token)
-email_sender = EmailSender()
 
 llm_client = LLMClient()
 
@@ -381,6 +383,7 @@ AGENTS = {
 MAX_HISTORY = 50
 MAX_MESSAGE_LENGTH = 20_000
 MAX_MEMORY_LENGTH = 10_000
+VALID_MODEL_KEYS = {"gpt", "deepseek-v4-flash"}
 VALID_ID = re.compile(r"^[A-Za-z0-9_-]{1,100}$")
 
 
@@ -415,14 +418,18 @@ def _create_conversation(context: RequestContext, agent_id: str, conversation_id
 def _memory_namespaces(context: RequestContext) -> dict[str, str]:
     namespaces = {
         "personal": f"user/{context.principal.account_id}",
-        "space": f"space/{context.space_id}",
+        "shared": f"shared/{context.space_id}",
     }
     if platform_store.route_for_principal(context.principal) == "owner_idea":
-        namespaces["owner"] = f"owner/{context.principal.account_id}"
+        owner_principal_id = platform_store.owner_scope_id(context.principal)
+        if owner_principal_id:
+            namespaces["owner"] = f"owner/{owner_principal_id}"
     return namespaces
 
 
 def _memory_scope(context: RequestContext, scope: object) -> tuple[str, str]:
+    if scope == "space":
+        scope = "shared"
     if not isinstance(scope, str) or scope not in _memory_namespaces(context):
         raise HTTPException(status_code=403, detail="无权使用指定记忆范围")
     return scope, _memory_namespaces(context)[scope]
@@ -455,27 +462,57 @@ def _global_context(context: RequestContext, exclude_conversation_id: str) -> st
             break
     return "\n".join(snippets)
 
+
+owner_agent_mcp.configure(
+    platform_store,
+    agent_runners["idea"],
+    _create_conversation,
+    _memory_context,
+    _global_context,
+)
+
 # ---------------------------------------------------------------------------
 # FastAPI 应用
 # ---------------------------------------------------------------------------
+@asynccontextmanager
+async def app_lifespan(app):
+    async with AsyncExitStack() as stack:
+        await stack.enter_async_context(memory_mcp.mcp.session_manager.run())
+        await stack.enter_async_context(owner_agent_mcp.mcp.session_manager.run())
+        yield
+
+
 app = FastAPI(
     title="IDEA — Intelligent Delegation & Executive Architect",
     version="3.0.0",
     description="IDEA 作为主 Agent，拥有 TRAE 级别的工具能力（文件编辑、命令执行、网页搜索）+ 下级智能体调度",
+    lifespan=app_lifespan,
 )
+memory_mcp.configure(platform_store, _memory_namespaces)
 
 
 @app.middleware("http")
 async def platform_request_context(request: Request, call_next):
     request_id = request.headers.get("X-Request-ID", "").strip()[:100] or uuid.uuid4().hex
-    public_auth_paths = {"/api/auth/email/send", "/api/auth/email/verify", "/api/auth/refresh"}
+    public_auth_paths = {"/api/auth/password/login", "/api/auth/email/send", "/api/auth/email/verify", "/api/auth/refresh"}
     requires_auth = (request.url.path.startswith("/api/") and request.url.path not in public_auth_paths) or request.url.path == "/mcp" or request.url.path.startswith("/mcp/")
     context = None
+    mcp_context_token = None
     if requires_auth:
         if not auth_token:
             return JSONResponse(status_code=503, content={"detail": "服务端尚未配置 IDEA_AUTH_TOKEN"}, headers={"X-Request-ID": request_id})
         token = extract_bearer(request)
-        principal = platform_store.authenticate(token) if token else None
+        device_id = request.headers.get("X-Device-ID", "").strip()[:100] or None
+        mcp_capability = None
+        if request.url.path == "/mcp/memory" or request.url.path.startswith("/mcp/memory/"):
+            mcp_capability = "memory"
+        elif request.url.path == "/mcp/idea" or request.url.path.startswith("/mcp/idea/"):
+            mcp_capability = "idea"
+        if token and token.startswith("mcp_"):
+            principal, credential_space_id = platform_store.authenticate_mcp_credential(token, mcp_capability) if mcp_capability else (None, None)
+        else:
+            principal = platform_store.authenticate(token, device_id) if token else None
+            credential_space_id = None
         if not principal:
             platform_store.write_audit(
                 "authentication.failed",
@@ -487,7 +524,7 @@ async def platform_request_context(request: Request, call_next):
             )
             return JSONResponse(status_code=401, content={"detail": "需要有效的 Bearer Token"}, headers={"X-Request-ID": request_id})
         requested_space_id = request.headers.get("X-Space-ID", "").strip()[:100] or None
-        space_id = platform_store.resolve_space(principal.principal_id, requested_space_id)
+        space_id = credential_space_id or platform_store.resolve_space(principal.principal_id, requested_space_id)
         if not space_id:
             platform_store.write_audit(
                 "authorization.denied",
@@ -505,10 +542,14 @@ async def platform_request_context(request: Request, call_next):
         context = RequestContext(
             request_id=request_id,
             principal=principal,
-            device_id=request.headers.get("X-Device-ID", "").strip()[:100] or None,
+            device_id=principal.device_id,
             space_id=space_id,
         )
         request.state.context = context
+        if mcp_capability == "memory":
+            mcp_context_token = (memory_mcp.request_context, memory_mcp.request_context.set(context))
+        elif mcp_capability == "idea":
+            mcp_context_token = (owner_agent_mcp.request_context, owner_agent_mcp.request_context.set(context))
         platform_store.write_audit(
             "authentication.succeeded",
             context,
@@ -537,6 +578,9 @@ async def platform_request_context(request: Request, call_next):
                 metadata={"path": request.url.path},
             )
         raise
+    finally:
+        if mcp_context_token is not None:
+            mcp_context_token[0].reset(mcp_context_token[1])
     if context:
         platform_store.write_audit(
             "request.completed",
@@ -554,6 +598,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.mount("/mcp/memory", memory_mcp.app)
+app.mount("/mcp/idea", owner_agent_mcp.app)
 
 static_dir = BASE_DIR / "static"
 if static_dir.exists():
@@ -563,47 +609,30 @@ if static_dir.exists():
 # ===================================================================
 # 账户认证
 # ===================================================================
+@app.post("/api/auth/password/login")
+async def password_login(request: Request):
+    body = await request.json()
+    email, password = body.get("email"), body.get("password")
+    device_id = request.headers.get("X-Device-ID", "").strip()[:100] or None
+    if not isinstance(email, str) or not isinstance(password, str) or not (3 <= len(email.strip()) <= 254) or not (1 <= len(password) <= 1024):
+        raise HTTPException(status_code=400, detail="邮箱或密码格式无效")
+    try:
+        principal, session, route = platform_store.authenticate_password_login(email, password, device_id)
+    except ValueError as error:
+        platform_store.write_audit("authentication.password_failed", request_id=request.headers.get("X-Request-ID"), device_id=device_id, action="sign_in", decision="denied", reason_code="invalid_credentials")
+        raise HTTPException(status_code=429 if str(error).startswith("登录尝试过于频繁") else 401, detail=str(error))
+    platform_store.write_audit("authentication.password_succeeded", request_id=request.headers.get("X-Request-ID"), principal_id=principal.principal_id, account_id=principal.account_id, device_id=device_id, action="sign_in", decision="allowed", metadata={"route": route})
+    return {**session, "principal": {"principal_id": principal.principal_id, "account_id": principal.account_id, "role": principal.role}, "route": route}
+
+
 @app.post("/api/auth/email/send")
 async def send_email_verification(request: Request):
-    body = await request.json()
-    email = body.get("email", "")
-    try:
-        code = platform_store.issue_email_code(email, "sign_in")
-        delivery = email_sender.send_verification_code(platform_store.normalize_email(email), code, "sign_in")
-    except (ValueError, RuntimeError) as error:
-        raise HTTPException(status_code=400, detail=str(error))
-    response = {"status": "sent", "message": "验证码已发送，请查收邮箱"}
-    if delivery.development_code:
-        response["development_code"] = delivery.development_code
-    return response
+    raise HTTPException(status_code=410, detail="邮箱验证码登录已停用")
 
 
 @app.post("/api/auth/email/verify")
 async def verify_email_login(request: Request):
-    body = await request.json()
-    email = body.get("email", "")
-    code = body.get("code", "")
-    device_id = request.headers.get("X-Device-ID", "").strip()[:100] or None
-    if not isinstance(code, str) or len(code.strip()) != 6:
-        raise HTTPException(status_code=400, detail="验证码格式无效")
-    try:
-        verified_email = platform_store.verify_email_code(email, "sign_in", code)
-        principal = platform_store.get_or_create_email_account(verified_email)
-        session = platform_store.issue_session(principal, device_id)
-    except ValueError as error:
-        raise HTTPException(status_code=400, detail=str(error))
-    route = platform_store.route_for_principal(principal)
-    platform_store.write_audit(
-        "authentication.email_verified",
-        request_id=request.headers.get("X-Request-ID"),
-        principal_id=principal.principal_id,
-        account_id=principal.account_id,
-        device_id=device_id,
-        action="sign_in",
-        decision="allowed",
-        metadata={"route": route},
-    )
-    return {**session, "principal": {"principal_id": principal.principal_id, "account_id": principal.account_id, "role": principal.role}, "route": route}
+    raise HTTPException(status_code=410, detail="邮箱验证码登录已停用")
 
 
 @app.post("/api/auth/refresh")
@@ -617,7 +646,8 @@ async def refresh_login(request: Request):
         principal, session = platform_store.refresh_session(refresh_token, device_id)
     except ValueError as error:
         raise HTTPException(status_code=401, detail=str(error))
-    return {**session, "principal": {"principal_id": principal.principal_id, "account_id": principal.account_id, "role": principal.role}, "route": platform_store.route_for_principal(principal)}
+    authenticated = platform_store.authenticate(session["access_token"], device_id)
+    return {**session, "principal": {"principal_id": principal.principal_id, "account_id": principal.account_id, "role": principal.role}, "route": platform_store.route_for_principal(authenticated) if authenticated else "idea_assistant"}
 
 
 @app.post("/api/auth/logout")
@@ -646,6 +676,89 @@ async def link_owner_email(request: Request):
     return {"status": "linked"}
 
 
+def _require_owner_controller(context: RequestContext) -> None:
+    if not platform_store.is_owner_controller(context.principal):
+        raise HTTPException(status_code=403, detail="需要已批准的私有设备")
+
+
+@app.get("/api/platform/owner/devices")
+async def list_owner_devices(request: Request):
+    context = require_context(request)
+    _require_owner_controller(context)
+    return {"devices": platform_store.list_owner_devices(context.principal)}
+
+
+@app.post("/api/platform/owner/devices/{owner_device_id}/approve")
+async def approve_owner_device(owner_device_id: str, request: Request):
+    context = require_context(request)
+    _require_owner_controller(context)
+    if not platform_store.approve_owner_device(context.principal, owner_device_id):
+        raise HTTPException(status_code=404, detail="待批准设备不存在")
+    platform_store.write_audit("owner.device_approved", context, action="approve", resource_type="owner_device", resource_id=owner_device_id, decision="allowed")
+    return {"status": "approved"}
+
+
+@app.post("/api/platform/owner/devices/{owner_device_id}/revoke")
+async def revoke_owner_device(owner_device_id: str, request: Request):
+    context = require_context(request)
+    _require_owner_controller(context)
+    if not platform_store.revoke_owner_device(context.principal, owner_device_id):
+        raise HTTPException(status_code=404, detail="设备不存在或无法撤销")
+    platform_store.write_audit("owner.device_revoked", context, action="revoke", resource_type="owner_device", resource_id=owner_device_id, decision="allowed")
+    return {"status": "revoked"}
+
+
+@app.get("/api/platform/owner/mcp-credentials")
+async def list_mcp_credentials(request: Request):
+    context = require_context(request)
+    _require_owner_controller(context)
+    return {"credentials": platform_store.list_mcp_credentials(context.principal)}
+
+
+@app.post("/api/platform/owner/mcp-credentials")
+async def create_mcp_credential(request: Request):
+    context = require_context(request)
+    _require_owner_controller(context)
+    body = await request.json()
+    try:
+        credential = platform_store.create_mcp_credential(
+            context.principal,
+            context.space_id,
+            body.get("device_label", ""),
+            capability=body.get("capability", "memory"),
+            expires_at=body.get("expires_at"),
+        )
+    except (PermissionError, ValueError) as error:
+        raise HTTPException(status_code=403, detail=str(error))
+    platform_store.write_audit(
+        "mcp.credential_created",
+        context,
+        action="create",
+        resource_type="mcp_credential",
+        resource_id=credential["credential_id"],
+        decision="allowed",
+        metadata={"device_label": credential["device_label"], "capability": credential["capability"]},
+    )
+    return credential
+
+
+@app.post("/api/platform/owner/mcp-credentials/{credential_id}/revoke")
+async def revoke_mcp_credential(credential_id: str, request: Request):
+    context = require_context(request)
+    _require_owner_controller(context)
+    if not platform_store.revoke_mcp_credential(context.principal, credential_id):
+        raise HTTPException(status_code=404, detail="MCP 凭据不存在或已撤销")
+    platform_store.write_audit(
+        "mcp.credential_revoked",
+        context,
+        action="revoke",
+        resource_type="mcp_credential",
+        resource_id=credential_id,
+        decision="allowed",
+    )
+    return {"status": "revoked"}
+
+
 # ===================================================================
 # 核心 API：独立智能体会话（非流式）
 # ===================================================================
@@ -654,6 +767,10 @@ async def chat_with_assistant(request: Request):
     context = require_context(request)
     body = await request.json()
     agent_id = _routed_agent(context, body.get("agent_id"))
+    model_key = body.get("model_key", "gpt")
+    if model_key not in VALID_MODEL_KEYS:
+        raise HTTPException(status_code=400, detail="model_key 无效")
+    model_config = selected_model_config(model_key)
     message = body.get("message", "")
     if not isinstance(message, str):
         raise HTTPException(status_code=400, detail="message 必须是字符串")
@@ -684,7 +801,7 @@ async def chat_with_assistant(request: Request):
         if memory_context:
             runner_message = f"以下是用户明确保存的长期记忆，仅作必要上下文：\n{memory_context}\n\n当前用户请求：\n{runner_message}"
 
-    result = await agent_runners[agent_id].run(user_message=runner_message, history=history[-10:])
+    result = await agent_runners[agent_id].run(user_message=runner_message, history=history[-10:], llm_model_config=model_config)
 
     reply = result.get("reply", "抱歉，我暂时无法处理这个请求。")
     tool_calls_log = result.get("tool_calls_log", [])
@@ -705,7 +822,7 @@ async def chat_with_assistant(request: Request):
         conversation_id,
         "assistant",
         reply,
-        {"dispatched_to": dispatched_to, "tool_calls": [tc["name"] for tc in tool_calls_log]},
+        {"dispatched_to": dispatched_to, "tool_calls": [tc["name"] for tc in tool_calls_log], "model_key": model_key},
     )
 
     return {
@@ -715,6 +832,7 @@ async def chat_with_assistant(request: Request):
         "tool_calls": [{"name": tc["name"], "success": tc["success"]} for tc in tool_calls_log],
         "iterations": iterations,
         "conversation_id": conversation_id,
+    "model_key": model_key,
     }
 
 # ===================================================================
@@ -866,6 +984,8 @@ async def create_memory(request: Request):
     if body.get("confirmed") is not True:
         raise HTTPException(status_code=400, detail="长期记忆写入需要明确确认")
     scope, namespace = _memory_scope(context, body.get("scope", "personal"))
+    if not platform_store.memory_write_allowed(context.principal.principal_id, context.space_id, namespace):
+        raise HTTPException(status_code=403, detail="无权写入共享记忆")
     content = body.get("content", "")
     category = body.get("category", "general")
     if not isinstance(content, str) or not (1 <= len(content.strip()) <= MAX_MEMORY_LENGTH):
@@ -885,11 +1005,19 @@ async def update_memory(memory_id: str, request: Request):
     body = await request.json()
     content = body.get("content", "")
     category = body.get("category", "general")
+    expected_revision = body.get("expected_revision")
+    if not isinstance(expected_revision, int) or expected_revision < 1:
+        raise HTTPException(status_code=400, detail="expected_revision 必须是正整数")
     if not isinstance(content, str) or not (1 <= len(content.strip()) <= MAX_MEMORY_LENGTH):
         raise HTTPException(status_code=400, detail=f"content 必须为 1 到 {MAX_MEMORY_LENGTH} 个字符")
     if not isinstance(category, str) or not (1 <= len(category.strip()) <= 80):
         raise HTTPException(status_code=400, detail="category 必须为 1 到 80 个字符")
-    memory = platform_store.update_memory(context.principal.account_id, context.space_id, memory_id, list(_memory_namespaces(context).values()), category.strip(), content.strip())
+    try:
+        memory, current_revision = platform_store.update_memory(context.principal.account_id, context.space_id, memory_id, list(_memory_namespaces(context).values()), category.strip(), content.strip(), expected_revision, context.principal.principal_id)
+    except PermissionError as error:
+        raise HTTPException(status_code=403, detail=str(error))
+    if current_revision is not None:
+        raise HTTPException(status_code=409, detail="记忆已被其他成员修改，请刷新后重试", headers={"X-Memory-Revision": str(current_revision)})
     if not memory:
         raise HTTPException(status_code=404, detail="记忆不存在")
     platform_store.write_audit("memory.updated", context, resource_type="memory", resource_id=memory_id, action="update", decision="allowed", metadata={"category": memory["category"]})
@@ -901,10 +1029,20 @@ async def delete_memory(memory_id: str, request: Request):
     context = require_context(request)
     if not VALID_ID.fullmatch(memory_id):
         raise HTTPException(status_code=400, detail="memory_id 格式无效")
-    if not platform_store.delete_memory(context.principal.account_id, context.space_id, memory_id, list(_memory_namespaces(context).values())):
+    body = await request.json()
+    expected_revision = body.get("expected_revision")
+    if not isinstance(expected_revision, int) or expected_revision < 1:
+        raise HTTPException(status_code=400, detail="expected_revision 必须是正整数")
+    try:
+        deleted, current_revision = platform_store.delete_memory(context.principal.account_id, context.space_id, memory_id, list(_memory_namespaces(context).values()), expected_revision, context.principal.principal_id)
+    except PermissionError as error:
+        raise HTTPException(status_code=403, detail=str(error))
+    if current_revision is not None:
+        raise HTTPException(status_code=409, detail="记忆已被其他成员修改，请刷新后重试", headers={"X-Memory-Revision": str(current_revision)})
+    if not deleted:
         raise HTTPException(status_code=404, detail="记忆不存在")
-    platform_store.write_audit("memory.deleted", context, resource_type="memory", resource_id=memory_id, action="delete", decision="allowed")
-    return {"id": memory_id, "status": "deleted"}
+    platform_store.write_audit("memory.deleted", context, resource_type="memory", resource_id=memory_id, action="delete", decision="allowed", metadata={"revision": expected_revision + 1})
+    return {"id": memory_id, "status": "deleted", "revision": expected_revision + 1}
 
 
 @app.get("/api/sync/events")

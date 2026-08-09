@@ -1,430 +1,87 @@
 import { app, BrowserWindow, dialog, ipcMain, safeStorage } from 'electron'
-import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises'
-import { existsSync } from 'node:fs'
+import { mkdir, readdir, readFile, writeFile, copyFile } from 'node:fs/promises'
+import { existsSync, readFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { basename, dirname, extname, join, parse, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const currentDir = fileURLToPath(new URL('.', import.meta.url))
 const isDevelopment = !app.isPackaged
-
-type FileEntry = {
-  name: string
-  path: string
-  kind: 'file' | 'directory'
-  children?: FileEntry[]
+function packagedFlavor(): string | undefined {
+  const path = isDevelopment ? join(currentDir, 'client-flavor.json') : join(process.resourcesPath, 'dist-electron', 'client-flavor.json')
+  try { return JSON.parse(readFileSync(path, 'utf8')).flavor } catch { return undefined }
 }
+const isOwnerClient = process.env.IDEA_CLIENT_FLAVOR === 'owner' || packagedFlavor() === 'owner' || app.getName() === 'IDEA'
+const legacyUserDataPath = app.getPath('userData')
+const fixedUserDataPath = join(app.getPath('appData'), isOwnerClient ? 'ProjectIDEA-SRH' : 'idea-assistant')
+const logger = { warn: (...args: unknown[]) => console.warn(...args) }
+app.setPath('userData', fixedUserDataPath)
 
-const TEXT_EXTENSIONS = new Set(['.md', '.mdx', '.txt', '.json', '.yaml', '.yml', '.ts', '.tsx', '.js', '.jsx', '.css', '.html', '.py', '.c', '.cc', '.cpp', '.cxx', '.go', '.java', '.rs'])
-const SKIPPED_DIRECTORIES = new Set(['.git', 'node_modules', 'dist', 'dist-electron', 'release', '__pycache__'])
-const RUN_TIMEOUT_MS = 60_000
-const MAX_OUTPUT_LENGTH = 200_000
-const activeRuns = new Map<string, ChildProcessWithoutNullStreams>()
-
+type FileEntry = { name: string; path: string; kind: 'file' | 'directory'; children?: FileEntry[] }
 type RunMode = 'run' | 'debug'
-type RunEvent = { sessionId: string; stream: 'system' | 'stdout' | 'stderr'; content: string }
+type RunEvent = { sessionId: string; stream: 'system' | 'stdout' | 'stderr'; content: string; terminal?: boolean }
 type ServiceConfig = { serverUrl: string; spaceId: string; deviceId: string; signedIn: boolean; route?: string }
 type StoredServiceConfig = ServiceConfig & { encryptedAccessToken?: string; encryptedRefreshToken?: string }
 type ServiceHealth = { status: string; version?: string; llmAvailable?: boolean }
-type ChatResponse = { reply: string; conversationId: string; agentId: string; dispatchedTo?: string | null }
+type ChatResponse = { reply: string; conversationId: string; agentId: string; dispatchedTo?: string | null; modelKey: 'gpt' | 'deepseek-v4-flash' }
 type LoginResponse = { route: string; principal: { account_id: string; role: string } }
 type ConversationSummary = { id: string; agent_id: string; messages: number; created_at: number; updated_at: number }
 type ConversationDetail = { id: string; messages: Array<{ id: string; role: 'user' | 'assistant'; content: string; timestamp: number }> }
 type TaskSummary = { id: string; title: string; conversation_id?: string | null; status: string; created_at: number }
 type SyncSnapshot = { events: Array<{ event_id: number; event_type: string }>; next_cursor: number }
-type MemoryScope = 'personal' | 'space' | 'owner'
-type MemoryRecord = { id: string; namespace: string; category: string; content: string; status: string; created_at: number; updated_at: number }
+type MemoryScope = 'personal' | 'shared' | 'owner'
+type MemoryRecord = { id: string; namespace: string; category: string; content: string; status: string; revision: number; created_at: number; updated_at: number }
+type OwnerDevice = { owner_device_id: string; device_id: string; status: 'pending' | 'approved' | 'revoked'; requested_at: number; approved_at?: number | null; revoked_at?: number | null; last_seen_at?: number | null }
+type UpdateInfo = { version: string; releaseNotes: string; publishedAt: string }
+type UpdateStatus = { state: 'checked' | 'current' | 'available' | 'downloading' | 'downloaded' | 'error'; update?: UpdateInfo; message?: string }
 
-function serviceConfigPath(): string {
-  return join(app.getPath('userData'), 'service-config.json')
+const TEXT_EXTENSIONS = new Set(['.md', '.mdx', '.txt', '.json', '.yaml', '.yml', '.ts', '.tsx', '.js', '.jsx', '.css', '.html', '.py', '.c', '.cc', '.cpp', '.cxx', '.go', '.java', '.rs'])
+const SKIPPED_DIRECTORIES = new Set(['.git', 'node_modules', 'dist', 'dist-electron', 'release', '__pycache__'])
+const RUN_TIMEOUT_MS = 60_000
+const MAX_OUTPUT_LENGTH = 200_000
+const DEFAULT_SERVICE_URL = 'https://shiroha-rin.world'
+const UPDATE_ORIGIN = 'https://shiroha-rin.world'
+const UPDATE_FLAVOR = isOwnerClient ? 'owner' : 'assistant'
+const SEMVER = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/
+const activeRuns = new Map<string, ChildProcessWithoutNullStreams>()
+let updateStatus: UpdateStatus = { state: 'checked' }
+let availableUpdate: { downloadUrl: string; sha256: string; fileName: string; info: UpdateInfo } | undefined
+
+function serviceConfigPath(): string { return join(app.getPath('userData'), 'service-config.json') }
+
+async function migrateLegacyOwnerSession(): Promise<void> {
+  if (!isOwnerClient) return
+  const targetPath = serviceConfigPath()
+  const legacyPath = join(legacyUserDataPath, 'service-config.json')
+  const targetLocalStatePath = join(app.getPath('userData'), 'Local State')
+  const legacyLocalStatePath = join(legacyUserDataPath, 'Local State')
+  const markerPath = join(app.getPath('userData'), 'session-migration-v1')
+  if (targetPath === legacyPath || existsSync(targetPath) || existsSync(markerPath) || !existsSync(legacyPath)) return
+  try { await mkdir(dirname(targetPath), { recursive: true }); if (!existsSync(targetLocalStatePath) && existsSync(legacyLocalStatePath)) await copyFile(legacyLocalStatePath, targetLocalStatePath); await copyFile(legacyPath, targetPath); await writeFile(markerPath, 'migrated\n', { flag: 'wx' }) } catch (error) { logger.warn('Failed to migrate legacy Owner session', error) }
 }
+function createDeviceId(): string { return `desktop-${crypto.randomUUID()}` }
+async function loadServiceConfig(): Promise<StoredServiceConfig> { try { const stored = JSON.parse(await readFile(serviceConfigPath(), 'utf8')) as Partial<StoredServiceConfig>; return { serverUrl: isDevelopment && typeof stored.serverUrl === 'string' && stored.serverUrl.trim() ? stored.serverUrl : DEFAULT_SERVICE_URL, spaceId: typeof stored.spaceId === 'string' ? stored.spaceId : '', deviceId: typeof stored.deviceId === 'string' && stored.deviceId ? stored.deviceId : createDeviceId(), signedIn: Boolean(stored.encryptedRefreshToken), route: typeof stored.route === 'string' ? stored.route : undefined, encryptedAccessToken: typeof stored.encryptedAccessToken === 'string' ? stored.encryptedAccessToken : undefined, encryptedRefreshToken: typeof stored.encryptedRefreshToken === 'string' ? stored.encryptedRefreshToken : undefined } } catch { return { serverUrl: DEFAULT_SERVICE_URL, spaceId: '', deviceId: createDeviceId(), signedIn: false } } }
+function publicServiceConfig(config: StoredServiceConfig): ServiceConfig { return { serverUrl: config.serverUrl, spaceId: config.spaceId, deviceId: config.deviceId, signedIn: Boolean(config.encryptedRefreshToken), route: config.route } }
+async function saveServiceConfig(config: { spaceId: string }): Promise<ServiceConfig> { const current = await loadServiceConfig(); const stored: StoredServiceConfig = { ...current, serverUrl: DEFAULT_SERVICE_URL, spaceId: config.spaceId.trim(), signedIn: Boolean(current.encryptedRefreshToken) }; await writeFile(serviceConfigPath(), JSON.stringify(stored), 'utf8'); return publicServiceConfig(stored) }
+function decryptSecret(value: string | undefined): string { if (!value || !safeStorage.isEncryptionAvailable()) throw new Error('请先完成账号登录'); return safeStorage.decryptString(Buffer.from(value, 'base64')) }
+async function saveLoginSession(config: StoredServiceConfig, payload: { access_token: string; refresh_token: string; route: string }): Promise<ServiceConfig> { if (!safeStorage.isEncryptionAvailable()) throw new Error('当前系统无法安全保存登录会话'); const stored: StoredServiceConfig = { ...config, signedIn: true, route: payload.route, encryptedAccessToken: safeStorage.encryptString(payload.access_token).toString('base64'), encryptedRefreshToken: safeStorage.encryptString(payload.refresh_token).toString('base64') }; await writeFile(serviceConfigPath(), JSON.stringify(stored), 'utf8'); return publicServiceConfig(stored) }
+async function refreshAccessToken(config: StoredServiceConfig): Promise<StoredServiceConfig> { const response = await fetch(`${config.serverUrl}/api/auth/refresh`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Device-ID': config.deviceId }, body: JSON.stringify({ refresh_token: decryptSecret(config.encryptedRefreshToken) }) }); const body = await response.json().catch(() => ({})) as { detail?: string; access_token?: string; refresh_token?: string; route?: string }; if (!response.ok || !body.access_token || !body.refresh_token || !body.route) throw new Error(body.detail || '登录会话已失效，请重新登录'); await saveLoginSession(config, { access_token: body.access_token, refresh_token: body.refresh_token, route: body.route }); return loadServiceConfig() }
+async function serviceRequest(path: string, init: RequestInit = {}, requireAuthentication = false, retried = false): Promise<Response> { const config = await loadServiceConfig(); const headers = new Headers(init.headers); headers.set('X-Device-ID', config.deviceId); if (config.spaceId) headers.set('X-Space-ID', config.spaceId); if (requireAuthentication) headers.set('Authorization', `Bearer ${decryptSecret(config.encryptedAccessToken)}`); const controller = new AbortController(); const timeout = setTimeout(() => controller.abort(), 15_000); try { const response = await fetch(`${config.serverUrl}${path}`, { ...init, headers, signal: controller.signal }); if (requireAuthentication && response.status === 401 && !retried) { await refreshAccessToken(config); return serviceRequest(path, init, requireAuthentication, true) } return response } catch (error) { if (error instanceof Error && error.message === '登录会话已失效，请重新登录') throw error; throw new Error('无法连接 IDEA 服务') } finally { clearTimeout(timeout) } }
+async function passwordLogin(email: string, password: string): Promise<LoginResponse> { const config = await loadServiceConfig(); const response = await serviceRequest('/api/auth/password/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, password }) }); const body = await response.json().catch(() => ({})) as { detail?: string; access_token?: string; refresh_token?: string; route?: string; principal?: { account_id: string; role: string } }; if (!response.ok || !body.access_token || !body.refresh_token || !body.route || !body.principal) throw new Error(body.detail || '登录失败'); await saveLoginSession(config, { access_token: body.access_token, refresh_token: body.refresh_token, route: body.route }); return { route: body.route, principal: body.principal } }
+async function logout(): Promise<void> { const config = await loadServiceConfig(); if (config.encryptedRefreshToken) await serviceRequest('/api/auth/logout', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ refresh_token: decryptSecret(config.encryptedRefreshToken) }) }, true).catch(() => undefined); await writeFile(serviceConfigPath(), JSON.stringify({ serverUrl: DEFAULT_SERVICE_URL, spaceId: config.spaceId, deviceId: config.deviceId, signedIn: false }), 'utf8') }
 
-function createDeviceId(): string {
-  return `desktop-${crypto.randomUUID()}`
-}
+function compareVersions(left: string, right: string): number { const a = left.match(SEMVER); const b = right.match(SEMVER); if (!a || !b) throw new Error('版本号无效'); for (let index = 1; index <= 3; index += 1) { if (Number(a[index]) !== Number(b[index])) return Number(a[index]) > Number(b[index]) ? 1 : -1 } const ap = a[4]; const bp = b[4]; if (!ap || !bp) return ap ? -1 : bp ? 1 : 0; const aa = ap.split('.'); const bb = bp.split('.'); for (let index = 0; index < Math.max(aa.length, bb.length); index += 1) { if (aa[index] === undefined) return -1; if (bb[index] === undefined) return 1; if (aa[index] === bb[index]) continue; const ai = /^\d+$/.test(aa[index]); const bi = /^\d+$/.test(bb[index]); if (ai && bi) return Number(aa[index]) > Number(bb[index]) ? 1 : -1; return ai ? -1 : bi ? 1 : aa[index] > bb[index] ? 1 : -1 } return 0 }
+function asUpdateError(error: unknown): UpdateStatus { return { state: 'error', message: error instanceof Error ? error.message.slice(0, 160) : '更新服务不可用' } }
+async function checkForUpdates(): Promise<UpdateStatus> { try { updateStatus = { state: 'checked' }; const response = await fetch(`${UPDATE_ORIGIN}/static/updates/${UPDATE_FLAVOR}/latest.json`); if (response.status === 404) return updateStatus = { state: 'current' }; if (!response.ok) throw new Error('更新检查失败'); const manifest = await response.json() as Record<string, unknown>; const version = typeof manifest.version === 'string' ? manifest.version : ''; const releaseNotes = typeof manifest.releaseNotes === 'string' ? manifest.releaseNotes : ''; const publishedAt = typeof manifest.publishedAt === 'string' ? manifest.publishedAt : ''; const downloadUrl = typeof manifest.downloadUrl === 'string' ? manifest.downloadUrl : ''; const sha256 = typeof manifest.sha256 === 'string' ? manifest.sha256 : ''; const fileName = typeof manifest.fileName === 'string' ? manifest.fileName : ''; const prefix = `/static/updates/${UPDATE_FLAVOR}/`; const url = new URL(downloadUrl, UPDATE_ORIGIN); if (manifest.flavor !== UPDATE_FLAVOR || !SEMVER.test(version) || !releaseNotes || !publishedAt || !fileName || !/^[a-f0-9]{64}$/i.test(sha256) || url.origin !== UPDATE_ORIGIN || !url.pathname.startsWith(prefix) || url.pathname !== `${prefix}${fileName}` || fileName !== basename(fileName) || !fileName.toLowerCase().endsWith('.exe')) throw new Error('更新清单无效'); if (compareVersions(version, app.getVersion()) <= 0) return updateStatus = { state: 'current' }; const info = { version, releaseNotes, publishedAt }; availableUpdate = { downloadUrl: url.toString(), sha256: sha256.toLowerCase(), fileName, info }; return updateStatus = { state: 'available', update: info } } catch (error) { availableUpdate = undefined; return updateStatus = asUpdateError(error) } }
+async function downloadAndInstallUpdate(): Promise<UpdateStatus> { if (process.platform !== 'win32') return updateStatus = { state: 'error', message: '当前系统不支持自动安装更新' }; if (!availableUpdate) return updateStatus = { state: 'error', message: '请先检查更新' }; try { updateStatus = { state: 'downloading', update: availableUpdate.info }; const response = await fetch(availableUpdate.downloadUrl); if (!response.ok) throw new Error('更新下载安装包失败'); const buffer = Buffer.from(await response.arrayBuffer()); if (createHash('sha256').update(buffer).digest('hex') !== availableUpdate.sha256) throw new Error('更新包校验失败'); const directory = join(app.getPath('temp'), 'project-idea-updates', UPDATE_FLAVOR); await mkdir(directory, { recursive: true }); const installerPath = join(directory, availableUpdate.fileName); await writeFile(installerPath, buffer); const scriptPath = join(directory, `install-${process.pid}-${Date.now()}.cmd`); const script = `@echo off\r\n:wait\r\ntasklist /FI "PID eq ${process.pid}" /NH | find "${process.pid}" >nul\r\nif not errorlevel 1 ( timeout /t 1 /nobreak >nul & goto wait )\r\n"${installerPath}" /S\r\nstart "" "${process.execPath}"\r\ndel "%~f0"\r\n`; await writeFile(scriptPath, script, 'utf8'); const child = spawn('cmd.exe', ['/c', scriptPath], { detached: true, stdio: 'ignore', windowsHide: true }); child.unref(); updateStatus = { state: 'downloaded', update: availableUpdate.info }; app.quit(); return updateStatus } catch (error) { return updateStatus = asUpdateError(error) } }
 
-function normalizeServiceUrl(value: string): string {
-  const url = new URL(value.trim())
-  const isLoopback = url.hostname === 'localhost' || url.hostname === '127.0.0.1' || url.hostname === '[::1]'
-  if (url.protocol !== 'https:' && !(isDevelopment && isLoopback && url.protocol === 'http:')) throw new Error('生产环境服务地址必须使用 HTTPS')
-  if (!isDevelopment && url.hostname !== 'shiroha-rin.world') throw new Error('生产环境仅允许连接受信 IDEA 服务地址')
-  return url.toString().replace(/\/$/, '')
-}
+function assertWithinWorkspace(workspace: string, target: string): string { const workspacePath = resolve(workspace); const targetPath = resolve(target); const pathFromWorkspace = relative(workspacePath, targetPath); if (pathFromWorkspace.startsWith('..') || pathFromWorkspace === '' && targetPath !== workspacePath) throw new Error('文件路径不在当前工作区内'); return targetPath }
+function createRunId(): string { return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}` }
+function runCommand(command: string, args: string[], cwd: string, sessionId: string, send: (event: RunEvent) => void): Promise<number> { return new Promise((resolveRun, rejectRun) => { let outputLength = 0; const child = spawn(command, args, { cwd, shell: false, windowsHide: true, env: process.env }); activeRuns.set(sessionId, child); const timeout = setTimeout(() => { send({ sessionId, stream: 'system', content: `执行超过 ${RUN_TIMEOUT_MS / 1000} 秒，已停止。\n` }); child.kill() }, RUN_TIMEOUT_MS); const emit = (stream: 'stdout' | 'stderr', chunk: Buffer) => { if (outputLength >= MAX_OUTPUT_LENGTH) return; const content = chunk.toString().slice(0, MAX_OUTPUT_LENGTH - outputLength); outputLength += content.length; send({ sessionId, stream, content }) }; child.stdout.on('data', (chunk: Buffer) => emit('stdout', chunk)); child.stderr.on('data', (chunk: Buffer) => emit('stderr', chunk)); child.once('error', (error) => { clearTimeout(timeout); activeRuns.delete(sessionId); rejectRun(error) }); child.once('close', (code) => { clearTimeout(timeout); activeRuns.delete(sessionId); resolveRun(code ?? -1) }) }) }
+async function executeFile(workspace: string, filePath: string, mode: RunMode, sessionId: string, send: (event: RunEvent) => void): Promise<void> { const sourcePath = assertWithinWorkspace(workspace, filePath); const extension = extname(sourcePath).toLowerCase(); const sourceDirectory = dirname(sourcePath); const baseName = parse(sourcePath).name; const buildDirectory = join(workspace, '.idea-assistant', 'build'); const buildOutput = join(buildDirectory, `${baseName}.exe`); await mkdir(buildDirectory, { recursive: true }); const run = (command: string, args: string[], cwd = sourceDirectory) => runCommand(command, args, cwd, sessionId, send); const compileAndRun = async (command: string, compileArgs: string[], runner: string, runnerArgs: string[]) => { send({ sessionId, stream: 'system', content: `$ ${command} ${compileArgs.join(' ')}\n` }); if (await run(command, compileArgs) !== 0) throw new Error('编译失败'); send({ sessionId, stream: 'system', content: `$ ${runner} ${runnerArgs.join(' ')}\n` }); if (await run(runner, runnerArgs) !== 0) throw new Error('运行失败') }; if (mode === 'debug' && !['.js', '.mjs', '.cjs'].includes(extension)) throw new Error('当前语言的断点调试需要独立 Debug Adapter，第一版仅支持 Node.js Inspector 调试。'); if (['.js', '.mjs', '.cjs'].includes(extension)) { const args = mode === 'debug' ? ['--inspect-brk', sourcePath] : [sourcePath]; if (await run('node', args) !== 0) throw new Error('Node.js 结束异常'); return } if (extension === '.py') { if (await run('python', [sourcePath]) !== 0) throw new Error('Python 结束异常'); return } if (extension === '.go') { if (await run('go', ['run', sourcePath]) !== 0) throw new Error('Go 结束异常'); return } if (extension === '.ts') return compileAndRun('tsc', [sourcePath, '--outDir', buildDirectory, '--target', 'ES2022', '--module', 'commonjs', '--skipLibCheck'], 'node', [join(buildDirectory, `${baseName}.js`)]); if (['.c', '.cc', '.cpp', '.cxx'].includes(extension)) return compileAndRun('g++', [sourcePath, '-o', buildOutput], buildOutput, []); if (extension === '.rs') return compileAndRun('rustc', [sourcePath, '-o', buildOutput], buildOutput, []); if (extension === '.java') return compileAndRun('javac', ['-d', buildDirectory, sourcePath], 'java', ['-cp', buildDirectory, baseName]); throw new Error('当前文件类型不支持运行') }
+async function buildFileTree(directory: string, depth = 0): Promise<FileEntry[]> { if (depth > 4) return []; const entries = await readdir(directory, { withFileTypes: true }); return Promise.all(entries.filter((entry) => !entry.name.startsWith('.') && !(entry.isDirectory() && SKIPPED_DIRECTORIES.has(entry.name))).sort((left, right) => Number(right.isDirectory()) - Number(left.isDirectory()) || left.name.localeCompare(right.name)).slice(0, 250).map(async (entry) => { const fullPath = join(directory, entry.name); return entry.isDirectory() ? { name: entry.name, path: fullPath, kind: 'directory' as const, children: await buildFileTree(fullPath, depth + 1) } : { name: entry.name, path: fullPath, kind: 'file' as const } })) }
+async function createWindow(): Promise<void> { const window = new BrowserWindow({ width: 1480, height: 920, minWidth: 1120, minHeight: 700, backgroundColor: '#0c111c', title: isOwnerClient ? 'IDEA' : 'IDEA Assistant', autoHideMenuBar: true, webPreferences: { preload: join(currentDir, 'preload.js'), contextIsolation: true, nodeIntegration: false, sandbox: false, additionalArguments: isOwnerClient ? ['--idea-owner-client'] : [] } }); if (isDevelopment) await window.loadURL('http://127.0.0.1:5173'); else await window.loadFile(join(currentDir, '..', 'dist', 'index.html')) }
 
-async function loadServiceConfig(): Promise<StoredServiceConfig> {
-  try {
-    const raw = await readFile(serviceConfigPath(), 'utf8')
-    const stored = JSON.parse(raw) as Partial<StoredServiceConfig>
-    return {
-      serverUrl: typeof stored.serverUrl === 'string' ? stored.serverUrl : '',
-      spaceId: typeof stored.spaceId === 'string' ? stored.spaceId : '',
-      deviceId: typeof stored.deviceId === 'string' && stored.deviceId ? stored.deviceId : createDeviceId(),
-      signedIn: Boolean(stored.encryptedRefreshToken),
-      route: typeof stored.route === 'string' ? stored.route : undefined,
-      encryptedAccessToken: typeof stored.encryptedAccessToken === 'string' ? stored.encryptedAccessToken : undefined,
-      encryptedRefreshToken: typeof stored.encryptedRefreshToken === 'string' ? stored.encryptedRefreshToken : undefined,
-    }
-  } catch {
-    return { serverUrl: '', spaceId: '', deviceId: createDeviceId(), signedIn: false }
-  }
-}
-
-function publicServiceConfig(config: StoredServiceConfig): ServiceConfig {
-  return { serverUrl: config.serverUrl, spaceId: config.spaceId, deviceId: config.deviceId, signedIn: Boolean(config.encryptedRefreshToken), route: config.route }
-}
-
-async function saveServiceConfig(config: { serverUrl: string; spaceId: string }): Promise<ServiceConfig> {
-  const current = await loadServiceConfig()
-  const serverUrl = config.serverUrl.trim() ? normalizeServiceUrl(config.serverUrl) : ''
-  const stored: StoredServiceConfig = {
-    serverUrl,
-    spaceId: config.spaceId.trim(),
-    deviceId: current.deviceId,
-    signedIn: Boolean(current.encryptedRefreshToken),
-    route: current.route,
-    encryptedAccessToken: current.encryptedAccessToken,
-    encryptedRefreshToken: current.encryptedRefreshToken,
-  }
-  await writeFile(serviceConfigPath(), JSON.stringify(stored), 'utf8')
-  return publicServiceConfig(stored)
-}
-
-function decryptSecret(value: string | undefined): string {
-  if (!value || !safeStorage.isEncryptionAvailable()) throw new Error('请先完成账号登录')
-  return safeStorage.decryptString(Buffer.from(value, 'base64'))
-}
-
-async function saveLoginSession(config: StoredServiceConfig, payload: { access_token: string; refresh_token: string; route: string }): Promise<ServiceConfig> {
-  if (!safeStorage.isEncryptionAvailable()) throw new Error('当前系统无法安全保存登录会话')
-  const stored: StoredServiceConfig = {
-    ...config,
-    signedIn: true,
-    route: payload.route,
-    encryptedAccessToken: safeStorage.encryptString(payload.access_token).toString('base64'),
-    encryptedRefreshToken: safeStorage.encryptString(payload.refresh_token).toString('base64'),
-  }
-  await writeFile(serviceConfigPath(), JSON.stringify(stored), 'utf8')
-  return publicServiceConfig(stored)
-}
-
-async function refreshAccessToken(config: StoredServiceConfig): Promise<StoredServiceConfig> {
-  const refreshToken = decryptSecret(config.encryptedRefreshToken)
-  const response = await fetch(`${config.serverUrl}/api/auth/refresh`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Device-ID': config.deviceId }, body: JSON.stringify({ refresh_token: refreshToken }) })
-  const body = await response.json().catch(() => ({})) as { detail?: string; access_token?: string; refresh_token?: string; route?: string }
-  if (!response.ok || !body.access_token || !body.refresh_token || !body.route) throw new Error(body.detail || '登录会话已失效，请重新登录')
-  await saveLoginSession(config, { access_token: body.access_token, refresh_token: body.refresh_token, route: body.route })
-  return loadServiceConfig()
-}
-
-async function serviceRequest(path: string, init: RequestInit = {}, requireAuthentication = false, retried = false): Promise<Response> {
-  const config = await loadServiceConfig()
-  if (!config.serverUrl) throw new Error('请先配置 IDEA 服务地址')
-  const headers = new Headers(init.headers)
-  headers.set('X-Device-ID', config.deviceId)
-  if (config.spaceId) headers.set('X-Space-ID', config.spaceId)
-  if (requireAuthentication) headers.set('Authorization', `Bearer ${decryptSecret(config.encryptedAccessToken)}`)
-  const controller = new AbortController()
-  const timeout = setTimeout(() => controller.abort(), 15_000)
-  try {
-    const response = await fetch(`${config.serverUrl}${path}`, { ...init, headers, signal: controller.signal })
-    if (requireAuthentication && response.status === 401 && !retried) {
-      await refreshAccessToken(config)
-      return serviceRequest(path, init, requireAuthentication, true)
-    }
-    return response
-  } catch {
-    throw new Error('无法连接 IDEA 服务')
-  } finally {
-    clearTimeout(timeout)
-  }
-}
-
-async function sendEmailCode(email: string): Promise<void> {
-  const response = await serviceRequest('/api/auth/email/send', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email }) })
-  const body = await response.json().catch(() => ({})) as { detail?: string }
-  if (!response.ok) throw new Error(body.detail || '验证码发送失败')
-}
-
-async function verifyEmailCode(email: string, code: string): Promise<LoginResponse> {
-  const config = await loadServiceConfig()
-  const response = await serviceRequest('/api/auth/email/verify', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, code }) })
-  const body = await response.json().catch(() => ({})) as { detail?: string; access_token?: string; refresh_token?: string; route?: string; principal?: { account_id: string; role: string } }
-  if (!response.ok || !body.access_token || !body.refresh_token || !body.route || !body.principal) throw new Error(body.detail || '登录失败')
-  await saveLoginSession(config, { access_token: body.access_token, refresh_token: body.refresh_token, route: body.route })
-  return { route: body.route, principal: body.principal }
-}
-
-async function logout(): Promise<void> {
-  const config = await loadServiceConfig()
-  if (config.serverUrl && config.encryptedRefreshToken) {
-    await serviceRequest('/api/auth/logout', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ refresh_token: decryptSecret(config.encryptedRefreshToken) }) }, true).catch(() => undefined)
-  }
-  await writeFile(serviceConfigPath(), JSON.stringify({ serverUrl: config.serverUrl, spaceId: config.spaceId, deviceId: config.deviceId, signedIn: false }), 'utf8')
-}
-
-function assertWithinWorkspace(workspace: string, target: string): string {
-  const workspacePath = resolve(workspace)
-  const targetPath = resolve(target)
-  const pathFromWorkspace = relative(workspacePath, targetPath)
-  if (pathFromWorkspace.startsWith('..') || pathFromWorkspace === '' && targetPath !== workspacePath) {
-    throw new Error('文件路径不在当前工作区内')
-  }
-  return targetPath
-}
-
-function createRunId(): string {
-  return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-}
-
-function runCommand(command: string, args: string[], cwd: string, sessionId: string, send: (event: RunEvent) => void): Promise<number> {
-  return new Promise((resolveRun, rejectRun) => {
-    let outputLength = 0
-    const child = spawn(command, args, { cwd, shell: false, windowsHide: true, env: process.env })
-    activeRuns.set(sessionId, child)
-    const timeout = setTimeout(() => {
-      send({ sessionId, stream: 'system', content: `执行超过 ${RUN_TIMEOUT_MS / 1000} 秒，已停止。\n` })
-      child.kill()
-    }, RUN_TIMEOUT_MS)
-    const emit = (stream: 'stdout' | 'stderr', chunk: Buffer) => {
-      if (outputLength >= MAX_OUTPUT_LENGTH) return
-      const content = chunk.toString().slice(0, MAX_OUTPUT_LENGTH - outputLength)
-      outputLength += content.length
-      send({ sessionId, stream, content })
-    }
-    child.stdout.on('data', (chunk: Buffer) => emit('stdout', chunk))
-    child.stderr.on('data', (chunk: Buffer) => emit('stderr', chunk))
-    child.once('error', (error) => {
-      clearTimeout(timeout)
-      activeRuns.delete(sessionId)
-      rejectRun(error)
-    })
-    child.once('close', (code) => {
-      clearTimeout(timeout)
-      activeRuns.delete(sessionId)
-      resolveRun(code ?? -1)
-    })
-  })
-}
-
-async function executeFile(workspace: string, filePath: string, mode: RunMode, sessionId: string, send: (event: RunEvent) => void): Promise<void> {
-  const sourcePath = assertWithinWorkspace(workspace, filePath)
-  const extension = extname(sourcePath).toLowerCase()
-  const sourceDirectory = dirname(sourcePath)
-  const fileName = basename(sourcePath)
-  const baseName = parse(sourcePath).name
-  const buildDirectory = join(workspace, '.idea-assistant', 'build')
-  const buildOutput = join(buildDirectory, `${baseName}.exe`)
-  await mkdir(buildDirectory, { recursive: true })
-  const run = (command: string, args: string[], cwd = sourceDirectory) => runCommand(command, args, cwd, sessionId, send)
-  const compileAndRun = async (command: string, compileArgs: string[], runCommandName: string, runArgs: string[]) => {
-    send({ sessionId, stream: 'system', content: `$ ${command} ${compileArgs.join(' ')}\n` })
-    const compileCode = await run(command, compileArgs)
-    if (compileCode !== 0) throw new Error(`编译失败，退出码 ${compileCode}`)
-    send({ sessionId, stream: 'system', content: `$ ${runCommandName} ${runArgs.join(' ')}\n` })
-    const runCode = await run(runCommandName, runArgs)
-    if (runCode !== 0) throw new Error(`运行结束，退出码 ${runCode}`)
-  }
-
-  if (mode === 'debug' && extension !== '.js' && extension !== '.mjs' && extension !== '.cjs') {
-    throw new Error('当前语言的断点调试需要独立 Debug Adapter，第一版仅支持 Node.js Inspector 调试。')
-  }
-  if (extension === '.js' || extension === '.mjs' || extension === '.cjs') {
-    const args = mode === 'debug' ? ['--inspect-brk', sourcePath] : [sourcePath]
-    send({ sessionId, stream: 'system', content: `$ node ${args.join(' ')}\n` })
-    const code = await run('node', args)
-    if (code !== 0) throw new Error(`Node.js 结束，退出码 ${code}`)
-    return
-  }
-  if (extension === '.py') {
-    send({ sessionId, stream: 'system', content: `$ python ${sourcePath}\n` })
-    const code = await run('python', [sourcePath])
-    if (code !== 0) throw new Error(`Python 结束，退出码 ${code}`)
-    return
-  }
-  if (extension === '.go') {
-    send({ sessionId, stream: 'system', content: `$ go run ${sourcePath}\n` })
-    const code = await run('go', ['run', sourcePath])
-    if (code !== 0) throw new Error(`Go 结束，退出码 ${code}`)
-    return
-  }
-  if (extension === '.ts') {
-    await compileAndRun('tsc', [sourcePath, '--outDir', buildDirectory, '--target', 'ES2022', '--module', 'commonjs', '--skipLibCheck'], 'node', [join(buildDirectory, `${baseName}.js`)])
-    return
-  }
-  if (extension === '.c' || extension === '.cc' || extension === '.cpp' || extension === '.cxx') {
-    await compileAndRun('g++', [sourcePath, '-o', buildOutput], buildOutput, [])
-    return
-  }
-  if (extension === '.rs') {
-    await compileAndRun('rustc', [sourcePath, '-o', buildOutput], buildOutput, [])
-    return
-  }
-  if (extension === '.java') {
-    await compileAndRun('javac', ['-d', buildDirectory, sourcePath], 'java', ['-cp', buildDirectory, baseName])
-    return
-  }
-  throw new Error(`不支持运行 ${fileName}，请启用相应语言插件。`)
-}
-
-async function buildFileTree(directory: string, depth = 0): Promise<FileEntry[]> {
-  if (depth > 4) return []
-  const entries = await readdir(directory, { withFileTypes: true })
-  const visibleEntries = entries
-    .filter((entry) => !entry.name.startsWith('.') && !(entry.isDirectory() && SKIPPED_DIRECTORIES.has(entry.name)))
-    .sort((left, right) => Number(right.isDirectory()) - Number(left.isDirectory()) || left.name.localeCompare(right.name))
-
-  return Promise.all(visibleEntries.slice(0, 250).map(async (entry) => {
-    const fullPath = join(directory, entry.name)
-    if (entry.isDirectory()) {
-      return { name: entry.name, path: fullPath, kind: 'directory', children: await buildFileTree(fullPath, depth + 1) }
-    }
-    return { name: entry.name, path: fullPath, kind: 'file' }
-  }))
-}
-
-async function createWindow(): Promise<void> {
-  const window = new BrowserWindow({
-    width: 1480,
-    height: 920,
-    minWidth: 1120,
-    minHeight: 700,
-    backgroundColor: '#0c111c',
-    title: 'IDEA Assistant',
-    autoHideMenuBar: true,
-    webPreferences: {
-      preload: join(currentDir, 'preload.js'),
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: false,
-    },
-  })
-
-  if (isDevelopment) {
-    await window.loadURL('http://127.0.0.1:5173')
-  } else {
-    await window.loadFile(join(currentDir, '..', 'dist', 'index.html'))
-  }
-}
-
-app.whenReady().then(async () => {
-  ipcMain.handle('service:config', async (): Promise<ServiceConfig> => {
-    const config = await loadServiceConfig()
-    return publicServiceConfig(config)
-  })
-  ipcMain.handle('service:save-config', async (_event, config: { serverUrl: string; spaceId: string }): Promise<ServiceConfig> => saveServiceConfig(config))
-  ipcMain.handle('service:send-email-code', async (_event, email: string): Promise<void> => sendEmailCode(email))
-  ipcMain.handle('service:verify-email-code', async (_event, email: string, code: string): Promise<LoginResponse> => verifyEmailCode(email, code))
-  ipcMain.handle('service:logout', async (): Promise<void> => logout())
-  ipcMain.handle('service:health', async (): Promise<ServiceHealth> => {
-    const response = await serviceRequest('/health')
-    if (!response.ok) throw new Error(`服务健康检查失败 (${response.status})`)
-    const body = await response.json() as { status?: string; version?: string; llm_available?: boolean }
-    const identity = await serviceRequest('/api/platform/me', {}, true)
-    if (!identity.ok) {
-      const error = await identity.json().catch(() => ({})) as { detail?: string }
-      throw new Error(error.detail || `服务鉴权失败 (${identity.status})`)
-    }
-    return { status: body.status ?? 'unknown', version: body.version, llmAvailable: body.llm_available }
-  })
-  ipcMain.handle('service:chat', async (_event, request: { agentId: string; message: string; conversationId?: string; useMemory?: boolean }): Promise<ChatResponse> => {
-    const response = await serviceRequest('/api/assistant/chat', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ agent_id: request.agentId, message: request.message, conversation_id: request.conversationId, use_memory: request.useMemory === true }),
-    }, true)
-    const body = await response.json().catch(() => ({})) as { detail?: string; reply?: string; conversation_id?: string; agent_id?: string; dispatched_to?: string | null }
-    if (!response.ok) throw new Error(body.detail || `服务请求失败 (${response.status})`)
-    if (!body.reply || !body.conversation_id || !body.agent_id) throw new Error('服务返回了无效的聊天响应')
-    return { reply: body.reply, conversationId: body.conversation_id, agentId: body.agent_id, dispatchedTo: body.dispatched_to }
-  })
-  ipcMain.handle('service:conversations', async (): Promise<ConversationSummary[]> => {
-    const response = await serviceRequest('/api/conversations', {}, true)
-    const body = await response.json().catch(() => ({})) as { detail?: string; conversations?: ConversationSummary[] }
-    if (!response.ok || !body.conversations) throw new Error(body.detail || `会话读取失败 (${response.status})`)
-    return body.conversations
-  })
-  ipcMain.handle('service:conversation', async (_event, conversationId: string): Promise<ConversationDetail> => {
-    const response = await serviceRequest(`/api/conversations/${encodeURIComponent(conversationId)}`, {}, true)
-    const body = await response.json().catch(() => ({})) as { detail?: string; id?: string; messages?: ConversationDetail['messages'] }
-    if (!response.ok || !body.id || !body.messages) throw new Error(body.detail || `会话读取失败 (${response.status})`)
-    return { id: body.id, messages: body.messages }
-  })
-  ipcMain.handle('service:tasks', async (): Promise<TaskSummary[]> => {
-    const response = await serviceRequest('/api/tasks', {}, true)
-    const body = await response.json().catch(() => ({})) as { detail?: string; tasks?: TaskSummary[] }
-    if (!response.ok || !body.tasks) throw new Error(body.detail || `任务读取失败 (${response.status})`)
-    return body.tasks
-  })
-  ipcMain.handle('service:sync-events', async (_event, after: number): Promise<SyncSnapshot> => {
-    const response = await serviceRequest(`/api/sync/events?after=${Math.max(0, after)}`, {}, true)
-    const body = await response.json().catch(() => ({})) as { detail?: string; events?: SyncSnapshot['events']; next_cursor?: number }
-    if (!response.ok || !body.events || typeof body.next_cursor !== 'number') throw new Error(body.detail || `同步读取失败 (${response.status})`)
-    return { events: body.events, next_cursor: body.next_cursor }
-  })
-  ipcMain.handle('service:memories', async (): Promise<MemoryRecord[]> => {
-    const response = await serviceRequest('/api/memories', {}, true)
-    const body = await response.json().catch(() => ({})) as { detail?: string; memories?: MemoryRecord[] }
-    if (!response.ok || !body.memories) throw new Error(body.detail || `记忆读取失败 (${response.status})`)
-    return body.memories
-  })
-  ipcMain.handle('service:create-memory', async (_event, memory: { scope: MemoryScope; category: string; content: string }): Promise<MemoryRecord> => {
-    const response = await serviceRequest('/api/memories', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...memory, confirmed: true }) }, true)
-    const body = await response.json().catch(() => ({})) as { detail?: string; id?: string }
-    if (!response.ok || !body.id) throw new Error(body.detail || `记忆保存失败 (${response.status})`)
-    return body as MemoryRecord
-  })
-  ipcMain.handle('service:delete-memory', async (_event, memoryId: string): Promise<void> => {
-    const response = await serviceRequest(`/api/memories/${encodeURIComponent(memoryId)}`, { method: 'DELETE' }, true)
-    if (!response.ok) {
-      const body = await response.json().catch(() => ({})) as { detail?: string }
-      throw new Error(body.detail || `记忆删除失败 (${response.status})`)
-    }
-  })
-  ipcMain.handle('workspace:choose', async () => {
-    const result = await dialog.showOpenDialog({ properties: ['openDirectory', 'createDirectory'] })
-    return result.canceled ? null : result.filePaths[0]
-  })
-  ipcMain.handle('workspace:tree', async (_event, workspace: string): Promise<FileEntry[]> => {
-    if (!workspace || !existsSync(workspace)) throw new Error('工作区不存在')
-    return buildFileTree(resolve(workspace))
-  })
-  ipcMain.handle('file:read', async (_event, workspace: string, filePath: string) => {
-    const resolvedPath = assertWithinWorkspace(workspace, filePath)
-    if (!TEXT_EXTENSIONS.has(extname(resolvedPath).toLowerCase())) throw new Error('当前仅支持打开文本与 Markdown 文件')
-    return { path: resolvedPath, name: basename(resolvedPath), content: await readFile(resolvedPath, 'utf8') }
-  })
-  ipcMain.handle('file:save', async (_event, workspace: string, filePath: string, content: string) => {
-    const resolvedPath = assertWithinWorkspace(workspace, filePath)
-    if (!TEXT_EXTENSIONS.has(extname(resolvedPath).toLowerCase())) throw new Error('当前仅支持保存文本与 Markdown 文件')
-    if (typeof content !== 'string' || content.length > 2_000_000) throw new Error('文件内容无效或超过 2 MB 限制')
-    await writeFile(resolvedPath, content, 'utf8')
-    return { path: resolvedPath, saved: true }
-  })
-  ipcMain.handle('execution:start', async (event, workspace: string, filePath: string, mode: RunMode) => {
-    if (mode !== 'run' && mode !== 'debug') throw new Error('无效的执行模式')
-    const sessionId = createRunId()
-    const send = (runEvent: RunEvent) => event.sender.send('execution:output', runEvent)
-    send({ sessionId, stream: 'system', content: mode === 'debug' ? '正在以调试模式启动。\n' : '正在运行。\n' })
-    void executeFile(workspace, filePath, mode, sessionId, send)
-      .then(() => send({ sessionId, stream: 'system', content: '执行完成。\n' }))
-      .catch((error) => send({ sessionId, stream: 'stderr', content: `${error instanceof Error ? error.message : String(error)}\n` }))
-    return { sessionId }
-  })
-  ipcMain.handle('execution:stop', async (_event, sessionId: string) => {
-    const child = activeRuns.get(sessionId)
-    if (!child) return false
-    child.kill()
-    return true
-  })
-
-  try {
-    await createWindow()
-  } catch (error) {
-    await dialog.showMessageBox({ type: 'error', title: 'IDEA Assistant 启动失败', message: String(error) })
-    app.quit()
-  }
-
-  app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) void createWindow() })
-})
-
+app.whenReady().then(async () => { await migrateLegacyOwnerSession(); ipcMain.handle('updates:check', async (): Promise<UpdateStatus> => checkForUpdates()); ipcMain.handle('updates:install', async (): Promise<UpdateStatus> => downloadAndInstallUpdate()); ipcMain.handle('service:config', async (): Promise<ServiceConfig> => publicServiceConfig(await loadServiceConfig())); ipcMain.handle('service:save-config', async (_event, config: { spaceId: string }): Promise<ServiceConfig> => saveServiceConfig(config)); ipcMain.handle('service:password-login', async (_event, email: string, password: string): Promise<LoginResponse> => passwordLogin(email, password)); ipcMain.handle('service:logout', async (): Promise<void> => logout()); ipcMain.handle('service:health', async (): Promise<ServiceHealth> => { const response = await serviceRequest('/health'); if (!response.ok) throw new Error(`服务健康检查失败 (${response.status})`); const body = await response.json() as { status?: string; version?: string; llm_available?: boolean }; const identity = await serviceRequest('/api/platform/me', {}, true); if (!identity.ok) throw new Error(`服务鉴权失败 (${identity.status})`); return { status: body.status ?? 'unknown', version: body.version, llmAvailable: body.llm_available } }); ipcMain.handle('service:chat', async (_event, request: { agentId: string; message: string; conversationId?: string; useMemory?: boolean; modelKey?: 'gpt' | 'deepseek-v4-flash' }): Promise<ChatResponse> => { const response = await serviceRequest('/api/assistant/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ agent_id: request.agentId, message: request.message, conversation_id: request.conversationId, use_memory: request.useMemory === true, model_key: request.modelKey ?? 'gpt' }) }, true); const body = await response.json().catch(() => ({})) as { detail?: string; reply?: string; conversation_id?: string; agent_id?: string; dispatched_to?: string | null; model_key?: 'gpt' | 'deepseek-v4-flash' }; if (!response.ok || !body.reply || !body.conversation_id || !body.agent_id) throw new Error(body.detail || '服务返回了无效的聊天响应'); return { reply: body.reply, conversationId: body.conversation_id, agentId: body.agent_id, dispatchedTo: body.dispatched_to, modelKey: body.model_key ?? 'gpt' } }); ipcMain.handle('service:conversations', async (): Promise<ConversationSummary[]> => { const response = await serviceRequest('/api/conversations', {}, true); const body = await response.json().catch(() => ({})) as { detail?: string; conversations?: ConversationSummary[] }; if (!response.ok || !body.conversations) throw new Error(body.detail || '会话读取失败'); return body.conversations }); ipcMain.handle('service:conversation', async (_event, id: string): Promise<ConversationDetail> => { const response = await serviceRequest(`/api/conversations/${encodeURIComponent(id)}`, {}, true); const body = await response.json().catch(() => ({})) as { detail?: string; id?: string; messages?: ConversationDetail['messages'] }; if (!response.ok || !body.id || !body.messages) throw new Error(body.detail || '会话读取失败'); return { id: body.id, messages: body.messages } }); ipcMain.handle('service:tasks', async (): Promise<TaskSummary[]> => { const response = await serviceRequest('/api/tasks', {}, true); const body = await response.json().catch(() => ({})) as { detail?: string; tasks?: TaskSummary[] }; if (!response.ok || !body.tasks) throw new Error(body.detail || '任务读取失败'); return body.tasks }); ipcMain.handle('service:sync-events', async (_event, after: number): Promise<SyncSnapshot> => { const response = await serviceRequest(`/api/sync/events?after=${Math.max(0, after)}`, {}, true); const body = await response.json().catch(() => ({})) as { detail?: string; events?: SyncSnapshot['events']; next_cursor?: number }; if (!response.ok || !body.events || typeof body.next_cursor !== 'number') throw new Error(body.detail || '同步读取失败'); return { events: body.events, next_cursor: body.next_cursor } }); if (isOwnerClient) { ipcMain.handle('owner:devices', async (): Promise<OwnerDevice[]> => { const response = await serviceRequest('/api/platform/owner/devices', {}, true); const body = await response.json().catch(() => ({})) as { detail?: string; devices?: OwnerDevice[] }; if (!response.ok || !body.devices) throw new Error(body.detail || '私有设备读取失败'); return body.devices }); ipcMain.handle('owner:approve-device', async (_event, id: string): Promise<void> => { const response = await serviceRequest(`/api/platform/owner/devices/${encodeURIComponent(id)}/approve`, { method: 'POST' }, true); if (!response.ok) throw new Error('设备批准失败') }); ipcMain.handle('owner:revoke-device', async (_event, id: string): Promise<void> => { const response = await serviceRequest(`/api/platform/owner/devices/${encodeURIComponent(id)}/revoke`, { method: 'POST' }, true); if (!response.ok) throw new Error('设备撤销失败') }); ipcMain.handle('service:memories', async (): Promise<MemoryRecord[]> => { const response = await serviceRequest('/api/memories', {}, true); const body = await response.json().catch(() => ({})) as { detail?: string; memories?: MemoryRecord[] }; if (!response.ok || !body.memories) throw new Error(body.detail || '记忆读取失败'); return body.memories }); ipcMain.handle('service:create-memory', async (_event, memory: { scope: MemoryScope; category: string; content: string }): Promise<MemoryRecord> => { const response = await serviceRequest('/api/memories', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...memory, confirmed: true }) }, true); const body = await response.json().catch(() => ({})) as { detail?: string; id?: string }; if (!response.ok || !body.id) throw new Error(body.detail || '记忆保存失败'); return body as MemoryRecord }); ipcMain.handle('service:delete-memory', async (_event, memory: { id: string; revision: number }): Promise<void> => { const response = await serviceRequest(`/api/memories/${encodeURIComponent(memory.id)}`, { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ expected_revision: memory.revision }) }, true); if (!response.ok) throw new Error('记忆删除失败') }) } ipcMain.handle('workspace:choose', async () => { const result = await dialog.showOpenDialog({ properties: ['openDirectory', 'createDirectory'] }); return result.canceled ? null : result.filePaths[0] }); ipcMain.handle('workspace:tree', async (_event, workspace: string): Promise<FileEntry[]> => { if (!workspace || !existsSync(workspace)) throw new Error('工作区不存在'); return buildFileTree(resolve(workspace)) }); ipcMain.handle('file:read', async (_event, workspace: string, filePath: string) => { const path = assertWithinWorkspace(workspace, filePath); if (!TEXT_EXTENSIONS.has(extname(path).toLowerCase())) throw new Error('当前仅支持打开文本与 Markdown 文件'); return { path, name: basename(path), content: await readFile(path, 'utf8') } }); ipcMain.handle('file:save', async (_event, workspace: string, filePath: string, content: string) => { const path = assertWithinWorkspace(workspace, filePath); if (!TEXT_EXTENSIONS.has(extname(path).toLowerCase()) || typeof content !== 'string' || content.length > 2_000_000) throw new Error('文件内容无效'); await writeFile(path, content, 'utf8'); return { path, saved: true } }); ipcMain.handle('file:create', async (_event, workspace: string, relativePath: string) => { if (!workspace || !existsSync(workspace) || !relativePath.trim()) throw new Error('请输入相对文件名'); const path = assertWithinWorkspace(workspace, resolve(workspace, relativePath.trim())); if (!TEXT_EXTENSIONS.has(extname(path).toLowerCase()) || existsSync(path)) throw new Error('文件无效或已存在'); await mkdir(dirname(path), { recursive: true }); await writeFile(path, '', 'utf8'); return { path, name: basename(path) } }); ipcMain.handle('execution:start', async (event, workspace: string, filePath: string, mode: RunMode) => { const sessionId = createRunId(); const send = (runEvent: RunEvent) => event.sender.send('execution:output', runEvent); setImmediate(() => { void executeFile(workspace, filePath, mode, sessionId, send).then(() => send({ sessionId, stream: 'system', content: '执行完成。\n', terminal: true })).catch((error) => send({ sessionId, stream: 'stderr', content: `${error instanceof Error ? error.message : String(error)}\n`, terminal: true })) }); return { sessionId } }); ipcMain.handle('execution:stop', async (_event, id: string) => { const child = activeRuns.get(id); if (!child) return false; child.kill(); return true }); try { await createWindow() } catch (error) { await dialog.showMessageBox({ type: 'error', title: 'IDEA Assistant 启动失败', message: String(error) }); app.quit() } setTimeout(() => { void checkForUpdates() }, 5_000); app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) void createWindow() }) })
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit() })

@@ -1,10 +1,17 @@
 {
   "mcpServers": {
-    "IDEA-Multi-Agent": {
-      "url": "http://YOUR_LINUX_SERVER_IP:8900/mcp",
+    "IDEA-Controlled-Memory": {
+      "url": "https://shiroha-rin.world/mcp/memory/mcp",
       "headers": {
-        "Authorization": "Bearer YOUR_SECRET_TOKEN_HERE",
+        "Authorization": "Bearer MCP_DEVICE_CREDENTIAL_CREATED_ONCE_FOR_THIS_TRAE",
         "RUN_MCP_TIMEOUT_MS": "120000"
+      }
+    },
+    "IDEA-Owner-Agent": {
+      "url": "https://shiroha-rin.world/mcp/idea/mcp",
+      "headers": {
+        "Authorization": "Bearer OWNER_IDEA_AGENT_CREDENTIAL_CREATED_ONCE_FOR_THIS_TRAE",
+        "RUN_MCP_TIMEOUT_MS": "180000"
       }
     }
   }
