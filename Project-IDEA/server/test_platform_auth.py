@@ -130,7 +130,7 @@ class PlatformApiTests(unittest.TestCase):
         idea_headers = {"Authorization": f"Bearer {idea_credential.json()['token']}", "Content-Type": "application/json", "Accept": "application/json", "Host": "localhost:8000"}
         tools = self.client.post(endpoint, headers=idea_headers, json={"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
         self.assertEqual(tools.status_code, 200)
-        self.assertSetEqual({item["name"] for item in tools.json()["result"]["tools"]}, {"idea_chat", "idea_session_get", "idea_task_status"})
+        self.assertSetEqual({item["name"] for item in tools.json()["result"]["tools"]}, {"idea_chat", "idea_memory_save", "idea_session_get", "idea_task_status"})
         self.assertEqual(self.client.post("/mcp/memory/mcp", headers=idea_headers, json={"jsonrpc": "2.0", "id": 3, "method": "tools/list", "params": {}}).status_code, 401)
 
         original_run = self.main.agent_runners["idea"].run
@@ -150,6 +150,11 @@ class PlatformApiTests(unittest.TestCase):
             self.assertEqual(session.status_code, 200)
             messages = json.loads(session.json()["result"]["content"][0]["text"])["messages"]
             self.assertEqual([item["role"] for item in messages], ["user", "assistant"])
+            saved = self.client.post(endpoint, headers=idea_headers, json={"jsonrpc": "2.0", "id": 6, "method": "tools/call", "params": {"name": "idea_memory_save", "arguments": {"category": "continuity", "content": "Owner MCP memory write marker."}}})
+            self.assertEqual(saved.status_code, 200)
+            saved_memory = json.loads(saved.json()["result"]["content"][0]["text"])
+            self.assertEqual(saved_memory["namespace"], "owner/owner-shiroha-nao")
+            self.assertIn(saved_memory["id"], {item["id"] for item in self.main.platform_store.list_memories("account-owner", "space-project-world", ["owner/owner-shiroha-nao"])})
         finally:
             self.main.agent_runners["idea"].run = original_run
 
@@ -317,6 +322,39 @@ class PlatformApiTests(unittest.TestCase):
         deleted = self.client.request("DELETE", f"/api/memories/{memory_id}", headers=self.headers, json={"expected_revision": 2})
         self.assertEqual(deleted.status_code, 200)
         self.assertFalse(any(item["id"] == memory_id for item in self.client.get("/api/memories", headers=self.headers).json()["memories"]))
+
+    def test_memory_context_falls_back_within_authorized_namespaces(self):
+        device_id = "memory-context-owner-device"
+        pending_login = self.password_login(self.owner_email, self.owner_password, device_id)
+        self.assertEqual(pending_login.status_code, 200)
+        devices = self.client.get("/api/platform/owner/devices", headers=self.headers).json()["devices"]
+        pending = next(device for device in devices if device["device_id"] == device_id)
+        self.assertEqual(self.client.post(f"/api/platform/owner/devices/{pending['owner_device_id']}/approve", headers=self.headers).status_code, 200)
+
+        owner_login = self.password_login(self.owner_email, self.owner_password, device_id)
+        self.assertEqual(owner_login.status_code, 200)
+        self.assertEqual(owner_login.json()["route"], "owner_idea")
+        owner_principal = self.main.platform_store.authenticate(owner_login.json()["access_token"], device_id)
+        owner_context = self.main.RequestContext("memory-context-owner", owner_principal, device_id, "space-project-world")
+        self.main.platform_store.create_memory(
+            owner_principal.account_id,
+            owner_context.space_id,
+            self.main._memory_namespaces(owner_context)["owner"],
+            "project",
+            "Owner work continuity fallback marker.",
+            owner_principal.principal_id,
+        )
+
+        owner_memory_context = self.main._memory_context(owner_context, "你记得自己曾经的工作内容吗")
+        self.assertIn("Owner work continuity fallback marker.", owner_memory_context)
+
+        member_device_id = "memory-context-member-device"
+        member_login = self.password_login(self.member_email, self.member_password, member_device_id)
+        self.assertEqual(member_login.status_code, 200)
+        member_principal = self.main.platform_store.authenticate(member_login.json()["access_token"], member_device_id)
+        member_context = self.main.RequestContext("memory-context-member", member_principal, member_device_id, "space-project-world")
+        member_memory_context = self.main._memory_context(member_context, "你记得自己曾经的工作内容吗")
+        self.assertNotIn("Owner work continuity fallback marker.", member_memory_context)
 
     def test_member_cannot_use_owner_memory_scope(self):
         login = self.password_login(self.member_email, self.member_password, "memory-member-device")

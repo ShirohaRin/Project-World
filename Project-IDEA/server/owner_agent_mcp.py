@@ -10,17 +10,20 @@ agent_runner = None
 create_conversation = None
 memory_context = None
 global_context = None
+memory_namespaces = None
 max_history = 50
 max_message_length = 20_000
+max_memory_length = 10_000
 
 
-def configure(store, runner, conversation_creator, memory_resolver, global_resolver):
-    global platform_store, agent_runner, create_conversation, memory_context, global_context
+def configure(store, runner, conversation_creator, memory_resolver, global_resolver, namespace_resolver):
+    global platform_store, agent_runner, create_conversation, memory_context, global_context, memory_namespaces
     platform_store = store
     agent_runner = runner
     create_conversation = conversation_creator
     memory_context = memory_resolver
     global_context = global_resolver
+    memory_namespaces = namespace_resolver
 
 
 mcp = FastMCP("IDEA Owner Agent", stateless_http=True, json_response=True)
@@ -35,6 +38,7 @@ def _context():
         or create_conversation is None
         or memory_context is None
         or global_context is None
+        or memory_namespaces is None
     ):
         raise RuntimeError("IDEA MCP 请求未完成授权")
     return context
@@ -43,6 +47,8 @@ def _context():
 @mcp.tool()
 async def idea_chat(message: str, conversation_id: str | None = None, use_memory: bool = True) -> str:
     """向 Owner 专属云端 IDEA 发送消息，并返回可跨设备续接的会话 ID 与回复。"""
+    if not isinstance(use_memory, bool):
+        raise ValueError("use_memory 必须是布尔值")
     context = _context()
     if not isinstance(message, str) or not message.strip():
         raise ValueError("message 必须是非空字符串")
@@ -59,10 +65,9 @@ async def idea_chat(message: str, conversation_id: str | None = None, use_memory
     other_context = global_context(context, conversation_id)
     if other_context:
         runner_message = f"以下是其他会话的最近摘要，仅作必要上下文：\n{other_context}\n\n当前用户请求：\n{runner_message}"
-    if use_memory:
-        saved_context = memory_context(context, message)
-        if saved_context:
-            runner_message = f"以下是用户明确保存的长期记忆，仅作必要上下文：\n{saved_context}\n\n当前用户请求：\n{runner_message}"
+    saved_context = memory_context(context, message)
+    if saved_context:
+        runner_message = f"以下是用户明确保存的长期记忆，仅作必要上下文：\n{saved_context}\n\n当前用户请求：\n{runner_message}"
 
     result = await agent_runner.run(user_message=runner_message, history=history[-10:])
     reply = result.get("reply", "抱歉，我暂时无法处理这个请求。")
@@ -94,6 +99,39 @@ async def idea_chat(message: str, conversation_id: str | None = None, use_memory
         },
         ensure_ascii=False,
     )
+
+
+@mcp.tool()
+def idea_memory_save(content: str, category: str = "general") -> str:
+    """将确认过的长期事项写入当前 Owner 私域记忆，供其他获批设备续接使用。"""
+    context = _context()
+    if not isinstance(content, str) or not (1 <= len(content.strip()) <= max_memory_length):
+        raise ValueError(f"content 必须为 1 到 {max_memory_length} 个字符")
+    if not isinstance(category, str) or not (1 <= len(category.strip()) <= 80):
+        raise ValueError("category 必须为 1 到 80 个字符")
+
+    namespaces = memory_namespaces(context)
+    namespace = namespaces.get("owner")
+    if not namespace:
+        raise PermissionError("当前身份无权写入 Owner 私域记忆")
+    memory = platform_store.create_memory(
+        context.principal.account_id,
+        context.space_id,
+        namespace,
+        category.strip(),
+        content.strip(),
+        context.principal.principal_id,
+    )
+    platform_store.write_audit(
+        "mcp.idea_memory_saved",
+        context,
+        action="create",
+        resource_type="memory",
+        resource_id=memory["id"],
+        decision="allowed",
+        metadata={"category": memory["category"], "namespace": namespace},
+    )
+    return json.dumps(memory, ensure_ascii=False)
 
 
 @mcp.tool()

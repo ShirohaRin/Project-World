@@ -436,13 +436,21 @@ def _memory_scope(context: RequestContext, scope: object) -> tuple[str, str]:
 
 
 def _memory_context(context: RequestContext, query: str) -> str:
+    namespaces = list(_memory_namespaces(context).values())
     memories = platform_store.list_memories(
         context.principal.account_id,
         context.space_id,
-        list(_memory_namespaces(context).values()),
+        namespaces,
         query=query,
         limit=5,
     )
+    if not memories:
+        memories = platform_store.list_memories(
+            context.principal.account_id,
+            context.space_id,
+            namespaces,
+            limit=5,
+        )
     if not memories:
         return ""
     return "\n".join(f"- [{item['category']}] {item['content']}" for item in memories)
@@ -469,6 +477,7 @@ owner_agent_mcp.configure(
     _create_conversation,
     _memory_context,
     _global_context,
+    _memory_namespaces,
 )
 
 # ---------------------------------------------------------------------------
@@ -796,10 +805,9 @@ async def chat_with_assistant(request: Request):
         global_context = _global_context(context, conversation_id)
         if global_context:
             runner_message = f"以下是其他会话的最近摘要，仅作必要上下文：\n{global_context}\n\n当前用户请求：\n{message}"
-    if body.get("use_memory") is True:
-        memory_context = _memory_context(context, message)
-        if memory_context:
-            runner_message = f"以下是用户明确保存的长期记忆，仅作必要上下文：\n{memory_context}\n\n当前用户请求：\n{runner_message}"
+    memory_context = _memory_context(context, message)
+    if memory_context:
+        runner_message = f"以下是用户明确保存的长期记忆，仅作必要上下文：\n{memory_context}\n\n当前用户请求：\n{runner_message}"
 
     result = await agent_runners[agent_id].run(user_message=runner_message, history=history[-10:], llm_model_config=model_config)
 
