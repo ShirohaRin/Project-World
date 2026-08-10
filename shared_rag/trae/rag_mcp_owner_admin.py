@@ -200,8 +200,6 @@ def rebuild_knowledge_index(collection: str = "all") -> str:
 
 
 async def main() -> None:
-    server = Server("rag-owner-admin")
-
     tools = {
         "search_knowledge": (
             "以 Owner 管理权限检索任意知识库集合，包括完整 private 内容。",
@@ -283,15 +281,17 @@ async def main() -> None:
         ),
     }
 
-    @server.list_tools()
-    async def list_tools() -> list[types.Tool]:
-        return [
-            types.Tool(name=name, description=definition[0], inputSchema=definition[1])
-            for name, definition in tools.items()
-        ]
+    async def list_tools(_, __) -> types.ListToolsResult:
+        return types.ListToolsResult(
+            tools=[
+                types.Tool(name=name, description=definition[0], inputSchema=definition[1])
+                for name, definition in tools.items()
+            ]
+        )
 
-    @server.call_tool()
-    async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextContent]:
+    async def call_tool(_, params: types.CallToolRequestParams) -> types.CallToolResult:
+        name = params.name
+        arguments = params.arguments or {}
         if name == "search_knowledge":
             result = await asyncio.to_thread(
                 search_knowledge,
@@ -323,7 +323,13 @@ async def main() -> None:
             result = await asyncio.to_thread(rebuild_knowledge_index, arguments.get("collection", "all"))
         else:
             raise ValueError(f"未知工具：{name}")
-        return [types.TextContent(type="text", text=result)]
+        return types.CallToolResult(content=[types.TextContent(type="text", text=result)])
+
+    server = Server(
+        "rag-owner-admin",
+        on_list_tools=list_tools,
+        on_call_tool=call_tool,
+    )
 
     log.info("Owner RAG MCP 已启动；服务地址：%s", SERVER_URL)
     async with stdio_server() as (read_stream, write_stream):
