@@ -6,12 +6,14 @@ Owner RAG 管理 MCP。
 """
 
 import asyncio
+import base64
 import json
 import logging
 import os
 import sys
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import requests
 from mcp import types
@@ -94,6 +96,58 @@ def list_documents() -> str:
     return json.dumps(result, ensure_ascii=False, indent=2)
 
 
+def require_document_path(value: Any) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("document_path 必须是 list_source_documents 返回的非空相对路径。")
+    normalized = value.replace("\\", "/")
+    parts = normalized.split("/")
+    if normalized.startswith("/") or any(part in ("", ".", "..") for part in parts):
+        raise ValueError("document_path 必须是集合内的安全相对路径，不能包含路径穿越。")
+    return normalized
+
+
+def list_source_documents(collection: str) -> str:
+    collection = require_collection(collection)
+    result = request_json("GET", f"/api/source-documents/{collection}", key=ADMIN_KEY)
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
+def read_source_document(collection: str, document_path: str) -> str:
+    collection = require_collection(collection)
+    document_path = require_document_path(document_path)
+    if not ADMIN_KEY:
+        raise RuntimeError("所需 RAG Key 尚未配置。")
+    try:
+        response = requests.get(
+            f"{SERVER_URL}/api/source-documents/{collection}/{quote(document_path, safe='/')}",
+            headers={"X-API-Key": ADMIN_KEY}, timeout=180,
+        )
+        response.raise_for_status()
+        if Path(document_path).suffix.lower() in {".txt", ".md"}:
+            return response.content.decode("utf-8")
+        return json.dumps({
+            "document_path": document_path,
+            "encoding": "base64",
+            "content": base64.b64encode(response.content).decode("ascii"),
+            "hint": "这是服务器返回的原始文件字节的 Base64 表示；PDF/DOCX 不可直接文本编辑，请通过上传替换文件。",
+        }, ensure_ascii=False, indent=2)
+    except requests.HTTPError as error:
+        raise RuntimeError(f"RAG 服务返回 HTTP {error.response.status_code}：{error.response.text}") from error
+    except requests.RequestException as error:
+        raise RuntimeError(f"无法连接 RAG 服务：{type(error).__name__}") from error
+
+
+def update_source_document(collection: str, document_path: str, content: str) -> str:
+    collection = require_collection(collection)
+    document_path = require_document_path(document_path)
+    if Path(document_path).suffix.lower() not in {".txt", ".md"}:
+        raise ValueError("仅可编辑 .txt 与 .md；PDF/DOCX 请通过上传替换。")
+    if not isinstance(content, str):
+        raise ValueError("content 必须是字符串。")
+    result = request_json("PUT", f"/api/source-documents/{collection}/{document_path}", key=ADMIN_KEY, body={"content": content})
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
 def upload_document(collection: str, local_path: str) -> str:
     collection = require_collection(collection)
     if not isinstance(local_path, str) or not local_path.strip():
@@ -165,6 +219,37 @@ async def main() -> None:
             "列出所有知识库集合中的已上传文档。",
             {"type": "object", "properties": {}},
         ),
+        "list_source_documents": (
+            "列出指定集合内可读取的原始文档路径。",
+            {
+                "type": "object",
+                "properties": {"collection": {"type": "string", "enum": sorted(COLLECTIONS)}},
+                "required": ["collection"],
+            },
+        ),
+        "read_source_document": (
+            "读取指定原始文档；支持所有服务器支持的文件格式。非文本格式以替换字符呈现原始字节，不可直接编辑。",
+            {
+                "type": "object",
+                "properties": {
+                    "collection": {"type": "string", "enum": sorted(COLLECTIONS)},
+                    "document_path": {"type": "string", "description": "list_source_documents 返回的集合内相对路径"},
+                },
+                "required": ["collection", "document_path"],
+            },
+        ),
+        "update_source_document": (
+            "更新指定 .txt 或 .md 原文；PDF/DOCX 不可直接文本编辑，应上传替换。更新后需要手动重建索引。",
+            {
+                "type": "object",
+                "properties": {
+                    "collection": {"type": "string", "enum": sorted(COLLECTIONS)},
+                    "document_path": {"type": "string", "description": "集合内 .txt 或 .md 相对路径"},
+                    "content": {"type": "string", "description": "完整替换后的 UTF-8 文本内容"},
+                },
+                "required": ["collection", "document_path", "content"],
+            },
+        ),
         "upload_knowledge_document": (
             "上传本机 TXT、Markdown、PDF 或 DOCX 到知识库。上传后需重建该集合索引。",
             {
@@ -216,6 +301,12 @@ async def main() -> None:
             )
         elif name == "list_knowledge_documents":
             result = await asyncio.to_thread(list_documents)
+        elif name == "list_source_documents":
+            result = await asyncio.to_thread(list_source_documents, arguments.get("collection"))
+        elif name == "read_source_document":
+            result = await asyncio.to_thread(read_source_document, arguments.get("collection"), arguments.get("document_path"))
+        elif name == "update_source_document":
+            result = await asyncio.to_thread(update_source_document, arguments.get("collection"), arguments.get("document_path"), arguments.get("content"))
         elif name == "upload_knowledge_document":
             result = await asyncio.to_thread(
                 upload_document,

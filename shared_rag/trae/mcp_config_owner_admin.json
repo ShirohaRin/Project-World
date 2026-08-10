@@ -6,9 +6,9 @@
         "D:\\Project World\\shared_rag\\trae\\rag_mcp_owner_admin.py"
       ],
       "env": {
-        "RAG_SERVER_URL": "http://113.249.105.33:8080",
-        "RAG_ADMIN_KEY": "请在此处填入管理员 Key",
-        "RAG_INGEST_KEY": "请在此处填入上传 Key"
+        "RAG_SERVER_URL": "https://你的域名",
+        "RAG_ADMIN_KEY": "在本机安全配置中提供，不要提交真实 Key",
+        "RAG_INGEST_KEY": "在本机安全配置中提供，不要提交真实 Key"
       }
     }
   }

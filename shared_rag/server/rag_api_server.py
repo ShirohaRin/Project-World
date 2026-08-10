@@ -19,6 +19,7 @@ import sys
 import json
 import shutil
 import logging
+import mimetypes
 import uuid
 import secrets as _secrets
 import re
@@ -132,6 +133,10 @@ class DocListResponse(BaseModel):
     novel: list[str]
     data: list[str]
 
+
+class SourceDocumentUpdateRequest(BaseModel):
+    content: str
+
 # ========== 文件管理器 Models ==========
 class LoginRequest(BaseModel):
     username: str
@@ -208,6 +213,61 @@ def verify_key(request: Request, required_level: str):
     if hierarchy.get(matched, 0) < required.get(required_level, 0):
         raise HTTPException(status_code=403, detail=f"权限不足：需要 {required_level} 级别")
     return matched
+
+
+def _source_document_root(collection: str) -> str:
+    mapping = {
+        "private": PRIVATE_DOCS_DIR,
+        "public": PUBLIC_DOCS_DIR,
+        "novel": NOVEL_DOCS_DIR,
+        "data": DATA_DOCS_DIR,
+    }
+    root = mapping.get(collection)
+    if root is None:
+        raise HTTPException(status_code=400, detail="collection 必须是 public、data、novel 或 private")
+    return root
+
+
+def _verify_source_document_access(request: Request, collection: str) -> str:
+    """原文接口必须显式携带 Admin 或 Research API Key，不能回退为无鉴权。"""
+    api_key = request.headers.get("X-API-Key") or request.headers.get("Authorization", "").replace("Bearer ", "")
+    if not api_key:
+        raise HTTPException(status_code=401, detail="原文接口必须提供 API Key")
+    if ADMIN_KEY and _secrets.compare_digest(api_key, ADMIN_KEY):
+        key_level = KeyLevel.ADMIN
+    elif RESEARCH_KEY and _secrets.compare_digest(api_key, RESEARCH_KEY):
+        key_level = KeyLevel.RESEARCH
+    else:
+        raise HTTPException(status_code=403, detail="仅 RAG Admin Key 或 Research Key 可访问原文接口")
+
+    allowed = {KeyLevel.ADMIN: {"public", "data", "novel", "private"}, KeyLevel.RESEARCH: {"public", "data"}}
+    if collection not in allowed[key_level]:
+        raise HTTPException(status_code=403, detail=f"{key_level} Key 无权访问 {collection} 集合原文")
+    return key_level
+
+
+def _source_document_path(collection: str, document_path: str) -> Path:
+    if not isinstance(document_path, str) or not document_path or "\x00" in document_path:
+        raise HTTPException(status_code=400, detail="document_path 必须是非空相对路径")
+    normalized = document_path.replace("\\", "/")
+    candidate = Path(normalized)
+    if candidate.is_absolute() or any(part in ("", ".", "..") for part in candidate.parts):
+        raise HTTPException(status_code=400, detail="document_path 必须是集合内的安全相对路径，不能包含路径穿越")
+
+    root = Path(_source_document_root(collection)).resolve()
+    target = (root / candidate).resolve()
+    try:
+        target.relative_to(root)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="document_path 超出集合目录，已拒绝")
+    return target
+
+
+def _list_source_documents(collection: str) -> list[str]:
+    root = Path(_source_document_root(collection))
+    if not root.exists():
+        return []
+    return sorted(str(path.relative_to(root)).replace("\\", "/") for path in root.rglob("*") if path.is_file())
 
 
 # ======================================================================
@@ -700,6 +760,38 @@ async def search_get(request: Request, q: str = Query(...), collection: str = Qu
     if collection not in allowed:
         raise HTTPException(status_code=403, detail=f"{key_level} Key 无权访问 {collection} 库")
     return rag.search(collection, q, top_k)
+
+
+# --- Source documents (API Key authorization required) ---
+@app.get("/api/source-documents/{collection}")
+async def list_source_documents(request: Request, collection: str):
+    _verify_source_document_access(request, collection)
+    return {"collection": collection, "documents": _list_source_documents(collection)}
+
+
+@app.get("/api/source-documents/{collection}/{document_path:path}")
+async def read_source_document(request: Request, collection: str, document_path: str):
+    _verify_source_document_access(request, collection)
+    target = _source_document_path(collection, document_path)
+    if not target.is_file():
+        raise HTTPException(status_code=404, detail="原始文档不存在")
+    return FileResponse(target, media_type=mimetypes.guess_type(target.name)[0] or "application/octet-stream", filename=target.name)
+
+
+@app.put("/api/source-documents/{collection}/{document_path:path}")
+async def update_source_document(request: Request, collection: str, document_path: str, body: SourceDocumentUpdateRequest):
+    _verify_source_document_access(request, collection)
+    target = _source_document_path(collection, document_path)
+    if target.suffix.lower() not in (".txt", ".md"):
+        raise HTTPException(status_code=400, detail="PDF/DOCX 等非文本原文不可直接文本编辑，请通过上传替换文件")
+    if not target.is_file():
+        raise HTTPException(status_code=404, detail="原始文档不存在")
+    try:
+        target.write_text(body.content, encoding="utf-8")
+    except OSError:
+        log.exception("无法更新原文: %s", target)
+        raise HTTPException(status_code=500, detail="原始文档更新失败")
+    return {"status": "ok", "collection": collection, "document_path": document_path, "hint": "原文已更新，需要重建索引；系统不会自动重建。"}
 
 
 # --- Documents (原有 API，保持不变) ---

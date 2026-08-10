@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "rag-research-source-documents": {
+      "command": "python",
+      "args": [
+        "D:\\Project World\\shared_rag\\trae\\rag_mcp_research_proxy.py"
+      ],
+      "env": {
+        "RAG_SERVER_URL": "https://你的域名",
+        "RAG_RESEARCH_KEY": "在本机安全配置中提供，不要提交真实 Key"
+      }
+    }
+  }
+}
