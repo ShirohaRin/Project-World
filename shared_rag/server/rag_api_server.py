@@ -24,6 +24,8 @@ import uuid
 import secrets as _secrets
 import re
 import tempfile
+import urllib.error
+import urllib.request
 import threading
 from pathlib import Path
 from datetime import datetime, timedelta
@@ -44,6 +46,10 @@ PUBLIC_DOCS_DIR  = os.environ.get("RAG_PUBLIC_DIR",  "/app/knowledge_public")
 NOVEL_DOCS_DIR   = os.environ.get("RAG_NOVEL_DIR",   "/app/knowledge_novel")
 DATA_DOCS_DIR    = os.environ.get("RAG_DATA_DIR",    "/app/knowledge_data")
 VECTOR_DIR = os.environ.get("RAG_CHROMA_DIR", "/app/vector_data")
+PROJECTS_DIR = os.environ.get("RAG_PROJECTS_DIR", "/app/knowledge_projects")
+PROJECTS_VECTOR_DIR = os.environ.get("RAG_PROJECTS_VECTOR_DIR", "/app/vector_data/projects")
+IDEA_PLATFORM_URL = os.environ.get("RAG_IDEA_PLATFORM_URL", "").rstrip("/")
+IDEA_SERVICE_TOKEN = os.environ.get("RAG_IDEA_SERVICE_TOKEN", "")
 EMBEDDING_MODEL = os.environ.get("RAG_EMBEDDING_MODEL", "BAAI/bge-small-zh-v1.5")
 DEFAULT_TOP_K = 5
 
@@ -638,6 +644,31 @@ class RAGEngine:
         log.info("[%s] 加载文档: %d 份", label, len(all_docs))
         return all_docs
 
+    def rebuild_project(self, project_id: str, collection: str):
+        from langchain_community.vectorstores import FAISS
+        from langchain_text_splitters import RecursiveCharacterTextSplitter
+        root, vector = project_root(project_id, collection), project_vector(project_id, collection)
+        docs = self._load_docs(str(root), f"project:{project_id}:{collection}")
+        if not docs:
+            if vector.exists(): shutil.rmtree(vector)
+            return {"documents": 0, "chunks": 0}
+        cfg = CHUNK_CONFIG[collection]
+        chunks = RecursiveCharacterTextSplitter(chunk_size=cfg["size"], chunk_overlap=cfg["overlap"], separators=["\n\n", "\n", "。", ".", "；", ";", "，", ",", " ", ""]).split_documents(docs)
+        temporary = Path(f"{vector}.tmp-{uuid.uuid4().hex}")
+        temporary.parent.mkdir(parents=True, exist_ok=True)
+        FAISS.from_documents(chunks, self.embeddings).save_local(str(temporary))
+        if vector.exists(): shutil.rmtree(vector)
+        os.replace(temporary, vector)
+        return {"documents": len(docs), "chunks": len(chunks)}
+
+    def search_project(self, project_id: str, collection: str, query: str, top_k: int):
+        if not self.is_ready: raise HTTPException(503, "Knowledge base not ready")
+        vector = project_vector(project_id, collection)
+        if not (vector / "index.faiss").exists(): return SearchResponse(query=query, collection=collection, total_results=0, results=[])
+        from langchain_community.vectorstores import FAISS
+        store = FAISS.load_local(str(vector), self.embeddings, allow_dangerous_deserialization=True)
+        results = store.similarity_search_with_score(query, k=min(top_k, 10))
+        return SearchResponse(query=query, collection=collection, total_results=len(results), results=[SearchResultItem(rank=i + 1, similarity=round(1.0 - min(score, 1.0), 4), source=os.path.basename(doc.metadata.get("source", "unknown")), content=doc.page_content.strip()) for i, (doc, score) in enumerate(results)])
     def store_count(self, store) -> int:
         try:
             return store.index.ntotal
@@ -762,6 +793,70 @@ async def search_get(request: Request, q: str = Query(...), collection: str = Qu
     return rag.search(collection, q, top_k)
 
 
+
+def project_root(project_id, collection):
+    if not isinstance(project_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", project_id): raise HTTPException(400, "Invalid project_id")
+    if collection not in {"public", "data", "novel"}: raise HTTPException(400, "Invalid collection")
+    return (Path(PROJECTS_DIR) / project_id / collection).resolve()
+
+def project_path(project_id, collection, document_path):
+    if not document_path or "\x00" in document_path: raise HTTPException(400, "Invalid document path")
+    part = Path(document_path.replace("\\", "/"))
+    if part.is_absolute() or any(x in {"", ".", ".."} for x in part.parts): raise HTTPException(400, "Unsafe document path")
+    root = project_root(project_id, collection); target = (root / part).resolve()
+    try: target.relative_to(root)
+    except ValueError: raise HTTPException(400, "Unsafe document path")
+    return target
+
+def project_vector(project_id, collection):
+    return (Path(PROJECTS_VECTOR_DIR) / project_id / collection).resolve()
+
+def project_authorize(request, project_id, permission):
+    if not IDEA_PLATFORM_URL or not IDEA_SERVICE_TOKEN: raise HTTPException(503, "IDEA RAG authorization is not configured")
+    auth = request.headers.get("Authorization", "")
+    if not auth.lower().startswith("bearer ") or not auth[7:].strip(): raise HTTPException(401, "IDEA access bearer token required")
+    headers = {"Authorization": auth, "X-RAG-Service-Token": IDEA_SERVICE_TOKEN, "Content-Type": "application/json"}
+    for key in ("X-Device-ID", "X-Space-ID"):
+        if request.headers.get(key): headers[key] = request.headers[key]
+    data = json.dumps({"project_id": project_id, "permission": permission}).encode()
+    try:
+        req = urllib.request.Request(IDEA_PLATFORM_URL + "/api/platform/rag/authorize", data=data, headers=headers, method="POST")
+        with urllib.request.urlopen(req, timeout=10) as response: return json.loads(response.read())
+    except urllib.error.HTTPError as error: raise HTTPException(error.code, "IDEA project authorization denied")
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError): raise HTTPException(503, "IDEA project authorization unavailable")
+# --- IDEA project documents ---
+@app.get("/api/projects/{project_id}/documents/{collection}")
+async def project_documents(request: Request, project_id: str, collection: str):
+    project_authorize(request, project_id, "documents.read"); root = project_root(project_id, collection)
+    return {"project_id": project_id, "collection": collection, "documents": sorted(str(p.relative_to(root)).replace("\\", "/") for p in root.rglob("*") if p.is_file()) if root.exists() else []}
+@app.get("/api/projects/{project_id}/documents/{collection}/{document_path:path}")
+async def project_read(request: Request, project_id: str, collection: str, document_path: str):
+    project_authorize(request, project_id, "documents.read"); target = project_path(project_id, collection, document_path)
+    if not target.is_file(): raise HTTPException(404, "Document not found")
+    return FileResponse(target, filename=target.name)
+@app.put("/api/projects/{project_id}/documents/{collection}/{document_path:path}")
+async def project_update(request: Request, project_id: str, collection: str, document_path: str, body: SourceDocumentUpdateRequest):
+    project_authorize(request, project_id, "documents.write"); target = project_path(project_id, collection, document_path)
+    if target.suffix.lower() not in {".txt", ".md"}: raise HTTPException(400, "Only TXT and MD can be updated")
+    target.parent.mkdir(parents=True, exist_ok=True); target.write_text(body.content, encoding="utf-8"); return {"status": "ok"}
+@app.delete("/api/projects/{project_id}/documents/{collection}/{document_path:path}")
+async def project_delete(request: Request, project_id: str, collection: str, document_path: str):
+    project_authorize(request, project_id, "documents.delete"); target = project_path(project_id, collection, document_path)
+    if not target.is_file(): raise HTTPException(404, "Document not found")
+    target.unlink(); return {"status": "ok"}
+@app.post("/api/projects/{project_id}/documents/{collection}/upload")
+async def project_upload(request: Request, project_id: str, collection: str, file: UploadFile = File(...), document_path: str = Query("")):
+    project_authorize(request, project_id, "documents.write"); target = project_path(project_id, collection, document_path or file.filename or "")
+    if target.suffix.lower() not in {".txt", ".md", ".pdf", ".docx"}: raise HTTPException(400, "Unsupported format")
+    target.parent.mkdir(parents=True, exist_ok=True); target.write_bytes(await file.read()); return {"status": "ok", "document_path": str(target.relative_to(project_root(project_id, collection))).replace("\\", "/")}
+@app.post("/api/projects/{project_id}/rebuild")
+async def project_rebuild(request: Request, project_id: str, collection: str = Query(...)):
+    project_authorize(request, project_id, "index.rebuild"); project_root(project_id, collection)
+    return {"status": "ok", **rag.rebuild_project(project_id, collection)}
+@app.post("/api/projects/{project_id}/search", response_model=SearchResponse)
+async def project_search(request: Request, project_id: str, body: SearchRequest, collection: str = Query(...)):
+    project_authorize(request, project_id, "rag.search"); project_root(project_id, collection)
+    return rag.search_project(project_id, collection, body.query, body.top_k)
 # --- Source documents (API Key authorization required) ---
 @app.get("/api/source-documents/{collection}")
 async def list_source_documents(request: Request, collection: str):

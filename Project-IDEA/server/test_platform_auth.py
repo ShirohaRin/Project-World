@@ -17,6 +17,8 @@ class PlatformApiTests(unittest.TestCase):
         os.environ["IDEA_AUTH_TOKEN"] = "test-platform-token"
         os.environ["IDEA_PLATFORM_DB_PATH"] = str(Path(cls.temp_dir.name) / "platform.db")
         os.environ["IDEA_AUTH_DEVELOPMENT_MODE"] = "true"
+        cls._previous_rag_service_token = os.environ.get("RAG_IDEA_SERVICE_TOKEN")
+        os.environ["RAG_IDEA_SERVICE_TOKEN"] = "test-rag-service-token"
         sys.modules.pop("main", None)
         cls.main = importlib.import_module("main")
         cls.client = TestClient(cls.main.app)
@@ -40,6 +42,10 @@ class PlatformApiTests(unittest.TestCase):
         os.environ.pop("IDEA_AUTH_TOKEN", None)
         os.environ.pop("IDEA_PLATFORM_DB_PATH", None)
         os.environ.pop("IDEA_AUTH_DEVELOPMENT_MODE", None)
+        if cls._previous_rag_service_token is None:
+            os.environ.pop("RAG_IDEA_SERVICE_TOKEN", None)
+        else:
+            os.environ["RAG_IDEA_SERVICE_TOKEN"] = cls._previous_rag_service_token
         sys.modules.pop("main", None)
 
     def test_platform_endpoints_require_a_token(self):
@@ -165,6 +171,7 @@ class PlatformApiTests(unittest.TestCase):
     def reset_email_cooldown(self, email: str):
         with self.main.platform_store._connect() as connection:
             connection.execute("UPDATE email_verification_codes SET created_at = 0 WHERE email = ?", (email,))
+            connection.execute("DELETE FROM auth_login_attempts WHERE email = ?", (email,))
 
     def mcp_headers(self):
         return {**self.headers, "Content-Type": "application/json", "Accept": "application/json", "Host": "localhost:8000", "MCP-Protocol-Version": "2025-11-25"}
@@ -405,6 +412,101 @@ class PlatformApiTests(unittest.TestCase):
         )
         self.assertEqual(updated.status_code, 200)
         self.assertEqual(updated.json()["revision"], 2)
+    def test_rag_authorize(self):
+        endpoint = "/api/platform/rag/authorize"
+        service_token = os.environ["RAG_IDEA_SERVICE_TOKEN"]
+        missing = {"project_id": "project-missing", "permission": "documents.read"}
+        os.environ.pop("RAG_IDEA_SERVICE_TOKEN")
+        try:
+            self.assertEqual(self.client.post(endpoint, headers=self.headers, json=missing).status_code, 401)
+        finally:
+            os.environ["RAG_IDEA_SERVICE_TOKEN"] = service_token
+        self.assertEqual(self.client.post(endpoint, headers={**self.headers, "X-RAG-Service-Token": "bad"}, json=missing).status_code, 401)
+
+        memory_token = self.client.post("/api/platform/owner/mcp-credentials", headers=self.headers, json={"device_label": "RAG memory"}).json()["token"]
+        self.assertEqual(self.client.post(endpoint, headers={"Authorization": f"Bearer {memory_token}", "X-RAG-Service-Token": service_token}, json=missing).status_code, 401)
+
+        owner_login = self.password_login(self.owner_email, self.owner_password, "rag-owner")
+        device = next(item for item in self.client.get("/api/platform/owner/devices", headers=self.headers).json()["devices"] if item["device_id"] == "rag-owner")
+        self.assertEqual(self.client.post(f"/api/platform/owner/devices/{device['owner_device_id']}/approve", headers=self.headers).status_code, 200)
+        owner = self.password_login(self.owner_email, self.owner_password, "rag-owner").json()
+        owner_headers = {"Authorization": f"Bearer {owner['access_token']}", "X-Device-ID": "rag-owner", "X-RAG-Service-Token": service_token}
+        credential = self.client.post("/api/platform/owner/mcp-credentials", headers=owner_headers, json={"device_label": "RAG IDEA", "capability": "idea"}).json()
+        credential_headers = {"Authorization": f"Bearer {credential['token']}", "X-RAG-Service-Token": service_token}
+
+        projects = [self.main.platform_store.create_project(name, project_type, "principal-owner") for name, project_type in (("r", "research"), ("n", "novel"), ("g", "general"))]
+        for project in projects:
+            for permission in ("documents.read", "documents.write", "documents.delete", "index.rebuild", "rag.search"):
+                self.assertEqual(self.client.post(endpoint, headers=credential_headers, json={"project_id": project["project_id"], "permission": permission}).status_code, 200)
+
+        self.assertEqual(self.client.post(f"/api/platform/owner/mcp-credentials/{credential['credential_id']}/revoke", headers=owner_headers).status_code, 200)
+        self.assertEqual(self.client.post(endpoint, headers=credential_headers, json={"project_id": projects[0]["project_id"], "permission": "documents.read"}).status_code, 401)
+
+        member = self.password_login(self.member_email, self.member_password, "rag-member").json()
+        principal = member["principal"]
+        self.main.platform_store.upsert_space_member("space-project-world", principal["principal_id"], "viewer")
+        self.main.platform_store.set_account_role(principal["account_id"], "researcher")
+        self.main.platform_store.set_project_member(projects[0]["project_id"], principal["principal_id"], ["documents.read"])
+        self.main.platform_store.set_project_member(projects[1]["project_id"], principal["principal_id"], ["documents.read"])
+        member_headers = {"Authorization": f"Bearer {member['access_token']}", "X-Device-ID": "rag-member", "X-RAG-Service-Token": service_token}
+        self.assertEqual(self.client.post(endpoint, headers=member_headers, json={"project_id": projects[0]["project_id"], "permission": "documents.read"}).status_code, 200)
+        self.assertEqual(self.client.post(endpoint, headers=member_headers, json={"project_id": projects[1]["project_id"], "permission": "documents.read"}).status_code, 403)
+        self.assertEqual(self.client.post(endpoint, headers=member_headers, json={"project_id": projects[2]["project_id"], "permission": "documents.read"}).status_code, 403)
+        self.assertEqual(self.client.post(endpoint, headers=member_headers, json=missing).status_code, 404)
+
+    def test_platform_auth_phase_one_roles_daily_projects_and_memory_scopes(self):
+        self.reset_email_cooldown(self.member_email)
+        member_login = self.password_login(self.member_email, self.member_password, "phase-one-member-device")
+        self.assertEqual(member_login.status_code, 200)
+        member_headers = {
+            "Authorization": f"Bearer {member_login.json()['access_token']}",
+            "X-Device-ID": "phase-one-member-device",
+            "X-Space-ID": "space-project-world",
+        }
+        member_principal_id = member_login.json()["principal"]["principal_id"]
+        member_account_id = member_login.json()["principal"]["account_id"]
+        self.main.platform_store.upsert_space_member("space-project-world", member_principal_id, "viewer")
+
+        for endpoint in (f"/api/platform/account-role?account_id={member_account_id}", "/api/platform/projects", "/api/platform/daily-memories"):
+            self.assertEqual(self.client.get(endpoint, headers=member_headers).status_code, 403)
+        self.assertEqual(self.client.put("/api/platform/account-role", headers=member_headers, json={"account_id": member_account_id, "work_role": "researcher"}).status_code, 403)
+
+        owner_login = self.password_login(self.owner_email, self.owner_password, "phase-one-owner-device")
+        self.assertEqual(owner_login.status_code, 200)
+        devices = self.client.get("/api/platform/owner/devices", headers=self.headers).json()["devices"]
+        pending = next(device for device in devices if device["device_id"] == "phase-one-owner-device")
+        self.assertEqual(self.client.post(f"/api/platform/owner/devices/{pending['owner_device_id']}/approve", headers=self.headers).status_code, 200)
+        owner_login = self.password_login(self.owner_email, self.owner_password, "phase-one-owner-device")
+        owner_headers = {"Authorization": f"Bearer {owner_login.json()['access_token']}", "X-Device-ID": "phase-one-owner-device"}
+
+        daily = self.client.post("/api/platform/daily-memories", headers=owner_headers, json={"category": "progress", "content": "Approved owner daily marker.", "confidence": "verified", "retention": "long"})
+        self.assertEqual(daily.status_code, 200)
+        self.assertTrue(any(item["id"] == daily.json()["id"] for item in self.client.get("/api/platform/daily-memories", headers=owner_headers).json()["memories"]))
+        self.assertEqual(self.client.get("/api/platform/daily-memories", headers=member_headers).status_code, 403)
+
+        self.assertEqual(self.client.put("/api/platform/account-role", headers=owner_headers, json={"account_id": member_account_id, "work_role": "owner"}).status_code, 403)
+        self.assertEqual(self.client.put("/api/platform/account-role", headers=owner_headers, json={"account_id": owner_login.json()["principal"]["account_id"], "work_role": "user"}).status_code, 403)
+        project = self.client.post("/api/platform/projects", headers=owner_headers, json={"name": "Phase one project", "project_type": "research"})
+        self.assertEqual(project.status_code, 200)
+        project_id = project.json()["project_id"]
+        permissions = ["documents.read", "documents.write", "documents.delete", "rag.search"]
+        granted = self.client.put(f"/api/platform/projects/{project_id}/members", headers=owner_headers, json={"principal_id": member_principal_id, "permissions": permissions})
+        self.assertEqual(granted.status_code, 200)
+        self.assertEqual(granted.json()["permissions"], permissions)
+        self.assertTrue(all(self.main.platform_store.project_permission_allowed(project_id, member_principal_id, permission) for permission in permissions))
+
+        other_email, other_password = "phase-one-other@example.test", os.urandom(24).hex()
+        self.main.platform_store.seed_preconfigured_accounts([{"email": other_email, "password": other_password, "name": "Phase One Other", "is_owner": False}])
+        other_login = self.password_login(other_email, other_password, "phase-one-other-device")
+        other_principal_id = other_login.json()["principal"]["principal_id"]
+        self.assertFalse(self.main.platform_store.project_permission_allowed(project_id, other_principal_id, "documents.read"))
+
+        legacy = self.client.post("/api/memories", headers=self.headers, json={"scope": "shared", "category": "legacy", "content": "Legacy shared marker.", "confirmed": True})
+        self.assertEqual(legacy.status_code, 200)
+        self.assertTrue(any(item["id"] == legacy.json()["id"] for item in self.client.get("/api/memories?query=Legacy shared", headers=self.headers).json()["memories"]))
+        scoped = self.client.post("/api/memories", headers=self.headers, json={"scope": "project", "category": "project", "content": "Project scope marker.", "confirmed": True})
+        self.assertEqual(scoped.status_code, 200)
+        self.assertEqual(scoped.json()["namespace"], "project/space-project-world")
 
 
 if __name__ == "__main__":

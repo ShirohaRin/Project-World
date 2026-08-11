@@ -15,6 +15,7 @@ IDEA 是系统的主 Agent，拥有最高权限。
 
 import json
 import logging
+import hmac
 import os
 import re
 import time
@@ -419,17 +420,20 @@ def _memory_namespaces(context: RequestContext) -> dict[str, str]:
     namespaces = {
         "personal": f"user/{context.principal.account_id}",
         "shared": f"shared/{context.space_id}",
+        "project": f"project/{context.space_id}",
     }
     if platform_store.route_for_principal(context.principal) == "owner_idea":
         owner_principal_id = platform_store.owner_scope_id(context.principal)
         if owner_principal_id:
             namespaces["owner"] = f"owner/{owner_principal_id}"
+            namespaces["daily"] = "daily/owner-shiroha-nao"
+            namespaces["system"] = "system/owner-shiroha-nao"
     return namespaces
 
 
 def _memory_scope(context: RequestContext, scope: object) -> tuple[str, str]:
-    if scope == "space":
-        scope = "shared"
+    if scope == "space" or scope == "shared":
+        scope = "project"
     if not isinstance(scope, str) or scope not in _memory_namespaces(context):
         raise HTTPException(status_code=403, detail="无权使用指定记忆范围")
     return scope, _memory_namespaces(context)[scope]
@@ -503,7 +507,7 @@ memory_mcp.configure(platform_store, _memory_namespaces)
 @app.middleware("http")
 async def platform_request_context(request: Request, call_next):
     request_id = request.headers.get("X-Request-ID", "").strip()[:100] or uuid.uuid4().hex
-    public_auth_paths = {"/api/auth/password/login", "/api/auth/email/send", "/api/auth/email/verify", "/api/auth/refresh"}
+    public_auth_paths = {"/api/auth/password/login", "/api/auth/email/send", "/api/auth/email/verify", "/api/auth/refresh", "/api/platform/rag/authorize"}
     requires_auth = (request.url.path.startswith("/api/") and request.url.path not in public_auth_paths) or request.url.path == "/mcp" or request.url.path.startswith("/mcp/")
     context = None
     mcp_context_token = None
@@ -768,6 +772,142 @@ async def revoke_mcp_credential(credential_id: str, request: Request):
     return {"status": "revoked"}
 
 
+@app.get("/api/platform/account-role")
+async def get_account_role(request: Request, account_id: str):
+    context = require_context(request)
+    _require_owner_controller(context)
+    role = platform_store.get_account_role(account_id)
+    if role is None:
+        raise HTTPException(status_code=404, detail="账户不存在")
+    return {"account_id": account_id, "work_role": role}
+
+
+@app.put("/api/platform/account-role")
+async def set_account_role(request: Request):
+    context = require_context(request)
+    _require_owner_controller(context)
+    body = await request.json()
+    account_id, work_role = body.get("account_id"), body.get("work_role")
+    if not isinstance(account_id, str) or not VALID_ID.fullmatch(account_id) or work_role not in {"owner", "researcher", "novelist", "user"}:
+        raise HTTPException(status_code=400, detail="账户角色输入无效")
+    if work_role == "owner" and account_id != context.principal.account_id:
+        raise HTTPException(status_code=403, detail="不能将其他账户设为 owner")
+    try:
+        platform_store.set_account_role(account_id, work_role)
+    except PermissionError as error:
+        raise HTTPException(status_code=403, detail=str(error))
+    except LookupError:
+        raise HTTPException(status_code=404, detail="账户不存在")
+    return {"account_id": account_id, "work_role": work_role}
+
+
+@app.post("/api/platform/rag/authorize")
+async def authorize_rag_project(request: Request):
+    service_token = os.environ.get("RAG_IDEA_SERVICE_TOKEN", "")
+    supplied_service_token = request.headers.get("X-RAG-Service-Token", "")
+    if not service_token or not supplied_service_token or not hmac.compare_digest(supplied_service_token, service_token):
+        raise HTTPException(status_code=401, detail="RAG service token invalid")
+    token = extract_bearer(request)
+    if not token:
+        raise HTTPException(status_code=401, detail="Valid IDEA credential required")
+    credential_space_id = None
+    if token.startswith("mcp_"):
+        principal, credential_space_id = platform_store.authenticate_rag_owner_mcp_credential(token)
+    else:
+        principal = platform_store.authenticate(token, request.headers.get("X-Device-ID", "").strip()[:100] or None)
+    if not principal:
+        raise HTTPException(status_code=401, detail="Valid IDEA credential required")
+    body = await request.json()
+    project_id, permission = body.get("project_id"), body.get("permission")
+    allowed_permissions = {"documents.read", "documents.write", "documents.delete", "index.rebuild", "rag.search"}
+    if not isinstance(project_id, str) or not VALID_ID.fullmatch(project_id) or permission not in allowed_permissions:
+        raise HTTPException(status_code=400, detail="Invalid RAG authorization request")
+    project = platform_store.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if not platform_store.is_approved_owner_device(principal):
+        if not platform_store.project_permission_allowed(project_id, principal.principal_id, permission):
+            raise HTTPException(status_code=403, detail="Project permission denied")
+        work_role = platform_store.get_account_role(principal.account_id) or "user"
+        role_by_project_type = {
+            "research": {"researcher"},
+            "novel": {"novelist"},
+            "general": {"researcher", "novelist", "user"},
+        }
+        if work_role not in role_by_project_type[project["project_type"]]:
+            raise HTTPException(status_code=403, detail="Project role denied")
+    space_id = credential_space_id or platform_store.resolve_space(principal.principal_id, request.headers.get("X-Space-ID", "").strip()[:100] or None)
+    if not space_id:
+        raise HTTPException(status_code=403, detail="Space access denied")
+    return {"subject": principal.principal_id, "account_id": principal.account_id, "project_id": project_id, "permission": permission, "space_id": space_id}
+
+@app.get("/api/platform/projects")
+async def list_projects(request: Request):
+    context = require_context(request)
+    _require_owner_controller(context)
+    return {"projects": platform_store.list_projects()}
+
+
+@app.post("/api/platform/projects")
+async def create_project(request: Request):
+    context = require_context(request)
+    _require_owner_controller(context)
+    body = await request.json()
+    name, project_type, status = body.get("name"), body.get("project_type"), body.get("status", "active")
+    if not isinstance(name, str) or not (1 <= len(name.strip()) <= 200) or project_type not in {"research", "novel", "general"} or not isinstance(status, str) or not status.strip():
+        raise HTTPException(status_code=400, detail="项目输入无效")
+    return platform_store.create_project(name.strip(), project_type, context.principal.principal_id, status.strip()[:80])
+
+
+@app.get("/api/platform/projects/{project_id}/members")
+async def list_project_members(project_id: str, request: Request):
+    context = require_context(request)
+    _require_owner_controller(context)
+    if not VALID_ID.fullmatch(project_id):
+        raise HTTPException(status_code=400, detail="project_id 格式无效")
+    return {"members": platform_store.list_project_members(project_id)}
+
+
+@app.put("/api/platform/projects/{project_id}/members")
+async def set_project_member(project_id: str, request: Request):
+    context = require_context(request)
+    _require_owner_controller(context)
+    body = await request.json()
+    principal_id, permissions = body.get("principal_id"), body.get("permissions")
+    if not VALID_ID.fullmatch(project_id) or not isinstance(principal_id, str) or not VALID_ID.fullmatch(principal_id):
+        raise HTTPException(status_code=400, detail="项目成员输入无效")
+    try:
+        return platform_store.set_project_member(project_id, principal_id, permissions)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+    except LookupError as error:
+        raise HTTPException(status_code=404, detail=str(error))
+
+
+@app.get("/api/platform/daily-memories")
+async def list_daily_memories(request: Request):
+    context = require_context(request)
+    _require_owner_controller(context)
+    memories = platform_store.list_memories(
+        context.principal.account_id,
+        context.space_id,
+        ["daily/owner-shiroha-nao"],
+        limit=100,
+    )
+    return {"count": len(memories), "memories": memories}
+
+
+@app.post("/api/platform/daily-memories")
+async def create_daily_memory(request: Request):
+    context = require_context(request)
+    _require_owner_controller(context)
+    body = await request.json()
+    content, category, confidence, retention = body.get("content"), body.get("category"), body.get("confidence"), body.get("retention")
+    if not isinstance(content, str) or not (1 <= len(content.strip()) <= MAX_MEMORY_LENGTH) or not isinstance(category, str) or not (1 <= len(category.strip()) <= 80) or confidence not in {"verified", "hypothesis"} or retention not in {"short", "long"}:
+        raise HTTPException(status_code=400, detail="daily memory 输入无效")
+    return platform_store.create_memory("account-owner", context.space_id, "daily/owner-shiroha-nao", f"{category.strip()} [{confidence}/{retention}]", content.strip(), context.principal.principal_id)
+
+
 # ===================================================================
 # 核心 API：独立智能体会话（非流式）
 # ===================================================================
@@ -992,8 +1132,8 @@ async def create_memory(request: Request):
     if body.get("confirmed") is not True:
         raise HTTPException(status_code=400, detail="长期记忆写入需要明确确认")
     scope, namespace = _memory_scope(context, body.get("scope", "personal"))
-    if not platform_store.memory_write_allowed(context.principal.principal_id, context.space_id, namespace):
-        raise HTTPException(status_code=403, detail="无权写入共享记忆")
+    if scope == "project" and not platform_store.memory_write_allowed(context.principal.principal_id, context.space_id, f"shared/{context.space_id}"):
+        raise HTTPException(status_code=403, detail="无权写入项目记忆")
     content = body.get("content", "")
     category = body.get("category", "general")
     if not isinstance(content, str) or not (1 <= len(content.strip()) <= MAX_MEMORY_LENGTH):
