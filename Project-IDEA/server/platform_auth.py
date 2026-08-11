@@ -265,6 +265,31 @@ class PlatformStore:
                     deleted_at REAL
                 );
                 CREATE INDEX IF NOT EXISTS idx_memories_scope ON long_term_memories(account_id, space_id, namespace, status, updated_at DESC);
+                CREATE TABLE IF NOT EXISTS account_profiles (
+                    account_id TEXT PRIMARY KEY,
+                    work_role TEXT NOT NULL DEFAULT 'user' CHECK(work_role IN ('owner', 'researcher', 'novelist', 'user')),
+                    updated_at REAL NOT NULL,
+                    FOREIGN KEY(account_id) REFERENCES accounts(account_id)
+                );
+                CREATE TABLE IF NOT EXISTS projects (
+                    project_id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    project_type TEXT NOT NULL CHECK(project_type IN ('research', 'novel', 'general')),
+                    status TEXT NOT NULL,
+                    created_by TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    FOREIGN KEY(created_by) REFERENCES principals(principal_id)
+                );
+                CREATE TABLE IF NOT EXISTS project_members (
+                    project_id TEXT NOT NULL,
+                    principal_id TEXT NOT NULL,
+                    permissions_json TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    PRIMARY KEY(project_id, principal_id),
+                    FOREIGN KEY(project_id) REFERENCES projects(project_id),
+                    FOREIGN KEY(principal_id) REFERENCES principals(principal_id)
+                );
                 """
             )
             columns = {row["name"] for row in connection.execute("PRAGMA table_info(accounts)").fetchall()}
@@ -285,11 +310,18 @@ class PlatformStore:
             credential_columns = {row["name"] for row in connection.execute("PRAGMA table_info(mcp_device_credentials)").fetchall()}
             if "capability" not in credential_columns:
                 connection.execute("ALTER TABLE mcp_device_credentials ADD COLUMN capability TEXT NOT NULL DEFAULT 'memory'")
-            linked_devices = connection.execute("SELECT l.owner_principal_id, s.account_id, s.device_id FROM owner_account_links l JOIN account_sessions s ON s.account_id = l.account_id WHERE l.status = 'active' AND s.device_id IS NOT NULL").fetchall()
+            linked_devices = connection.execute("SELECT l.owner_principal_id, s.account_id, s.device_id FROM owner_account_links l JOIN account_sessions s ON s.account_id = l.account_id WHERE l.owner_principal_id = 'owner-shiroha-nao' AND l.status = 'active' AND s.device_id IS NOT NULL").fetchall()
             for device in linked_devices:
                 exists = connection.execute("SELECT 1 FROM owner_devices WHERE owner_principal_id = ? AND account_id = ? AND device_id = ?", (device["owner_principal_id"], device["account_id"], device["device_id"])).fetchone()
                 if not exists:
                     connection.execute("INSERT INTO owner_devices(owner_device_id, owner_principal_id, account_id, device_id, requested_at) VALUES (?, ?, ?, ?, ?)", (f"owner-device-{uuid.uuid4().hex}", device["owner_principal_id"], device["account_id"], device["device_id"], time.time()))
+            owner_account = connection.execute("SELECT account_id FROM accounts WHERE account_id = 'account-owner'").fetchone()
+            if owner_account:
+                connection.execute("INSERT INTO owner_principals(owner_principal_id, display_name, created_at) VALUES (?, ?, ?) ON CONFLICT(owner_principal_id) DO NOTHING", ("owner-shiroha-nao", "白羽奈绪", time.time()))
+                connection.execute("INSERT INTO owner_account_links(owner_principal_id, account_id, linked_at) VALUES (?, ?, ?) ON CONFLICT(owner_principal_id, account_id) DO UPDATE SET status = 'active', revoked_at = NULL", ("owner-shiroha-nao", owner_account["account_id"], time.time()))
+            now = time.time()
+            connection.execute("INSERT INTO account_profiles(account_id, work_role, updated_at) SELECT a.account_id, CASE WHEN a.account_id = 'account-owner' OR EXISTS(SELECT 1 FROM owner_account_links l WHERE l.owner_principal_id = 'owner-shiroha-nao' AND l.account_id = a.account_id AND l.status = 'active') THEN 'owner' ELSE 'user' END, ? FROM accounts a WHERE NOT EXISTS(SELECT 1 FROM account_profiles p WHERE p.account_id = a.account_id)", (now,))
+            connection.execute("UPDATE account_profiles SET work_role = 'owner', updated_at = ? WHERE account_id = 'account-owner' OR EXISTS(SELECT 1 FROM owner_account_links l WHERE l.owner_principal_id = 'owner-shiroha-nao' AND l.account_id = account_profiles.account_id AND l.status = 'active')", (now,))
 
     def ensure_owner(self, bootstrap_token: str):
         if not bootstrap_token:
@@ -304,9 +336,10 @@ class PlatformStore:
                 bootstrap_account = connection.execute("SELECT account_id FROM principals WHERE principal_id = ?", ("principal-owner",)).fetchone()
                 if bootstrap_account:
                     connection.execute(
-                        "INSERT INTO owner_account_links(owner_principal_id, account_id, linked_at) VALUES (?, ?, ?) ON CONFLICT(owner_principal_id, account_id) DO NOTHING",
+                        "INSERT INTO owner_account_links(owner_principal_id, account_id, linked_at) VALUES (?, ?, ?) ON CONFLICT(owner_principal_id, account_id) DO UPDATE SET status = 'active', revoked_at = NULL",
                         ("owner-shiroha-nao", bootstrap_account["account_id"], now),
                     )
+                    connection.execute("INSERT INTO account_profiles(account_id, work_role, updated_at) VALUES (?, 'owner', ?) ON CONFLICT(account_id) DO UPDATE SET work_role = 'owner', updated_at = excluded.updated_at", (bootstrap_account["account_id"], now))
                 connection.execute(
                     "UPDATE access_tokens SET token_hash = ?, status = 'active', expires_at = NULL WHERE token_id = ? AND principal_id = ?",
                     (self.hash_token(bootstrap_token), "token-owner", "principal-owner"),
@@ -343,6 +376,7 @@ class PlatformStore:
                 "INSERT INTO owner_account_links(owner_principal_id, account_id, linked_at) VALUES (?, ?, ?)",
                 ("owner-shiroha-nao", account_id, now),
             )
+            connection.execute("INSERT INTO account_profiles(account_id, work_role, updated_at) VALUES (?, 'owner', ?)", (account_id, now))
 
     @staticmethod
     def hash_token(token: str) -> str:
@@ -420,6 +454,34 @@ class PlatformStore:
             connection.execute("UPDATE mcp_device_credentials SET last_used_at = ? WHERE credential_id = ?", (time.time(), row["credential_id"]))
             return Principal(row["principal_id"], row["account_id"], row["role"], row["credential_id"], owner_device_status="approved", mcp_credential_id=row["credential_id"]), row["space_id"]
 
+    def authenticate_rag_owner_mcp_credential(self, token: str) -> tuple[Optional[Principal], Optional[str]]:
+        if not token.startswith("mcp_"):
+            return None, None
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT c.credential_id, c.space_id, p.principal_id, p.account_id, p.role
+                FROM mcp_device_credentials c
+                JOIN principals p ON p.principal_id = c.principal_id
+                JOIN accounts a ON a.account_id = c.account_id
+                JOIN owner_principals o ON o.owner_principal_id = c.owner_principal_id
+                JOIN owner_account_links l ON l.owner_principal_id = c.owner_principal_id AND l.account_id = c.account_id AND l.status = 'active'
+                JOIN space_members m ON m.space_id = c.space_id AND m.principal_id = c.principal_id
+                WHERE c.secret_hash = ? AND c.capability = 'idea' AND c.status = 'active'
+                  AND (c.expires_at IS NULL OR c.expires_at > ?)
+                  AND p.status = 'active' AND a.status = 'active' AND o.status = 'active'
+                  AND EXISTS (
+                      SELECT 1 FROM owner_devices d
+                      WHERE d.owner_principal_id = c.owner_principal_id AND d.account_id = c.account_id AND d.status = 'approved'
+                  )
+                """,
+                (self.hash_token(token), time.time()),
+            ).fetchone()
+            if not row:
+                return None, None
+            connection.execute("UPDATE mcp_device_credentials SET last_used_at = ? WHERE credential_id = ?", (time.time(), row["credential_id"]))
+            return Principal(row["principal_id"], row["account_id"], row["role"], row["credential_id"], owner_device_status="approved", mcp_credential_id=row["credential_id"]), row["space_id"]
+
     def list_mcp_credentials(self, principal: Principal) -> list[dict]:
         owner_principal_id = self.owner_scope_id(principal)
         if not owner_principal_id:
@@ -491,7 +553,73 @@ class PlatformStore:
             connection.execute("INSERT INTO space_members(space_id, principal_id, role, created_at) VALUES (?, ?, ?, ?) ON CONFLICT(space_id, principal_id) DO UPDATE SET role = excluded.role", (space_id, principal_id, role, time.time()))
 
     def memory_write_allowed(self, principal_id: str, space_id: str, namespace: str) -> bool:
-        return not namespace.startswith("shared/") or self.get_space_member_role(principal_id, space_id) in {"owner", "editor"}
+        return not (namespace.startswith("shared/") or namespace.startswith("project/")) or self.get_space_member_role(principal_id, space_id) in {"owner", "editor"}
+
+    def is_owner_account(self, account_id: str) -> bool:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT 1 FROM owner_account_links l JOIN owner_principals o ON o.owner_principal_id = l.owner_principal_id WHERE l.owner_principal_id = ? AND l.account_id = ? AND l.status = 'active' AND o.status = 'active'",
+                ("owner-shiroha-nao", account_id),
+            ).fetchone()
+            return row is not None
+
+    def get_account_role(self, account_id: str) -> Optional[str]:
+        with self._connect() as connection:
+            row = connection.execute("SELECT work_role FROM account_profiles WHERE account_id = ?", (account_id,)).fetchone()
+            return row["work_role"] if row else None
+
+    def set_account_role(self, account_id: str, work_role: str) -> None:
+        if work_role not in {"owner", "researcher", "novelist", "user"}:
+            raise ValueError("工作角色无效")
+        with self._connect() as connection:
+            if not connection.execute("SELECT 1 FROM accounts WHERE account_id = ?", (account_id,)).fetchone():
+                raise LookupError("账户不存在")
+            is_owner = connection.execute("SELECT 1 FROM owner_account_links l JOIN owner_principals o ON o.owner_principal_id = l.owner_principal_id WHERE l.owner_principal_id = ? AND l.account_id = ? AND l.status = 'active' AND o.status = 'active'", ("owner-shiroha-nao", account_id)).fetchone() is not None
+            if work_role == "owner" and not is_owner:
+                raise PermissionError("只有白羽奈绪 Owner 关联账户可以设为 owner")
+            if is_owner and work_role != "owner":
+                raise PermissionError("白羽奈绪 Owner 账户不允许降级")
+            connection.execute("INSERT INTO account_profiles(account_id, work_role, updated_at) VALUES (?, ?, ?) ON CONFLICT(account_id) DO UPDATE SET work_role = excluded.work_role, updated_at = excluded.updated_at", (account_id, work_role, time.time()))
+
+    def create_project(self, name: str, project_type: str, created_by: str, status: str = "active") -> dict:
+        if project_type not in {"research", "novel", "general"} or not status:
+            raise ValueError("项目字段无效")
+        project_id, now = f"project-{uuid.uuid4().hex}", time.time()
+        with self._connect() as connection:
+            connection.execute("INSERT INTO projects(project_id, name, project_type, status, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?)", (project_id, name, project_type, status, created_by, now))
+        return {"project_id": project_id, "name": name, "project_type": project_type, "status": status, "created_by": created_by, "created_at": now}
+
+    def get_project(self, project_id: str) -> Optional[dict]:
+        with self._connect() as connection:
+            row = connection.execute("SELECT * FROM projects WHERE project_id = ?", (project_id,)).fetchone()
+            return dict(row) if row else None
+
+    def list_projects(self) -> list[dict]:
+        with self._connect() as connection:
+            return [dict(row) for row in connection.execute("SELECT * FROM projects ORDER BY created_at DESC").fetchall()]
+
+    def set_project_member(self, project_id: str, principal_id: str, permissions: list[str]) -> dict:
+        allowed = {"documents.read", "documents.write", "documents.delete", "rag.search", "index.rebuild"}
+        if not isinstance(permissions, list) or any(permission not in allowed for permission in permissions) or len(set(permissions)) != len(permissions):
+            raise ValueError("项目权限无效")
+        now = time.time()
+        with self._connect() as connection:
+            if not connection.execute("SELECT 1 FROM projects WHERE project_id = ?", (project_id,)).fetchone():
+                raise LookupError("项目不存在")
+            if not connection.execute("SELECT 1 FROM principals WHERE principal_id = ?", (principal_id,)).fetchone():
+                raise LookupError("成员不存在")
+            connection.execute("INSERT INTO project_members(project_id, principal_id, permissions_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(project_id, principal_id) DO UPDATE SET permissions_json = excluded.permissions_json, updated_at = excluded.updated_at", (project_id, principal_id, json.dumps(permissions), now, now))
+        return {"project_id": project_id, "principal_id": principal_id, "permissions": permissions, "updated_at": now}
+
+    def list_project_members(self, project_id: str) -> list[dict]:
+        with self._connect() as connection:
+            rows = connection.execute("SELECT project_id, principal_id, permissions_json, created_at, updated_at FROM project_members WHERE project_id = ? ORDER BY created_at", (project_id,)).fetchall()
+            return [{**dict(row), "permissions": json.loads(row["permissions_json"])} for row in rows]
+
+    def project_permission_allowed(self, project_id: str, principal_id: str, permission: str) -> bool:
+        with self._connect() as connection:
+            row = connection.execute("SELECT permissions_json FROM project_members WHERE project_id = ? AND principal_id = ?", (project_id, principal_id)).fetchone()
+            return bool(row and permission in json.loads(row["permissions_json"]))
 
     def write_audit(self, event_type: str, context: Optional[RequestContext] = None, **fields):
         metadata = fields.pop("metadata", {})
@@ -622,11 +750,9 @@ class PlatformStore:
     def list_memories(self, account_id: str, space_id: str, namespaces: list[str], query: Optional[str] = None, limit: int = 50) -> list[dict]:
         if not namespaces:
             return []
-        personal_namespaces = [namespace for namespace in namespaces if not namespace.startswith("shared/")]
-        space_namespace = f"shared/{space_id}"
-        placeholders = ", ".join("?" for _ in personal_namespaces) or "''"
-        params: list = [space_id, space_namespace, account_id, *personal_namespaces]
-        query_sql = f"SELECT * FROM long_term_memories WHERE space_id = ? AND status = 'active' AND (namespace = ? OR (account_id = ? AND namespace IN ({placeholders})))"
+        placeholders = ", ".join("?" for _ in namespaces)
+        params: list = [space_id, *namespaces]
+        query_sql = f"SELECT * FROM long_term_memories WHERE space_id = ? AND status = 'active' AND namespace IN ({placeholders})"
         if query:
             query_sql += " AND content LIKE ?"
             params.append(f"%{query}%")
@@ -639,11 +765,11 @@ class PlatformStore:
     def update_memory(self, account_id: str, space_id: str, memory_id: str, namespaces: list[str], category: str, content: str, expected_revision: int, principal_id: str) -> tuple[Optional[dict], Optional[int]]:
         if not namespaces:
             return None, None
-        personal_namespaces = [namespace for namespace in namespaces if not namespace.startswith("shared/")]
+        personal_namespaces = [namespace for namespace in namespaces if not namespace.startswith("shared/") and not namespace.startswith("project/")]
         placeholders = ", ".join("?" for _ in personal_namespaces) or "''"
         now = time.time()
         with self._connect() as connection:
-            row = connection.execute(f"SELECT * FROM long_term_memories WHERE memory_id = ? AND space_id = ? AND status = 'active' AND (namespace = ? OR (account_id = ? AND namespace IN ({placeholders})))", (memory_id, space_id, f"shared/{space_id}", account_id, *personal_namespaces)).fetchone()
+            row = connection.execute(f"SELECT * FROM long_term_memories WHERE memory_id = ? AND space_id = ? AND status = 'active' AND (namespace IN (?, ?) OR (account_id = ? AND namespace IN ({placeholders})))", (memory_id, space_id, f"shared/{space_id}", f"project/{space_id}", account_id, *personal_namespaces)).fetchone()
             if not row:
                 return None, None
             if not self.memory_write_allowed(principal_id, space_id, row["namespace"]):
@@ -658,11 +784,11 @@ class PlatformStore:
     def delete_memory(self, account_id: str, space_id: str, memory_id: str, namespaces: list[str], expected_revision: int, principal_id: str) -> tuple[bool, Optional[int]]:
         if not namespaces:
             return False, None
-        personal_namespaces = [namespace for namespace in namespaces if not namespace.startswith("shared/")]
+        personal_namespaces = [namespace for namespace in namespaces if not namespace.startswith("shared/") and not namespace.startswith("project/")]
         placeholders = ", ".join("?" for _ in personal_namespaces) or "''"
         now = time.time()
         with self._connect() as connection:
-            row = connection.execute(f"SELECT namespace, revision FROM long_term_memories WHERE memory_id = ? AND space_id = ? AND status = 'active' AND (namespace = ? OR (account_id = ? AND namespace IN ({placeholders})))", (memory_id, space_id, f"shared/{space_id}", account_id, *personal_namespaces)).fetchone()
+            row = connection.execute(f"SELECT namespace, revision FROM long_term_memories WHERE memory_id = ? AND space_id = ? AND status = 'active' AND (namespace IN (?, ?) OR (account_id = ? AND namespace IN ({placeholders})))", (memory_id, space_id, f"shared/{space_id}", f"project/{space_id}", account_id, *personal_namespaces)).fetchone()
             if not row:
                 return False, None
             if not self.memory_write_allowed(principal_id, space_id, row["namespace"]):
@@ -677,7 +803,7 @@ class PlatformStore:
     @staticmethod
     def _append_memory_sync_events(connection, account_id: str, space_id: str, namespace: str, aggregate_type: str, aggregate_id: str, event_type: str, payload: dict) -> None:
         accounts = [account_id]
-        if namespace.startswith("shared/"):
+        if namespace.startswith("shared/") or namespace.startswith("project/"):
             accounts = [row["account_id"] for row in connection.execute("SELECT DISTINCT p.account_id FROM space_members m JOIN principals p ON p.principal_id = m.principal_id WHERE m.space_id = ?", (space_id,)).fetchall()]
         for target_account_id in accounts:
             PlatformStore._append_sync_event(connection, target_account_id, space_id, aggregate_type, aggregate_id, event_type, payload)
@@ -740,8 +866,11 @@ class PlatformStore:
                     connection.execute("INSERT INTO spaces(space_id, name, space_type, created_by, created_at) VALUES (?, ?, ?, ?, ?)", (space_id, f"{name.strip()[:80]} 的个人空间", "personal", principal_id, now))
                     connection.execute("INSERT INTO space_members(space_id, principal_id, role, created_at) VALUES (?, ?, ?, ?)", (space_id, principal_id, "owner", now))
                 if is_owner:
+                    connection.execute("INSERT INTO account_profiles(account_id, work_role, updated_at) VALUES (?, 'owner', ?) ON CONFLICT(account_id) DO UPDATE SET work_role = 'owner', updated_at = excluded.updated_at", (account_id, now))
                     connection.execute("INSERT INTO owner_principals(owner_principal_id, display_name, created_at) VALUES (?, ?, ?) ON CONFLICT(owner_principal_id) DO NOTHING", ("owner-shiroha-nao", name.strip()[:80], now))
                     connection.execute("INSERT INTO owner_account_links(owner_principal_id, account_id, linked_at) VALUES (?, ?, ?) ON CONFLICT(owner_principal_id, account_id) DO UPDATE SET status = 'active', revoked_at = NULL", ("owner-shiroha-nao", account_id, now))
+                else:
+                    connection.execute("INSERT INTO account_profiles(account_id, work_role, updated_at) VALUES (?, 'user', ?) ON CONFLICT(account_id) DO NOTHING", (account_id, now))
             self.set_password_credential(account_id, password, is_seeded=True)
 
     def authenticate_password_login(self, email: str, password: str, device_id: Optional[str], normal_limit: int = 5, window: int = 300) -> tuple[Principal, dict, str]:
@@ -893,9 +1022,8 @@ class PlatformStore:
     def is_approved_owner_device(self, principal: Principal) -> bool:
         return self.route_for_principal(principal) == "owner_idea"
 
-    @staticmethod
-    def is_owner_controller(principal: Principal) -> bool:
-        return principal.principal_id == "principal-owner" and principal.token_id == "token-owner" or principal.owner_device_status == "approved"
+    def is_owner_controller(self, principal: Principal) -> bool:
+        return (principal.principal_id == "principal-owner" and principal.token_id == "token-owner") or (principal.owner_device_status == "approved" and self.is_owner_account(principal.account_id))
 
     def owner_principal_id_for_account(self, account_id: str) -> Optional[str]:
         with self._connect() as connection:

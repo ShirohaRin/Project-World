@@ -36,6 +36,7 @@ shared_rag/
 │   ├── rag_mcp_proxy.py               ← MCP 代理（本地 stdio → 远程 HTTP）
 │   ├── mcp_config.json                ← MCP 配置示例（LANGBOT Key）
 │   ├── mcp_config_example.json        ← MCP 配置示例（ADMIN Key）
+│   ├── rag_mcp_owner_admin.py         ← IDEA Owner 凭据项目管理 MCP
 │   └── test_connection.py             ← 连通性测试脚本
 │
 ├── langbot/                           ← LangBot（飞书）接入层
@@ -115,6 +116,10 @@ TRAE → [stdio] → MCP Proxy → [HTTP POST /api/search] → RAG Server
                                                           ↓
 TRAE ← [stdio] ← MCP Proxy ← [JSON results]        ← RAG Server
 ```
+
+### IDEA Owner 项目管理 MCP
+
+`trae/rag_mcp_owner_admin.py` 仅调用 `/api/projects/...` 项目 API，使用本机 `RAG_IDEA_OWNER_TOKEN` 中的 IDEA `idea` capability credential 作为 Bearer Token；还必须由 RAG 服务配置的服务 Token 向 IDEA 完成二次授权。它仅支持 `public`、`data`、`novel` 项目集合，不使用 `RAG_ADMIN_KEY` 或 `RAG_INGEST_KEY`，项目列表仍由 IDEA 控制台管理。
 
 ---
 

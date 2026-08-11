@@ -22,13 +22,23 @@ def _visible_memories(query=None, limit=5):
     context = request_context.get()
     if context is None or platform_store is None or namespace_resolver is None:
         raise RuntimeError("MCP 记忆请求未完成授权")
-    return platform_store.list_memories(
+    namespaces = list(namespace_resolver(context).values())
+    bounded_limit = max(1, min(limit, 5))
+    memories = platform_store.list_memories(
         context.principal.account_id,
         context.space_id,
-        list(namespace_resolver(context).values()),
+        namespaces,
         query=query,
-        limit=max(1, min(limit, 5)),
+        limit=bounded_limit,
     )
+    if not memories and query:
+        memories = platform_store.list_memories(
+            context.principal.account_id,
+            context.space_id,
+            namespaces,
+            limit=bounded_limit,
+        )
+    return memories
 
 
 @mcp.tool()

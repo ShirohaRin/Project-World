@@ -42,8 +42,11 @@ services:
       - ./knowledge_data:/app/knowledge_data
       - ./knowledge_private:/app/knowledge_private
       - ./knowledge_novel:/app/knowledge_novel
+      - ./knowledge_projects:/app/knowledge_projects
+      - ./models:/app/models
       # FAISS 向量库持久化（重启不丢失）
       - ./vector_data:/app/vector_data
+      - ./vector_data_projects:/app/vector_data/projects
     environment:
       # ===== API Key（MCP / LangBot 用，保持不变） =====
       - RAG_ADMIN_KEY=${RAG_ADMIN_KEY:-b46cd3cf9e40c1e00897876dbd1a67874e17660df67db240}
@@ -60,8 +63,12 @@ services:
       - RAG_FM_USERS_FILE=${RAG_FM_USERS_FILE:-/app/vector_data/file_manager_users.json}
       - RAG_FM_AGENT_TOKEN_EXPIRY_DAYS=${RAG_FM_AGENT_TOKEN_EXPIRY_DAYS:-30}
 
+      # ===== IDEA project authorization (set both values in server environment; no defaults) =====
+      - RAG_IDEA_PLATFORM_URL=${RAG_IDEA_PLATFORM_URL:-}
+      - RAG_IDEA_SERVICE_TOKEN=${RAG_IDEA_SERVICE_TOKEN:-}
+
       # ===== 可选：模型参数 =====
-      - RAG_EMBEDDING_MODEL=${RAG_EMBEDDING_MODEL:-BAAI/bge-small-zh-v1.5}
+      - RAG_EMBEDDING_MODEL=${RAG_EMBEDDING_MODEL:-/app/models/bge-small-zh-v1.5}
 
       # ===== 可选：按集合独立分块参数 =====
       - RAG_CHUNK_SIZE_NOVEL=${RAG_CHUNK_SIZE_NOVEL:-2000}
@@ -75,6 +82,7 @@ services:
 
       # ===== 国内服务器必设：HuggingFace 镜像 =====
       - HF_ENDPOINT=${HF_ENDPOINT:-https://hf-mirror.com}
+      - HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-0}
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/api/health')"]
       interval: 30s
