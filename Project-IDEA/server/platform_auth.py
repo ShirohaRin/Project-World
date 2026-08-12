@@ -189,6 +189,7 @@ class PlatformStore:
                     credential_id TEXT PRIMARY KEY,
                     secret_hash TEXT NOT NULL UNIQUE,
                     capability TEXT NOT NULL DEFAULT 'memory',
+                    credential_kind TEXT NOT NULL DEFAULT 'mcp',
                     owner_principal_id TEXT NOT NULL,
                     account_id TEXT NOT NULL,
                     principal_id TEXT NOT NULL,
@@ -310,6 +311,8 @@ class PlatformStore:
             credential_columns = {row["name"] for row in connection.execute("PRAGMA table_info(mcp_device_credentials)").fetchall()}
             if "capability" not in credential_columns:
                 connection.execute("ALTER TABLE mcp_device_credentials ADD COLUMN capability TEXT NOT NULL DEFAULT 'memory'")
+            if "credential_kind" not in credential_columns:
+                connection.execute("ALTER TABLE mcp_device_credentials ADD COLUMN credential_kind TEXT NOT NULL DEFAULT 'mcp'")
             linked_devices = connection.execute("SELECT l.owner_principal_id, s.account_id, s.device_id FROM owner_account_links l JOIN account_sessions s ON s.account_id = l.account_id WHERE l.owner_principal_id = 'owner-shiroha-nao' AND l.status = 'active' AND s.device_id IS NOT NULL").fetchall()
             for device in linked_devices:
                 exists = connection.execute("SELECT 1 FROM owner_devices WHERE owner_principal_id = ? AND account_id = ? AND device_id = ?", (device["owner_principal_id"], device["account_id"], device["device_id"])).fetchone()
@@ -410,13 +413,15 @@ class PlatformStore:
                 connection.execute("UPDATE owner_devices SET last_seen_at = ? WHERE owner_device_id = ?", (time.time(), row["owner_device_id"]))
             return Principal(row["principal_id"], row["account_id"], row["role"], row["token_id"], row["session_id"], row["device_id"], row["owner_device_id"], row["owner_device_status"])
 
-    def create_mcp_credential(self, principal: Principal, space_id: str, device_label: str, capability: str = "memory", expires_at: Optional[float] = None) -> dict:
+    def create_mcp_credential(self, principal: Principal, space_id: str, device_label: str, capability: str = "memory", expires_at: Optional[float] = None, credential_kind: str = "mcp") -> dict:
         if not self.is_owner_controller(principal):
             raise PermissionError("需要已批准的私有设备")
         if not isinstance(device_label, str) or not (1 <= len(device_label.strip()) <= 80):
             raise ValueError("device_label 必须为 1 到 80 个字符")
         if capability not in {"memory", "idea"}:
             raise ValueError("capability 必须为 memory 或 idea")
+        if credential_kind not in {"mcp", "automated_device"}:
+            raise ValueError("credential_kind 无效")
         owner_principal_id = self.owner_scope_id(principal)
         if not owner_principal_id or not self.resolve_space(principal.principal_id, space_id):
             raise PermissionError("无权访问指定空间")
@@ -426,8 +431,8 @@ class PlatformStore:
         now = time.time()
         with self._connect() as connection:
             connection.execute(
-                "INSERT INTO mcp_device_credentials(credential_id, secret_hash, capability, owner_principal_id, account_id, principal_id, space_id, device_label, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (credential_id, self.hash_token(token), capability, owner_principal_id, principal.account_id, principal.principal_id, space_id, device_label.strip(), expires_at, now),
+                "INSERT INTO mcp_device_credentials(credential_id, secret_hash, capability, credential_kind, owner_principal_id, account_id, principal_id, space_id, device_label, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (credential_id, self.hash_token(token), capability, credential_kind, owner_principal_id, principal.account_id, principal.principal_id, space_id, device_label.strip(), expires_at, now),
             )
         return {"credential_id": credential_id, "capability": capability, "device_label": device_label.strip(), "space_id": space_id, "expires_at": expires_at, "token": token}
 
@@ -482,6 +487,17 @@ class PlatformStore:
             connection.execute("UPDATE mcp_device_credentials SET last_used_at = ? WHERE credential_id = ?", (time.time(), row["credential_id"]))
             return Principal(row["principal_id"], row["account_id"], row["role"], row["credential_id"], owner_device_status="approved", mcp_credential_id=row["credential_id"]), row["space_id"]
 
+    def list_automated_device_credentials(self, principal: Principal) -> list[dict]:
+        owner_principal_id = self.owner_scope_id(principal)
+        if not owner_principal_id:
+            return []
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT credential_id, capability, device_label, space_id, status, expires_at, created_at, last_used_at, revoked_at FROM mcp_device_credentials WHERE owner_principal_id = ? AND credential_kind = 'automated_device' ORDER BY created_at DESC",
+                (owner_principal_id,),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
     def list_mcp_credentials(self, principal: Principal) -> list[dict]:
         owner_principal_id = self.owner_scope_id(principal)
         if not owner_principal_id:
@@ -492,6 +508,16 @@ class PlatformStore:
                 (owner_principal_id,),
             ).fetchall()
             return [dict(row) for row in rows]
+
+    def revoke_automated_device_credential(self, principal: Principal, credential_id: str) -> bool:
+        if not self.is_owner_controller(principal):
+            return False
+        owner_principal_id = self.owner_scope_id(principal)
+        with self._connect() as connection:
+            return connection.execute(
+                "UPDATE mcp_device_credentials SET status = 'revoked', revoked_at = ?, revoked_by_principal_id = ? WHERE credential_id = ? AND owner_principal_id = ? AND credential_kind = 'automated_device' AND status = 'active'",
+                (time.time(), principal.principal_id, credential_id, owner_principal_id),
+            ).rowcount == 1
 
     def revoke_mcp_credential(self, principal: Principal, credential_id: str) -> bool:
         if not self.is_owner_controller(principal):

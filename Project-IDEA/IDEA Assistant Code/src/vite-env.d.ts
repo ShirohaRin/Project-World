@@ -25,6 +25,9 @@ interface Window {
     listOwnerDevices?: () => Promise<OwnerDevice[]>
     approveOwnerDevice?: (ownerDeviceId: string) => Promise<void>
     revokeOwnerDevice?: (ownerDeviceId: string) => Promise<void>
+    listOwnerCredentials?: () => Promise<AutomatedDeviceCredential[]>
+    issueOwnerCredential?: (request: { deviceLabel: string; capability: 'idea' | 'memory'; expiresInDays?: number }) => Promise<AutomatedDeviceCredential & { token: string }>
+    revokeOwnerCredential?: (credentialId: string) => Promise<void>
     createMemory?: (memory: { scope: 'personal' | 'shared' | 'owner'; category: string; content: string }) => Promise<MemoryRecord>
     deleteMemory?: (memory: { id: string; revision: number }) => Promise<void>
     onExecutionOutput: (listener: (event: ExecutionOutput) => void) => () => void
@@ -45,3 +48,4 @@ interface TaskSummary { id: string; title: string; conversation_id?: string | nu
 interface SyncSnapshot { events: Array<{ event_id: number; event_type: string }>; next_cursor: number }
 interface MemoryRecord { id: string; namespace: string; category: string; content: string; status: string; revision: number; created_at: number; updated_at: number }
 interface OwnerDevice { owner_device_id: string; device_id: string; status: 'pending' | 'approved' | 'revoked'; requested_at: number; approved_at?: number | null; revoked_at?: number | null; last_seen_at?: number | null }
+interface AutomatedDeviceCredential { credential_id: string; capability: 'idea' | 'memory'; device_label: string; space_id: string; status: 'active' | 'revoked'; expires_at?: number | null; created_at: number; last_used_at?: number | null; revoked_at?: number | null }

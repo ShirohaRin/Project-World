@@ -112,6 +112,23 @@ class PlatformApiTests(unittest.TestCase):
         self.assertEqual(revoked.status_code, 200)
         self.assertEqual(self.client.post(endpoint, headers=credential_headers, json={"jsonrpc": "2.0", "id": 4, "method": "tools/list", "params": {}}).status_code, 401)
 
+    def test_owner_automated_device_credentials_are_owner_only_and_one_time(self):
+        member = self.password_login(self.member_email, self.member_password, "credential-member-device").json()
+        member_headers = {"Authorization": f"Bearer {member['access_token']}", "X-Device-ID": "credential-member-device"}
+        self.assertEqual(self.client.get("/api/platform/owner/credentials", headers=member_headers).status_code, 403)
+        self.assertEqual(self.client.post("/api/platform/owner/credentials/issue", headers=member_headers, json={"device_label": "blocked", "capability": "idea"}).status_code, 403)
+
+        issued = self.client.post("/api/platform/owner/credentials/issue", headers=self.headers, json={"device_label": "automatic IDEA", "capability": "idea", "expires_in_days": 7})
+        self.assertEqual(issued.status_code, 200)
+        body = issued.json()
+        self.assertTrue(body["token"].startswith("mcp_"))
+        listed = self.client.get("/api/platform/owner/credentials", headers=self.headers)
+        self.assertEqual(listed.status_code, 200)
+        self.assertTrue(any(item["credential_id"] == body["credential_id"] for item in listed.json()["credentials"]))
+        self.assertNotIn("token", json.dumps(listed.json()))
+        self.assertEqual(self.client.post(f"/api/platform/owner/credentials/{body['credential_id']}/revoke", headers=self.headers).status_code, 200)
+        self.assertEqual(self.client.post(f"/api/platform/owner/credentials/{body['credential_id']}/revoke", headers=self.headers).status_code, 404)
+
     def test_owner_agent_mcp_is_isolated_and_sessions_continue(self):
         memory_credential = self.client.post(
             "/api/platform/owner/mcp-credentials",
