@@ -740,6 +740,65 @@ async def revoke_owner_device(owner_device_id: str, request: Request):
     return {"status": "revoked"}
 
 
+@app.post("/api/platform/device/bootstrap")
+async def bootstrap_device_session(request: Request):
+    context = require_context(request)
+    return {
+        "device_id": context.device_id,
+        "account_id": context.principal.account_id,
+        "route": platform_store.route_for_principal(context.principal),
+        "owner_controller": platform_store.is_owner_controller(context.principal),
+    }
+
+
+@app.get("/api/platform/owner/credentials")
+async def list_automated_device_credentials(request: Request):
+    context = require_context(request)
+    _require_owner_controller(context)
+    return {"credentials": platform_store.list_automated_device_credentials(context.principal)}
+
+
+@app.post("/api/platform/owner/credentials/issue")
+async def issue_automated_device_credential(request: Request):
+    context = require_context(request)
+    _require_owner_controller(context)
+    body = await request.json()
+    expires_in_days = body.get("expires_in_days")
+    if expires_in_days is not None and (not isinstance(expires_in_days, int) or not 1 <= expires_in_days <= 3650):
+        raise HTTPException(status_code=400, detail="expires_in_days 必须为 1 到 3650 的整数")
+    try:
+        credential = platform_store.create_mcp_credential(
+            context.principal,
+            context.space_id,
+            body.get("device_label", ""),
+            capability=body.get("capability", "idea"),
+            expires_at=time.time() + expires_in_days * 86400 if expires_in_days else None,
+            credential_kind="automated_device",
+        )
+    except (PermissionError, ValueError) as error:
+        raise HTTPException(status_code=403, detail=str(error))
+    platform_store.write_audit(
+        "owner.automated_device_credential_issued",
+        context,
+        action="issue",
+        resource_type="automated_device_credential",
+        resource_id=credential["credential_id"],
+        decision="allowed",
+        metadata={"device_label": credential["device_label"], "capability": credential["capability"]},
+    )
+    return credential
+
+
+@app.post("/api/platform/owner/credentials/{credential_id}/revoke")
+async def revoke_automated_device_credential(credential_id: str, request: Request):
+    context = require_context(request)
+    _require_owner_controller(context)
+    if not platform_store.revoke_automated_device_credential(context.principal, credential_id):
+        raise HTTPException(status_code=404, detail="自动设备凭据不存在或已撤销")
+    platform_store.write_audit("owner.automated_device_credential_revoked", context, action="revoke", resource_type="automated_device_credential", resource_id=credential_id, decision="allowed")
+    return {"status": "revoked"}
+
+
 @app.get("/api/platform/owner/mcp-credentials")
 async def list_mcp_credentials(request: Request):
     context = require_context(request)
