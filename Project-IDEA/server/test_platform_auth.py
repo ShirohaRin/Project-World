@@ -412,6 +412,49 @@ class PlatformApiTests(unittest.TestCase):
         )
         self.assertEqual(updated.status_code, 200)
         self.assertEqual(updated.json()["revision"], 2)
+    def test_daily_activity_delete_and_cleanup(self):
+        chat_endpoint = next(route.endpoint for route in self.client.app.routes if getattr(route, "path", None) == "/api/assistant/chat")
+        active_runners = chat_endpoint.__globals__["agent_runners"]
+        original_run = active_runners["idea"].run
+
+        async def fake_run(user_message, history=None, stream=False, llm_model_config=None):
+            return {"reply": "Handled.", "tool_calls_log": [{"name": "read_file", "success": True, "args": {"path": "secret"}, "result": "secret"}], "iterations": 1}
+
+        active_runners["idea"].run = fake_run
+        try:
+            response = self.client.post("/api/assistant/chat", headers=self.headers, json={"agent_id": "idea", "message": "private original message"})
+            self.assertEqual(response.status_code, 200)
+            activities = self.client.get("/api/platform/daily-memories", headers=self.headers).json()["memories"]
+            activity = next(item for item in activities if item["category"] == "activity [verified/short]")
+            self.assertNotIn("private original message", activity["content"])
+            self.assertEqual(self.client.request("DELETE", f"/api/platform/daily-memories/{activity['id']}", headers=self.headers, json={"expected_revision": activity["revision"] + 1}).status_code, 409)
+            self.assertEqual(self.client.request("DELETE", f"/api/platform/daily-memories/{activity['id']}", headers=self.headers, json={"expected_revision": activity["revision"]}).status_code, 200)
+            self.assertEqual(self.client.request("DELETE", f"/api/platform/daily-memories/{activity['id']}", headers=self.headers, json={"expected_revision": activity["revision"]}).status_code, 404)
+        finally:
+            active_runners["idea"].run = original_run
+
+        async def no_tool_run(user_message, history=None, stream=False, llm_model_config=None):
+            return {"reply": "No tools.", "tool_calls_log": [], "iterations": 1}
+
+        active_runners["idea"].run = no_tool_run
+        try:
+            before = self.client.get("/api/platform/daily-memories", headers=self.headers).json()["count"]
+            self.assertEqual(self.client.post("/api/assistant/chat", headers=self.headers, json={"agent_id": "idea", "message": "ordinary chat"}).status_code, 200)
+            self.assertEqual(self.client.get("/api/platform/daily-memories", headers=self.headers).json()["count"], before)
+        finally:
+            active_runners["idea"].run = original_run
+
+        short = self.client.post("/api/platform/daily-memories", headers=self.headers, json={"category": "old short", "content": "remove me", "confidence": "verified", "retention": "short"}).json()
+        long = self.client.post("/api/platform/daily-memories", headers=self.headers, json={"category": "old long", "content": "keep me", "confidence": "verified", "retention": "long"}).json()
+        with self.main.platform_store._connect() as connection:
+            connection.execute("UPDATE long_term_memories SET created_at = 0 WHERE memory_id IN (?, ?)", (short["id"], long["id"]))
+        cleanup = self.client.post("/api/platform/daily-memories/cleanup", headers=self.headers)
+        self.assertEqual(cleanup.status_code, 200)
+        self.assertGreaterEqual(cleanup.json()["deleted_count"], 1)
+        remaining = {item["id"] for item in self.client.get("/api/platform/daily-memories", headers=self.headers).json()["memories"]}
+        self.assertNotIn(short["id"], remaining)
+        self.assertIn(long["id"], remaining)
+
     def test_rag_authorize(self):
         endpoint = "/api/platform/rag/authorize"
         service_token = os.environ["RAG_IDEA_SERVICE_TOKEN"]

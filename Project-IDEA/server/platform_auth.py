@@ -800,6 +800,30 @@ class PlatformStore:
             self._append_memory_sync_events(connection, account_id, space_id, row["namespace"], "memory", memory_id, "memory.deleted", {"namespace": row["namespace"], "revision": revision, "deleted_at": now, "actor_principal_id": principal_id})
             return True, None
 
+    def cleanup_daily_short_memories(self, account_id: str, space_id: str, namespace: str, created_before: float, principal_id: str) -> int:
+        now = time.time()
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT memory_id, revision FROM long_term_memories WHERE account_id = ? AND space_id = ? AND namespace = ? AND status = 'active' AND created_at < ? AND category LIKE ?",
+                (account_id, space_id, namespace, created_before, "%/short]"),
+            ).fetchall()
+            for row in rows:
+                connection.execute(
+                    "UPDATE long_term_memories SET status = 'deleted', deleted_at = ?, updated_at = ?, revision = revision + 1 WHERE memory_id = ? AND status = 'active'",
+                    (now, now, row["memory_id"]),
+                )
+                self._append_memory_sync_events(
+                    connection,
+                    account_id,
+                    space_id,
+                    namespace,
+                    "memory",
+                    row["memory_id"],
+                    "memory.deleted",
+                    {"namespace": namespace, "revision": row["revision"] + 1, "deleted_at": now, "actor_principal_id": principal_id},
+                )
+            return len(rows)
+
     @staticmethod
     def _append_memory_sync_events(connection, account_id: str, space_id: str, namespace: str, aggregate_type: str, aggregate_id: str, event_type: str, payload: dict) -> None:
         accounts = [account_id]

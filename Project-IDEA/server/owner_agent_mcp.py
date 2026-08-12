@@ -11,19 +11,21 @@ create_conversation = None
 memory_context = None
 global_context = None
 memory_namespaces = None
+daily_activity_recorder = None
 max_history = 50
 max_message_length = 20_000
 max_memory_length = 10_000
 
 
-def configure(store, runner, conversation_creator, memory_resolver, global_resolver, namespace_resolver):
-    global platform_store, agent_runner, create_conversation, memory_context, global_context, memory_namespaces
+def configure(store, runner, conversation_creator, memory_resolver, global_resolver, namespace_resolver, activity_recorder=None):
+    global platform_store, agent_runner, create_conversation, memory_context, global_context, memory_namespaces, daily_activity_recorder
     platform_store = store
     agent_runner = runner
     create_conversation = conversation_creator
     memory_context = memory_resolver
     global_context = global_resolver
     memory_namespaces = namespace_resolver
+    daily_activity_recorder = activity_recorder
 
 
 mcp = FastMCP("IDEA Owner Agent", stateless_http=True, json_response=True)
@@ -72,6 +74,8 @@ async def idea_chat(message: str, conversation_id: str | None = None, use_memory
     result = await agent_runner.run(user_message=runner_message, history=history[-10:])
     reply = result.get("reply", "抱歉，我暂时无法处理这个请求。")
     tool_calls_log = result.get("tool_calls_log", [])
+    if tool_calls_log and daily_activity_recorder is not None:
+        daily_activity_recorder(context, tool_calls_log)
     platform_store.append_message(
         context.principal.account_id,
         context.space_id,
