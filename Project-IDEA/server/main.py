@@ -440,7 +440,8 @@ def _memory_scope(context: RequestContext, scope: object) -> tuple[str, str]:
 
 
 def _memory_context(context: RequestContext, query: str) -> str:
-    namespaces = list(_memory_namespaces(context).values())
+    namespaces_by_scope = _memory_namespaces(context)
+    namespaces = [namespace for scope, namespace in namespaces_by_scope.items() if scope != "daily"]
     memories = platform_store.list_memories(
         context.principal.account_id,
         context.space_id,
@@ -475,6 +476,23 @@ def _global_context(context: RequestContext, exclude_conversation_id: str) -> st
     return "\n".join(snippets)
 
 
+def _record_daily_activity(context: RequestContext, tool_calls_log: list[dict]) -> None:
+    if not tool_calls_log:
+        return
+    names = sorted({item.get("name") for item in tool_calls_log if isinstance(item, dict) and isinstance(item.get("name"), str) and item["name"]})
+    if not names:
+        return
+    memory = platform_store.create_memory(
+        "account-owner", context.space_id, "daily/owner-shiroha-nao", "activity [verified/short]",
+        f"IDEA 工作活动：本次 Owner IDEA 会话调用了工具：{', '.join(names)}。请在审计记录与对应会话中核对具体输入和结果。",
+        context.principal.principal_id,
+    )
+    platform_store.write_audit(
+        "daily.activity_recorded", context, action="create", resource_type="memory", resource_id=memory["id"], decision="allowed",
+        metadata={"namespace": "daily/owner-shiroha-nao", "tool_names": names},
+    )
+
+
 owner_agent_mcp.configure(
     platform_store,
     agent_runners["idea"],
@@ -482,6 +500,7 @@ owner_agent_mcp.configure(
     _memory_context,
     _global_context,
     _memory_namespaces,
+    _record_daily_activity,
 )
 
 # ---------------------------------------------------------------------------
@@ -908,6 +927,33 @@ async def create_daily_memory(request: Request):
     return platform_store.create_memory("account-owner", context.space_id, "daily/owner-shiroha-nao", f"{category.strip()} [{confidence}/{retention}]", content.strip(), context.principal.principal_id)
 
 
+@app.delete("/api/platform/daily-memories/{memory_id}")
+async def delete_daily_memory(memory_id: str, request: Request):
+    context = require_context(request)
+    _require_owner_controller(context)
+    if not VALID_ID.fullmatch(memory_id):
+        raise HTTPException(status_code=400, detail="memory_id 格式无效")
+    expected_revision = (await request.json()).get("expected_revision")
+    if not isinstance(expected_revision, int) or expected_revision < 1:
+        raise HTTPException(status_code=400, detail="expected_revision 必须是正整数")
+    deleted, current_revision = platform_store.delete_memory("account-owner", context.space_id, memory_id, ["daily/owner-shiroha-nao"], expected_revision, context.principal.principal_id)
+    if current_revision is not None:
+        raise HTTPException(status_code=409, detail="记忆已被修改，请刷新后重试", headers={"X-Memory-Revision": str(current_revision)})
+    if not deleted:
+        raise HTTPException(status_code=404, detail="daily memory 不存在")
+    platform_store.write_audit("daily.memory_deleted", context, action="delete", resource_type="memory", resource_id=memory_id, decision="allowed", metadata={"namespace": "daily/owner-shiroha-nao", "revision": expected_revision + 1})
+    return {"id": memory_id, "status": "deleted", "revision": expected_revision + 1}
+
+
+@app.post("/api/platform/daily-memories/cleanup")
+async def cleanup_daily_memories(request: Request):
+    context = require_context(request)
+    _require_owner_controller(context)
+    deleted_count = platform_store.cleanup_daily_short_memories("account-owner", context.space_id, "daily/owner-shiroha-nao", time.time() - 30 * 24 * 60 * 60, context.principal.principal_id)
+    platform_store.write_audit("daily.memories_cleaned", context, action="cleanup", resource_type="memory", decision="allowed", metadata={"namespace": "daily/owner-shiroha-nao", "deleted_count": deleted_count, "retention": "short", "older_than_days": 30})
+    return {"deleted_count": deleted_count}
+
+
 # ===================================================================
 # 核心 API：独立智能体会话（非流式）
 # ===================================================================
@@ -953,6 +999,8 @@ async def chat_with_assistant(request: Request):
 
     reply = result.get("reply", "抱歉，我暂时无法处理这个请求。")
     tool_calls_log = result.get("tool_calls_log", [])
+    if agent_id == "idea" and platform_store.is_owner_controller(context.principal) and tool_calls_log:
+        _record_daily_activity(context, tool_calls_log)
     iterations = result.get("iterations", 1)
 
     # 提取调度信息（如果有 dispatch_to_agent）
