@@ -7,6 +7,8 @@ import sqlite3
 import time
 import uuid
 from contextlib import contextmanager
+
+from cryptography.fernet import Fernet, InvalidToken
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -38,8 +40,24 @@ class RequestContext:
 class PlatformStore:
     def __init__(self, db_path: str):
         self.db_path = db_path
+        recovery_key = os.environ.get("IDEA_CREDENTIAL_RECOVERY_KEY", "").encode("ascii")
+        try:
+            self.credential_cipher = Fernet(recovery_key) if recovery_key else None
+        except (ValueError, TypeError) as error:
+            raise RuntimeError("IDEA_CREDENTIAL_RECOVERY_KEY 无效") from error
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
+
+    def _encrypt_recoverable_credential(self, token: str) -> str | None:
+        return self.credential_cipher.encrypt(token.encode("utf-8")).decode("ascii") if self.credential_cipher else None
+
+    def _decrypt_recoverable_credential(self, encrypted_token: str | None) -> str | None:
+        if not encrypted_token or not self.credential_cipher:
+            return None
+        try:
+            return self.credential_cipher.decrypt(encrypted_token.encode("ascii")).decode("utf-8")
+        except (InvalidToken, UnicodeDecodeError):
+            return None
 
     @contextmanager
     def _connect(self):
@@ -188,6 +206,7 @@ class PlatformStore:
                 CREATE TABLE IF NOT EXISTS mcp_device_credentials (
                     credential_id TEXT PRIMARY KEY,
                     secret_hash TEXT NOT NULL UNIQUE,
+                    encrypted_token TEXT,
                     capability TEXT NOT NULL DEFAULT 'memory',
                     credential_kind TEXT NOT NULL DEFAULT 'mcp',
                     owner_principal_id TEXT NOT NULL,
@@ -291,6 +310,52 @@ class PlatformStore:
                     FOREIGN KEY(project_id) REFERENCES projects(project_id),
                     FOREIGN KEY(principal_id) REFERENCES principals(principal_id)
                 );
+                CREATE TABLE IF NOT EXISTS tool_approvals (
+                    approval_id TEXT PRIMARY KEY,
+                    account_id TEXT NOT NULL,
+                    space_id TEXT NOT NULL,
+                    principal_id TEXT NOT NULL,
+                    agent_id TEXT NOT NULL DEFAULT 'idea',
+                    tool_name TEXT NOT NULL,
+                    fingerprint TEXT NOT NULL,
+                    args_summary TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'approved', 'denied', 'expired')),
+                    requested_at REAL NOT NULL,
+                    expires_at REAL NOT NULL,
+                    decided_at REAL,
+                    decided_by TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_tool_approvals_lookup ON tool_approvals(status, space_id, requested_at);
+                CREATE TABLE IF NOT EXISTS capability_grants (
+                    grant_id TEXT PRIMARY KEY,
+                    account_id TEXT NOT NULL,
+                    granted_by TEXT NOT NULL,
+                    capability TEXT NOT NULL,
+                    workspace TEXT NOT NULL DEFAULT '',
+                    constraints_json TEXT NOT NULL DEFAULT '{}',
+                    status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'revoked')),
+                    created_at REAL NOT NULL,
+                    expires_at REAL,
+                    revoked_at REAL,
+                    revoked_by TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_capability_grants_lookup ON capability_grants(account_id, capability, status);
+                CREATE TABLE IF NOT EXISTS file_change_reviews (
+                    change_id TEXT PRIMARY KEY,
+                    account_id TEXT NOT NULL,
+                    space_id TEXT NOT NULL,
+                    principal_id TEXT NOT NULL,
+                    agent_id TEXT NOT NULL DEFAULT 'idea',
+                    tool_name TEXT NOT NULL,
+                    file_path TEXT NOT NULL,
+                    backup_path TEXT,
+                    diff_summary TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'accepted', 'reverted')),
+                    created_at REAL NOT NULL,
+                    reviewed_at REAL,
+                    reviewed_by TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_file_change_reviews_lookup ON file_change_reviews(account_id, space_id, status, created_at DESC);
                 """
             )
             columns = {row["name"] for row in connection.execute("PRAGMA table_info(accounts)").fetchall()}
@@ -313,6 +378,8 @@ class PlatformStore:
                 connection.execute("ALTER TABLE mcp_device_credentials ADD COLUMN capability TEXT NOT NULL DEFAULT 'memory'")
             if "credential_kind" not in credential_columns:
                 connection.execute("ALTER TABLE mcp_device_credentials ADD COLUMN credential_kind TEXT NOT NULL DEFAULT 'mcp'")
+            if "encrypted_token" not in credential_columns:
+                connection.execute("ALTER TABLE mcp_device_credentials ADD COLUMN encrypted_token TEXT")
             linked_devices = connection.execute("SELECT l.owner_principal_id, s.account_id, s.device_id FROM owner_account_links l JOIN account_sessions s ON s.account_id = l.account_id WHERE l.owner_principal_id = 'owner-shiroha-nao' AND l.status = 'active' AND s.device_id IS NOT NULL").fetchall()
             for device in linked_devices:
                 exists = connection.execute("SELECT 1 FROM owner_devices WHERE owner_principal_id = ? AND account_id = ? AND device_id = ?", (device["owner_principal_id"], device["account_id"], device["device_id"])).fetchone()
@@ -422,6 +489,8 @@ class PlatformStore:
             raise ValueError("capability 必须为 memory 或 idea")
         if credential_kind not in {"mcp", "automated_device"}:
             raise ValueError("credential_kind 无效")
+        if credential_kind == "automated_device" and not self.credential_cipher:
+            raise ValueError("自动设备凭据托管尚未配置")
         owner_principal_id = self.owner_scope_id(principal)
         if not owner_principal_id or not self.resolve_space(principal.principal_id, space_id):
             raise PermissionError("无权访问指定空间")
@@ -431,8 +500,8 @@ class PlatformStore:
         now = time.time()
         with self._connect() as connection:
             connection.execute(
-                "INSERT INTO mcp_device_credentials(credential_id, secret_hash, capability, credential_kind, owner_principal_id, account_id, principal_id, space_id, device_label, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (credential_id, self.hash_token(token), capability, credential_kind, owner_principal_id, principal.account_id, principal.principal_id, space_id, device_label.strip(), expires_at, now),
+                "INSERT INTO mcp_device_credentials(credential_id, secret_hash, encrypted_token, capability, credential_kind, owner_principal_id, account_id, principal_id, space_id, device_label, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (credential_id, self.hash_token(token), self._encrypt_recoverable_credential(token) if credential_kind == "automated_device" else None, capability, credential_kind, owner_principal_id, principal.account_id, principal.principal_id, space_id, device_label.strip(), expires_at, now),
             )
         return {"credential_id": credential_id, "capability": capability, "device_label": device_label.strip(), "space_id": space_id, "expires_at": expires_at, "token": token}
 
@@ -508,6 +577,17 @@ class PlatformStore:
                 (owner_principal_id,),
             ).fetchall()
             return [dict(row) for row in rows]
+
+    def recover_automated_device_credential(self, principal: Principal, credential_id: str) -> Optional[str]:
+        if not self.is_owner_controller(principal):
+            return None
+        owner_principal_id = self.owner_scope_id(principal)
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT encrypted_token FROM mcp_device_credentials WHERE credential_id = ? AND owner_principal_id = ? AND credential_kind = 'automated_device' AND status = 'active'",
+                (credential_id, owner_principal_id),
+            ).fetchone()
+        return self._decrypt_recoverable_credential(row["encrypted_token"] if row else None)
 
     def revoke_automated_device_credential(self, principal: Principal, credential_id: str) -> bool:
         if not self.is_owner_controller(principal):
@@ -746,6 +826,14 @@ class PlatformStore:
                 self._append_sync_event(connection, account_id, space_id, "conversation", conversation_id, "conversation.reset", {})
             return bool(changed)
 
+    def delete_conversation(self, account_id: str, space_id: str, conversation_id: str) -> bool:
+        with self._connect() as connection:
+            changed = connection.execute("UPDATE conversations SET status = 'deleted', updated_at = ? WHERE conversation_id = ? AND account_id = ? AND space_id = ? AND status = 'active'", (time.time(), conversation_id, account_id, space_id)).rowcount
+            if changed:
+                connection.execute("UPDATE tasks SET status = 'deleted', updated_at = ? WHERE conversation_id = ? AND account_id = ? AND space_id = ? AND status != 'deleted'", (time.time(), conversation_id, account_id, space_id))
+                self._append_sync_event(connection, account_id, space_id, "conversation", conversation_id, "conversation.deleted", {})
+            return bool(changed)
+
     def create_task(self, account_id: str, space_id: str, agent_id: str, title: str, description: str, conversation_id: Optional[str]) -> dict:
         task_id, now = uuid.uuid4().hex, time.time()
         with self._connect() as connection:
@@ -755,8 +843,15 @@ class PlatformStore:
 
     def list_tasks(self, account_id: str, space_id: str) -> list[dict]:
         with self._connect() as connection:
-            rows = connection.execute("SELECT * FROM tasks WHERE account_id = ? AND space_id = ? ORDER BY created_at DESC", (account_id, space_id)).fetchall()
+            rows = connection.execute("SELECT * FROM tasks WHERE account_id = ? AND space_id = ? AND status != 'deleted' ORDER BY created_at DESC", (account_id, space_id)).fetchall()
             return [{"id": row["task_id"], **{key: row[key] for key in row.keys() if key != "task_id"}} for row in rows]
+
+    def delete_task(self, account_id: str, space_id: str, task_id: str) -> bool:
+        with self._connect() as connection:
+            changed = connection.execute("UPDATE tasks SET status = 'deleted', updated_at = ? WHERE task_id = ? AND account_id = ? AND space_id = ? AND status != 'deleted'", (time.time(), task_id, account_id, space_id)).rowcount
+            if changed:
+                self._append_sync_event(connection, account_id, space_id, "task", task_id, "task.deleted", {})
+            return bool(changed)
 
     def list_sync_events(self, account_id: str, space_id: str, after_event_id: int, limit: int) -> list[dict]:
         with self._connect() as connection:
@@ -849,6 +944,217 @@ class PlatformStore:
                     {"namespace": namespace, "revision": row["revision"] + 1, "deleted_at": now, "actor_principal_id": principal_id},
                 )
             return len(rows)
+
+    def create_tool_approval(self, account_id: str, space_id: str, principal_id: str, agent_id: str, tool_name: str, fingerprint: str, args_summary: str, ttl_seconds: int = 600) -> dict:
+        now = time.time()
+        approval = {
+            "approval_id": f"approval-{uuid.uuid4().hex}",
+            "account_id": account_id,
+            "space_id": space_id,
+            "principal_id": principal_id,
+            "agent_id": agent_id,
+            "tool_name": tool_name,
+            "fingerprint": fingerprint,
+            "args_summary": args_summary,
+            "status": "pending",
+            "requested_at": now,
+            "expires_at": now + ttl_seconds,
+            "decided_at": None,
+            "decided_by": None,
+        }
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT INTO tool_approvals(approval_id, account_id, space_id, principal_id, agent_id, tool_name, fingerprint, args_summary, status, requested_at, expires_at, decided_at, decided_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, NULL, NULL)",
+                (approval["approval_id"], account_id, space_id, principal_id, agent_id, tool_name, fingerprint, args_summary, now, approval["expires_at"]),
+            )
+            for target in self._sync_target_accounts(connection, account_id, space_id):
+                self._append_sync_event(
+                    connection,
+                    target,
+                    space_id,
+                    "tool_approval",
+                    approval["approval_id"],
+                    "approval.requested",
+                    {"tool_name": tool_name, "args_summary": args_summary[:500], "agent_id": agent_id, "requester_principal_id": principal_id, "expires_at": approval["expires_at"]},
+                )
+        return approval
+
+    def _sync_target_accounts(self, connection, account_id: str, space_id: str) -> list[str]:
+        """同步事件的接收账号：发起者 + 所有已链接的 Owner 账号。"""
+        owner_accounts = [row["account_id"] for row in connection.execute("SELECT account_id FROM owner_account_links WHERE status = 'active'").fetchall()]
+        return list(dict.fromkeys([account_id, *owner_accounts]))
+
+    def find_tool_approval(self, account_id: str, space_id: str, principal_id: str, tool_name: str, fingerprint: str) -> Optional[dict]:
+        """返回可用的已批准授权，否则复用未过期的 pending 请求；两者皆无返回 None。"""
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM tool_approvals WHERE account_id = ? AND space_id = ? AND principal_id = ? AND tool_name = ? AND fingerprint = ? AND status != 'denied' AND expires_at > ? ORDER BY requested_at DESC LIMIT 1",
+                (account_id, space_id, principal_id, tool_name, fingerprint, time.time()),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def list_tool_approvals(self, account_id: str, space_id: str, status: Optional[str] = None, limit: int = 50) -> list[dict]:
+        with self._connect() as connection:
+            if status:
+                rows = connection.execute(
+                    "SELECT * FROM tool_approvals WHERE account_id = ? AND space_id = ? AND status = ? ORDER BY requested_at DESC LIMIT ?",
+                    (account_id, space_id, status, limit),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    "SELECT * FROM tool_approvals WHERE account_id = ? AND space_id = ? ORDER BY requested_at DESC LIMIT ?",
+                    (account_id, space_id, limit),
+                ).fetchall()
+            return [dict(row) for row in rows]
+
+    def decide_tool_approval(self, approval_id: str, account_id: str, space_id: str, decision: str, decided_by: str) -> Optional[dict]:
+        if decision not in ("approved", "denied"):
+            raise ValueError("审批决策无效")
+        now = time.time()
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM tool_approvals WHERE approval_id = ? AND account_id = ? AND space_id = ?",
+                (approval_id, account_id, space_id),
+            ).fetchone()
+            if not row:
+                return None
+            if row["status"] != "pending":
+                return dict(row)
+            if row["expires_at"] <= now:
+                connection.execute("UPDATE tool_approvals SET status = 'expired', decided_at = ?, decided_by = ? WHERE approval_id = ?", (now, decided_by, approval_id))
+                return dict(connection.execute("SELECT * FROM tool_approvals WHERE approval_id = ?", (approval_id,)).fetchone())
+            connection.execute(
+                "UPDATE tool_approvals SET status = ?, decided_at = ?, decided_by = ? WHERE approval_id = ? AND status = 'pending'",
+                (decision, now, decided_by, approval_id),
+            )
+            updated = dict(connection.execute("SELECT * FROM tool_approvals WHERE approval_id = ?", (approval_id,)).fetchone())
+            for target in self._sync_target_accounts(connection, row["account_id"], row["space_id"]):
+                self._append_sync_event(
+                    connection,
+                    target,
+                    row["space_id"],
+                    "tool_approval",
+                    approval_id,
+                    "approval.decided",
+                    {"tool_name": row["tool_name"], "status": decision, "decided_by": decided_by},
+                )
+            return updated
+
+    VALID_GRANT_CAPABILITIES = {"file.read", "file.write", "file.delete", "command", "network", "delegate", "ssh"}
+
+    def create_capability_grant(self, account_id: str, granted_by: str, capability: str, workspace: str = "", constraints: Optional[dict] = None, expires_in_days: Optional[int] = None) -> dict:
+        if capability not in self.VALID_GRANT_CAPABILITIES:
+            raise ValueError("授权能力无效")
+        now = time.time()
+        grant = {
+            "grant_id": f"grant-{uuid.uuid4().hex}",
+            "account_id": account_id,
+            "granted_by": granted_by,
+            "capability": capability,
+            "workspace": workspace or "",
+            "constraints_json": json.dumps(constraints or {}, ensure_ascii=False)[:2000],
+            "status": "active",
+            "created_at": now,
+            "expires_at": (now + expires_in_days * 86400) if expires_in_days else None,
+            "revoked_at": None,
+            "revoked_by": None,
+        }
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT INTO capability_grants(grant_id, account_id, granted_by, capability, workspace, constraints_json, status, created_at, expires_at, revoked_at, revoked_by) VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, NULL, NULL)",
+                (grant["grant_id"], account_id, granted_by, capability, grant["workspace"], grant["constraints_json"], now, grant["expires_at"]),
+            )
+        return grant
+
+    def find_valid_grant(self, account_id: str, capability: str, workspace: str = "") -> Optional[dict]:
+        """返回当前账号在指定空间下可用的有效授权；workspace 为空表示通配。"""
+        now = time.time()
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM capability_grants WHERE account_id = ? AND capability = ? AND status = 'active' AND (expires_at IS NULL OR expires_at > ?) AND (workspace = '' OR workspace = ?) ORDER BY created_at DESC LIMIT 1",
+                (account_id, capability, now, workspace),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def list_capability_grants(self, account_id: Optional[str] = None, limit: int = 100) -> list[dict]:
+        with self._connect() as connection:
+            if account_id:
+                rows = connection.execute(
+                    "SELECT * FROM capability_grants WHERE account_id = ? ORDER BY created_at DESC LIMIT ?",
+                    (account_id, limit),
+                ).fetchall()
+            else:
+                rows = connection.execute("SELECT * FROM capability_grants ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+            return [dict(row) for row in rows]
+
+    def revoke_capability_grant(self, grant_id: str, revoked_by: str) -> Optional[dict]:
+        now = time.time()
+        with self._connect() as connection:
+            row = connection.execute("SELECT * FROM capability_grants WHERE grant_id = ?", (grant_id,)).fetchone()
+            if not row:
+                return None
+            if row["status"] == "active":
+                connection.execute("UPDATE capability_grants SET status = 'revoked', revoked_at = ?, revoked_by = ? WHERE grant_id = ?", (now, revoked_by, grant_id))
+            return dict(connection.execute("SELECT * FROM capability_grants WHERE grant_id = ?", (grant_id,)).fetchone())
+
+    def create_file_change_review(self, account_id: str, space_id: str, principal_id: str, agent_id: str, tool_name: str, file_path: str, backup_path: Optional[str], diff_summary: str) -> dict:
+        now = time.time()
+        review = {
+            "change_id": f"change-{uuid.uuid4().hex}",
+            "account_id": account_id,
+            "space_id": space_id,
+            "principal_id": principal_id,
+            "agent_id": agent_id,
+            "tool_name": tool_name,
+            "file_path": file_path,
+            "backup_path": backup_path,
+            "diff_summary": diff_summary[:2000],
+            "status": "pending",
+            "created_at": now,
+            "reviewed_at": None,
+            "reviewed_by": None,
+        }
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT INTO file_change_reviews(change_id, account_id, space_id, principal_id, agent_id, tool_name, file_path, backup_path, diff_summary, status, created_at, reviewed_at, reviewed_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, NULL, NULL)",
+                (review["change_id"], account_id, space_id, principal_id, agent_id, tool_name, file_path, backup_path, review["diff_summary"], now),
+            )
+        return review
+
+    def get_file_change_review(self, change_id: str, account_id: str, space_id: str) -> Optional[dict]:
+        with self._connect() as connection:
+            row = connection.execute("SELECT * FROM file_change_reviews WHERE change_id = ? AND account_id = ? AND space_id = ?", (change_id, account_id, space_id)).fetchone()
+            return dict(row) if row else None
+
+    def list_file_change_reviews(self, account_id: str, space_id: str, status: Optional[str] = None, limit: int = 100) -> list[dict]:
+        with self._connect() as connection:
+            if status:
+                rows = connection.execute(
+                    "SELECT * FROM file_change_reviews WHERE account_id = ? AND space_id = ? AND status = ? ORDER BY created_at DESC LIMIT ?",
+                    (account_id, space_id, status, limit),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    "SELECT * FROM file_change_reviews WHERE account_id = ? AND space_id = ? ORDER BY created_at DESC LIMIT ?",
+                    (account_id, space_id, limit),
+                ).fetchall()
+            return [dict(row) for row in rows]
+
+    def review_file_change(self, change_id: str, account_id: str, space_id: str, decision: str, reviewed_by: str) -> Optional[dict]:
+        if decision not in ("accepted", "reverted"):
+            raise ValueError("审查决策无效")
+        now = time.time()
+        with self._connect() as connection:
+            row = connection.execute("SELECT * FROM file_change_reviews WHERE change_id = ? AND account_id = ? AND space_id = ?", (change_id, account_id, space_id)).fetchone()
+            if not row:
+                return None
+            if row["status"] != "pending":
+                return dict(row)
+            connection.execute(
+                "UPDATE file_change_reviews SET status = ?, reviewed_at = ?, reviewed_by = ? WHERE change_id = ? AND status = 'pending'",
+                (decision, now, reviewed_by, change_id),
+            )
+            return dict(connection.execute("SELECT * FROM file_change_reviews WHERE change_id = ?", (change_id,)).fetchone())
 
     @staticmethod
     def _append_memory_sync_events(connection, account_id: str, space_id: str, namespace: str, aggregate_type: str, aggregate_id: str, event_type: str, payload: dict) -> None:

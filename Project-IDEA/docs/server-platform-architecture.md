@@ -133,6 +133,18 @@ health() -> 可用性、延迟与版本
 
 文件访问使用规范化后的真实路径并处理符号链接；命令执行需定义允许的解释器与参数、子进程与网络权限、环境变量隔离、CPU/内存/时长限制及输出截断策略。这些策略由服务端强制执行，不能仅依赖客户端预览。
 
+## SSH 远程主机
+
+服务端通过 `ssh_run` / `ssh_get` / `ssh_put` 三个工具提供受控远程主机能力，全部属于高危操作：需 Owner 审批，或账号持有 `ssh` 能力授权（CapabilityGrant），且连接目标必须位于服务端 SSH 白名单内。
+
+- **白名单配置**：环境变量 `IDEA_SSH_HOSTS`（JSON 数组），每项含 `host`、可选 `alias`/`port`/`user`，认证二选一：`key_path`（优先）或 `password_env`（指向环境变量中的密码，避免明文落库）。
+  ```json
+  [{"host":"host.example.com","alias":"prod","port":22,"user":"deploy","key_path":"/home/deploy/.ssh/id_ed25519"},
+   {"host":"10.0.0.5","user":"root","password_env":"IDEA_SSH_PASSWORD_BACKUP"}]
+  ```
+- **执行边界**：`ssh_run` 输出截断与超时；`ssh_get` 下载目标限定工作区、本地覆盖前自动备份、远程文件大小上限 5MB；`ssh_put` 拒绝写入 `/etc/passwd`、`/etc/shadow`、`/root/.ssh`、`~/.ssh` 等关键路径，本地源文件必须位于工作区。
+- 未配置白名单时，SSH 工具不可用；`paramiko` 未安装时返回明确的依赖缺失提示。所有连接与命令均写入审计。
+
 ## Project World 工作空间
 
 Project World 是持续演进的母项目，不以固定产品清单作为边界。平台应以项目空间注册表维护已授权子项目、仓库、知识集合、设备工作区和成员关系；新产生的产品先创建空间与权限策略，再接入 Agent 和 RAG。

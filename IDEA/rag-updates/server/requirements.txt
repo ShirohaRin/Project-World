@@ -1,0 +1,30 @@
+# ==========================================
+# 共享 RAG 知识库服务器 - Python 依赖
+# 服务器上 pip install -r requirements.txt
+# 推荐用清华源加速：-i https://pypi.tuna.tsinghua.edu.cn/simple
+# ==========================================
+
+# Web 框架
+fastapi>=0.100.0
+uvicorn[standard]>=0.23.0
+sse-starlette>=1.6.0
+python-multipart>=0.0.6
+
+# JWT 认证（文件管理器）
+PyJWT>=2.8.0
+
+# LangChain 全家桶
+langchain>=0.3.0
+langchain-community>=0.3.0
+langchain-huggingface>=0.1.0
+langchain-text-splitters>=0.3.0
+
+# 嵌入模型（sentence-transformers 管道的核心）
+sentence-transformers>=3.0.0
+
+# 文档解析
+pypdf>=3.0.0       # PDF 支持
+docx2txt>=0.8      # DOCX 支持
+
+# 向量数据库（FAISS，无 SQLite 依赖，Docker 下零问题）
+faiss-cpu>=1.7.0

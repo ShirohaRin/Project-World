@@ -13,9 +13,9 @@ IDEA 是系统的主 Agent，拥有最高权限。
 访问: http://localhost:8900
 """
 
+import hmac
 import json
 import logging
-import hmac
 import os
 import re
 import time
@@ -36,6 +36,7 @@ from tools.registry import ToolRegistry
 from agent_runner import AgentRunner
 from memory.store import MemoryStore
 from platform_auth import PlatformStore, RequestContext, configured_token, extract_bearer, require_context
+from tool_runtime.permissions import ExecutionContext
 import memory_mcp
 import owner_agent_mcp
 
@@ -261,14 +262,14 @@ llm_client = LLMClient()
 # 每个运行器必须拥有自己的工具注册表。L1 注册表绝不注册调度工具，
 # 避免下级智能体绕过 IDEA 继续递归调度。
 approved_workspaces = existing_workspace_paths()
-idea_tool_registry = ToolRegistry(workspace=str(PROJECT_ROOT), allowed_dirs=[str(path) for path in approved_workspaces])
-l1_tool_registry = ToolRegistry(workspace=str(PROJECT_ROOT), allowed_dirs=[str(path) for path in approved_workspaces])
+idea_tool_registry = ToolRegistry(workspace=str(PROJECT_ROOT), allowed_dirs=[str(path) for path in approved_workspaces], audit_store=platform_store)
+l1_tool_registry = ToolRegistry(workspace=str(PROJECT_ROOT), allowed_dirs=[str(path) for path in approved_workspaces], audit_store=platform_store)
 
 # ---------------------------------------------------------------------------
 # 注册调度工具 — 让 IDEA 可以通过工具调用来分派子智能体
 # ---------------------------------------------------------------------------
 
-async def _dispatch_to_agent(agent: str, task: str) -> dict:
+async def _dispatch_to_agent(agent: str, task: str, execution_context: ExecutionContext) -> dict:
     """
     调度工具的实现：将任务分派给下级智能体。
     这个函数会被注册为 ToolRegistry 中的 dispatch_to_agent 工具。
@@ -287,7 +288,7 @@ async def _dispatch_to_agent(agent: str, task: str) -> dict:
 
     try:
         runner = agent_runners[agent]
-        result = await runner.run(user_message=task)
+        result = await runner.run(user_message=task, execution_context=execution_context.for_child_agent(agent))
         return {
             "success": True,
             "output": result.get("reply", ""),
@@ -328,9 +329,9 @@ dispatch_schema = {
 }
 
 # 创建一个异步包装函数来适配 ToolRegistry 的调用约定
-async def dispatch_tool_func(agent: str, task: str):
-    from tools.registry import ToolResult
-    result = await _dispatch_to_agent(agent=agent, task=task)
+async def dispatch_tool_func(agent: str, task: str, execution_context: ExecutionContext):
+    from tool_runtime.registry import ToolResult
+    result = await _dispatch_to_agent(agent=agent, task=task, execution_context=execution_context)
     if result["success"]:
         return ToolResult(
             True,
@@ -341,10 +342,7 @@ async def dispatch_tool_func(agent: str, task: str):
     else:
         return ToolResult(False, result["output"], "dispatch_to_agent")
 
-idea_tool_registry._tools["dispatch_to_agent"] = {
-    "function": dispatch_tool_func,
-    "schema": dispatch_schema,
-}
+idea_tool_registry.register_tool("dispatch_to_agent", dispatch_tool_func, dispatch_schema)
 
 # ---------------------------------------------------------------------------
 # 四个彼此独立的执行器：IDEA 拥有调度工具，其余 L1 只使用独立注册表。
@@ -386,6 +384,8 @@ MAX_MESSAGE_LENGTH = 20_000
 MAX_MEMORY_LENGTH = 10_000
 VALID_MODEL_KEYS = {"gpt", "deepseek-v4-flash"}
 VALID_ID = re.compile(r"^[A-Za-z0-9_-]{1,100}$")
+RAG_PERMISSIONS = {"documents.read", "documents.write", "documents.delete", "index.rebuild", "rag.search"}
+DAILY_SHORT_RETENTION_SECONDS = 7 * 86400
 
 
 def _validate_agent_id(agent_id: object) -> str:
@@ -440,8 +440,7 @@ def _memory_scope(context: RequestContext, scope: object) -> tuple[str, str]:
 
 
 def _memory_context(context: RequestContext, query: str) -> str:
-    namespaces_by_scope = _memory_namespaces(context)
-    namespaces = [namespace for scope, namespace in namespaces_by_scope.items() if scope != "daily"]
+    namespaces = list(_memory_namespaces(context).values())
     memories = platform_store.list_memories(
         context.principal.account_id,
         context.space_id,
@@ -477,20 +476,23 @@ def _global_context(context: RequestContext, exclude_conversation_id: str) -> st
 
 
 def _record_daily_activity(context: RequestContext, tool_calls_log: list[dict]) -> None:
-    if not tool_calls_log:
+    """把一次会话中的工具调用活动摘要记入 Owner 每日记忆（不记录消息原文或工具参数值）。"""
+    if platform_store.route_for_principal(context.principal) != "owner_idea":
         return
-    names = sorted({item.get("name") for item in tool_calls_log if isinstance(item, dict) and isinstance(item.get("name"), str) and item["name"]})
+    names = [item.get("name") for item in (tool_calls_log or []) if isinstance(item, dict) and item.get("name")]
     if not names:
         return
-    memory = platform_store.create_memory(
-        "account-owner", context.space_id, "daily/owner-shiroha-nao", "activity [verified/short]",
-        f"IDEA 工作活动：本次 Owner IDEA 会话调用了工具：{', '.join(names)}。请在审计记录与对应会话中核对具体输入和结果。",
-        context.principal.principal_id,
-    )
-    platform_store.write_audit(
-        "daily.activity_recorded", context, action="create", resource_type="memory", resource_id=memory["id"], decision="allowed",
-        metadata={"namespace": "daily/owner-shiroha-nao", "tool_names": names},
-    )
+    try:
+        platform_store.create_memory(
+            "account-owner",
+            context.space_id,
+            "daily/owner-shiroha-nao",
+            "activity [verified/short]",
+            f"工具活动: {', '.join(dict.fromkeys(names))[:200]}",
+            context.principal.principal_id,
+        )
+    except Exception:
+        logger.warning("Unable to record daily activity", exc_info=True)
 
 
 owner_agent_mcp.configure(
@@ -526,7 +528,7 @@ memory_mcp.configure(platform_store, _memory_namespaces)
 @app.middleware("http")
 async def platform_request_context(request: Request, call_next):
     request_id = request.headers.get("X-Request-ID", "").strip()[:100] or uuid.uuid4().hex
-    public_auth_paths = {"/api/auth/password/login", "/api/auth/email/send", "/api/auth/email/verify", "/api/auth/refresh", "/api/platform/rag/authorize"}
+    public_auth_paths = {"/api/auth/password/login", "/api/auth/email/send", "/api/auth/email/verify", "/api/auth/refresh"}
     requires_auth = (request.url.path.startswith("/api/") and request.url.path not in public_auth_paths) or request.url.path == "/mcp" or request.url.path.startswith("/mcp/")
     context = None
     mcp_context_token = None
@@ -541,7 +543,10 @@ async def platform_request_context(request: Request, call_next):
         elif request.url.path == "/mcp/idea" or request.url.path.startswith("/mcp/idea/"):
             mcp_capability = "idea"
         if token and token.startswith("mcp_"):
-            principal, credential_space_id = platform_store.authenticate_mcp_credential(token, mcp_capability) if mcp_capability else (None, None)
+            if request.url.path == "/api/platform/rag/authorize":
+                principal, credential_space_id = platform_store.authenticate_rag_owner_mcp_credential(token)
+            else:
+                principal, credential_space_id = platform_store.authenticate_mcp_credential(token, mcp_capability) if mcp_capability else (None, None)
         else:
             principal = platform_store.authenticate(token, device_id) if token else None
             credential_space_id = None
@@ -713,6 +718,14 @@ def _require_owner_controller(context: RequestContext) -> None:
         raise HTTPException(status_code=403, detail="需要已批准的私有设备")
 
 
+def _path_within(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except ValueError:
+        return False
+
+
 @app.get("/api/platform/owner/devices")
 async def list_owner_devices(request: Request):
     context = require_context(request)
@@ -740,17 +753,6 @@ async def revoke_owner_device(owner_device_id: str, request: Request):
     return {"status": "revoked"}
 
 
-@app.post("/api/platform/device/bootstrap")
-async def bootstrap_device_session(request: Request):
-    context = require_context(request)
-    return {
-        "device_id": context.device_id,
-        "account_id": context.principal.account_id,
-        "route": platform_store.route_for_principal(context.principal),
-        "owner_controller": platform_store.is_owner_controller(context.principal),
-    }
-
-
 @app.get("/api/platform/owner/credentials")
 async def list_automated_device_credentials(request: Request):
     context = require_context(request)
@@ -764,19 +766,18 @@ async def issue_automated_device_credential(request: Request):
     _require_owner_controller(context)
     body = await request.json()
     expires_in_days = body.get("expires_in_days")
-    if expires_in_days is not None and (not isinstance(expires_in_days, int) or not 1 <= expires_in_days <= 3650):
-        raise HTTPException(status_code=400, detail="expires_in_days 必须为 1 到 3650 的整数")
     try:
+        expires_at = time.time() + float(expires_in_days) * 86400 if expires_in_days is not None else None
         credential = platform_store.create_mcp_credential(
             context.principal,
             context.space_id,
             body.get("device_label", ""),
             capability=body.get("capability", "idea"),
-            expires_at=time.time() + expires_in_days * 86400 if expires_in_days else None,
+            expires_at=expires_at,
             credential_kind="automated_device",
         )
-    except (PermissionError, ValueError) as error:
-        raise HTTPException(status_code=403, detail=str(error))
+    except (TypeError, ValueError, PermissionError) as error:
+        raise HTTPException(status_code=400, detail=str(error))
     platform_store.write_audit(
         "owner.automated_device_credential_issued",
         context,
@@ -789,13 +790,38 @@ async def issue_automated_device_credential(request: Request):
     return credential
 
 
+@app.get("/api/platform/owner/credentials/{credential_id}/token")
+async def recover_automated_device_credential(credential_id: str, request: Request):
+    context = require_context(request)
+    _require_owner_controller(context)
+    token = platform_store.recover_automated_device_credential(context.principal, credential_id)
+    if not token:
+        raise HTTPException(status_code=404, detail="凭据不存在、已撤销或签发时未启用托管恢复")
+    platform_store.write_audit(
+        "owner.automated_device_credential_recovered",
+        context,
+        action="recover",
+        resource_type="automated_device_credential",
+        resource_id=credential_id,
+        decision="allowed",
+    )
+    return {"credential_id": credential_id, "token": token}
+
+
 @app.post("/api/platform/owner/credentials/{credential_id}/revoke")
 async def revoke_automated_device_credential(credential_id: str, request: Request):
     context = require_context(request)
     _require_owner_controller(context)
     if not platform_store.revoke_automated_device_credential(context.principal, credential_id):
         raise HTTPException(status_code=404, detail="自动设备凭据不存在或已撤销")
-    platform_store.write_audit("owner.automated_device_credential_revoked", context, action="revoke", resource_type="automated_device_credential", resource_id=credential_id, decision="allowed")
+    platform_store.write_audit(
+        "owner.automated_device_credential_revoked",
+        context,
+        action="revoke",
+        resource_type="automated_device_credential",
+        resource_id=credential_id,
+        decision="allowed",
+    )
     return {"status": "revoked"}
 
 
@@ -879,46 +905,6 @@ async def set_account_role(request: Request):
     return {"account_id": account_id, "work_role": work_role}
 
 
-@app.post("/api/platform/rag/authorize")
-async def authorize_rag_project(request: Request):
-    service_token = os.environ.get("RAG_IDEA_SERVICE_TOKEN", "")
-    supplied_service_token = request.headers.get("X-RAG-Service-Token", "")
-    if not service_token or not supplied_service_token or not hmac.compare_digest(supplied_service_token, service_token):
-        raise HTTPException(status_code=401, detail="RAG service token invalid")
-    token = extract_bearer(request)
-    if not token:
-        raise HTTPException(status_code=401, detail="Valid IDEA credential required")
-    credential_space_id = None
-    if token.startswith("mcp_"):
-        principal, credential_space_id = platform_store.authenticate_rag_owner_mcp_credential(token)
-    else:
-        principal = platform_store.authenticate(token, request.headers.get("X-Device-ID", "").strip()[:100] or None)
-    if not principal:
-        raise HTTPException(status_code=401, detail="Valid IDEA credential required")
-    body = await request.json()
-    project_id, permission = body.get("project_id"), body.get("permission")
-    allowed_permissions = {"documents.read", "documents.write", "documents.delete", "index.rebuild", "rag.search"}
-    if not isinstance(project_id, str) or not VALID_ID.fullmatch(project_id) or permission not in allowed_permissions:
-        raise HTTPException(status_code=400, detail="Invalid RAG authorization request")
-    project = platform_store.get_project(project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
-    if not platform_store.is_approved_owner_device(principal):
-        if not platform_store.project_permission_allowed(project_id, principal.principal_id, permission):
-            raise HTTPException(status_code=403, detail="Project permission denied")
-        work_role = platform_store.get_account_role(principal.account_id) or "user"
-        role_by_project_type = {
-            "research": {"researcher"},
-            "novel": {"novelist"},
-            "general": {"researcher", "novelist", "user"},
-        }
-        if work_role not in role_by_project_type[project["project_type"]]:
-            raise HTTPException(status_code=403, detail="Project role denied")
-    space_id = credential_space_id or platform_store.resolve_space(principal.principal_id, request.headers.get("X-Space-ID", "").strip()[:100] or None)
-    if not space_id:
-        raise HTTPException(status_code=403, detail="Space access denied")
-    return {"subject": principal.principal_id, "account_id": principal.account_id, "project_id": project_id, "permission": permission, "space_id": space_id}
-
 @app.get("/api/platform/projects")
 async def list_projects(request: Request):
     context = require_context(request)
@@ -992,15 +978,19 @@ async def delete_daily_memory(memory_id: str, request: Request):
     _require_owner_controller(context)
     if not VALID_ID.fullmatch(memory_id):
         raise HTTPException(status_code=400, detail="memory_id 格式无效")
-    expected_revision = (await request.json()).get("expected_revision")
+    body = await request.json()
+    expected_revision = body.get("expected_revision")
     if not isinstance(expected_revision, int) or expected_revision < 1:
         raise HTTPException(status_code=400, detail="expected_revision 必须是正整数")
-    deleted, current_revision = platform_store.delete_memory("account-owner", context.space_id, memory_id, ["daily/owner-shiroha-nao"], expected_revision, context.principal.principal_id)
+    try:
+        deleted, current_revision = platform_store.delete_memory("account-owner", context.space_id, memory_id, ["daily/owner-shiroha-nao"], expected_revision, context.principal.principal_id)
+    except PermissionError as error:
+        raise HTTPException(status_code=403, detail=str(error))
     if current_revision is not None:
-        raise HTTPException(status_code=409, detail="记忆已被修改，请刷新后重试", headers={"X-Memory-Revision": str(current_revision)})
+        raise HTTPException(status_code=409, detail="记忆已被其他成员修改，请刷新后重试", headers={"X-Memory-Revision": str(current_revision)})
     if not deleted:
-        raise HTTPException(status_code=404, detail="daily memory 不存在")
-    platform_store.write_audit("daily.memory_deleted", context, action="delete", resource_type="memory", resource_id=memory_id, decision="allowed", metadata={"namespace": "daily/owner-shiroha-nao", "revision": expected_revision + 1})
+        raise HTTPException(status_code=404, detail="记忆不存在")
+    platform_store.write_audit("memory.deleted", context, resource_type="memory", resource_id=memory_id, action="delete", decision="allowed", metadata={"namespace": "daily/owner-shiroha-nao", "revision": expected_revision + 1})
     return {"id": memory_id, "status": "deleted", "revision": expected_revision + 1}
 
 
@@ -1008,9 +998,161 @@ async def delete_daily_memory(memory_id: str, request: Request):
 async def cleanup_daily_memories(request: Request):
     context = require_context(request)
     _require_owner_controller(context)
-    deleted_count = platform_store.cleanup_daily_short_memories("account-owner", context.space_id, "daily/owner-shiroha-nao", time.time() - 30 * 24 * 60 * 60, context.principal.principal_id)
-    platform_store.write_audit("daily.memories_cleaned", context, action="cleanup", resource_type="memory", decision="allowed", metadata={"namespace": "daily/owner-shiroha-nao", "deleted_count": deleted_count, "retention": "short", "older_than_days": 30})
+    deleted_count = platform_store.cleanup_daily_short_memories(
+        "account-owner",
+        context.space_id,
+        "daily/owner-shiroha-nao",
+        time.time() - DAILY_SHORT_RETENTION_SECONDS,
+        context.principal.principal_id,
+    )
+    platform_store.write_audit("daily_memory.cleanup", context, action="cleanup", decision="allowed", metadata={"deleted_count": deleted_count})
     return {"deleted_count": deleted_count}
+
+
+@app.post("/api/platform/rag/authorize")
+async def rag_authorize(request: Request):
+    rag_service_token = os.environ.get("RAG_IDEA_SERVICE_TOKEN", "")
+    provided = request.headers.get("X-RAG-Service-Token", "")
+    if not rag_service_token or not provided or not hmac.compare_digest(rag_service_token, provided):
+        raise HTTPException(status_code=401, detail="RAG 服务令牌无效")
+    context = require_context(request)
+    body = await request.json()
+    project_id, permission = body.get("project_id", ""), body.get("permission", "")
+    if not VALID_ID.fullmatch(project_id) or permission not in RAG_PERMISSIONS:
+        raise HTTPException(status_code=400, detail="授权请求无效")
+    if not platform_store.get_project(project_id):
+        raise HTTPException(status_code=404, detail="项目不存在")
+    allowed = platform_store.route_for_principal(context.principal) == "owner_idea" or platform_store.project_permission_allowed(project_id, context.principal.principal_id, permission)
+    if not allowed:
+        raise HTTPException(status_code=403, detail="无权执行该项目操作")
+    platform_store.write_audit("rag.authorized", context, action="authorize", resource_type="project", resource_id=project_id, decision="allowed", metadata={"permission": permission})
+    return {"authorized": True, "project_id": project_id, "permission": permission}
+
+
+@app.get("/api/platform/approvals")
+async def list_tool_approvals(request: Request):
+    context = require_context(request)
+    _require_owner_controller(context)
+    pending = platform_store.list_tool_approvals(context.principal.account_id, context.space_id, status="pending", limit=50)
+    recent = platform_store.list_tool_approvals(context.principal.account_id, context.space_id, limit=20)
+    return {"pending": pending, "recent": recent}
+
+
+@app.post("/api/platform/approvals/{approval_id}/approve")
+async def approve_tool_approval(approval_id: str, request: Request):
+    context = require_context(request)
+    _require_owner_controller(context)
+    if not VALID_ID.fullmatch(approval_id):
+        raise HTTPException(status_code=400, detail="approval_id 格式无效")
+    updated = platform_store.decide_tool_approval(approval_id, context.principal.account_id, context.space_id, "approved", context.principal.principal_id)
+    if not updated:
+        raise HTTPException(status_code=404, detail="审批请求不存在")
+    platform_store.write_audit("tool_approval.decided", context, resource_type="tool_approval", resource_id=approval_id, action="approve", decision="allowed", metadata={"tool_name": updated["tool_name"], "status": updated["status"]})
+    return updated
+
+
+@app.post("/api/platform/approvals/{approval_id}/deny")
+async def deny_tool_approval(approval_id: str, request: Request):
+    context = require_context(request)
+    _require_owner_controller(context)
+    if not VALID_ID.fullmatch(approval_id):
+        raise HTTPException(status_code=400, detail="approval_id 格式无效")
+    updated = platform_store.decide_tool_approval(approval_id, context.principal.account_id, context.space_id, "denied", context.principal.principal_id)
+    if not updated:
+        raise HTTPException(status_code=404, detail="审批请求不存在")
+    platform_store.write_audit("tool_approval.decided", context, resource_type="tool_approval", resource_id=approval_id, action="deny", decision="allowed", metadata={"tool_name": updated["tool_name"], "status": updated["status"]})
+    return updated
+
+
+@app.get("/api/platform/grants")
+async def list_capability_grants(request: Request):
+    context = require_context(request)
+    _require_owner_controller(context)
+    return {"grants": platform_store.list_capability_grants()}
+
+
+@app.post("/api/platform/grants")
+async def create_capability_grant(request: Request):
+    context = require_context(request)
+    _require_owner_controller(context)
+    body = await request.json()
+    account_id, capability = body.get("account_id", ""), body.get("capability", "")
+    workspace, expires_in_days = body.get("workspace", ""), body.get("expires_in_days")
+    if not VALID_ID.fullmatch(account_id) or capability not in platform_store.VALID_GRANT_CAPABILITIES:
+        raise HTTPException(status_code=400, detail="授权输入无效")
+    if workspace and not VALID_ID.fullmatch(workspace):
+        raise HTTPException(status_code=400, detail="workspace 无效")
+    if expires_in_days is not None and (not isinstance(expires_in_days, int) or not 1 <= expires_in_days <= 3650):
+        raise HTTPException(status_code=400, detail="expires_in_days 必须是 1-3650 的整数")
+    try:
+        grant = platform_store.create_capability_grant(account_id, context.principal.principal_id, capability, workspace or "", expires_in_days=expires_in_days)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+    platform_store.write_audit("grant.created", context, resource_type="capability_grant", resource_id=grant["grant_id"], action="create", decision="allowed", metadata={"account_id": account_id, "capability": capability, "workspace": workspace})
+    return grant
+
+
+@app.post("/api/platform/grants/{grant_id}/revoke")
+async def revoke_capability_grant(grant_id: str, request: Request):
+    context = require_context(request)
+    _require_owner_controller(context)
+    if not VALID_ID.fullmatch(grant_id):
+        raise HTTPException(status_code=400, detail="grant_id 格式无效")
+    updated = platform_store.revoke_capability_grant(grant_id, context.principal.principal_id)
+    if not updated:
+        raise HTTPException(status_code=404, detail="授权不存在")
+    platform_store.write_audit("grant.revoked", context, resource_type="capability_grant", resource_id=grant_id, action="revoke", decision="allowed", metadata={"capability": updated["capability"]})
+    return updated
+
+
+@app.get("/api/platform/file-changes")
+async def list_file_changes(request: Request, status: str = None, limit: int = 100):
+    context = require_context(request)
+    _require_owner_controller(context)
+    limit = max(1, min(limit, 200))
+    if status and status not in ("pending", "accepted", "reverted"):
+        raise HTTPException(status_code=400, detail="status 无效")
+    return {"changes": platform_store.list_file_change_reviews(context.principal.account_id, context.space_id, status, limit)}
+
+
+@app.post("/api/platform/file-changes/{change_id}/accept")
+async def accept_file_change(change_id: str, request: Request):
+    context = require_context(request)
+    _require_owner_controller(context)
+    if not VALID_ID.fullmatch(change_id):
+        raise HTTPException(status_code=400, detail="change_id 格式无效")
+    updated = platform_store.review_file_change(change_id, context.principal.account_id, context.space_id, "accepted", context.principal.principal_id)
+    if not updated:
+        raise HTTPException(status_code=404, detail="变更记录不存在")
+    platform_store.write_audit("file_change.accepted", context, resource_type="file_change", resource_id=change_id, action="accept", decision="allowed", metadata={"tool_name": updated["tool_name"], "file_path": updated["file_path"]})
+    return updated
+
+
+@app.post("/api/platform/file-changes/{change_id}/revert")
+async def revert_file_change(change_id: str, request: Request):
+    context = require_context(request)
+    _require_owner_controller(context)
+    if not VALID_ID.fullmatch(change_id):
+        raise HTTPException(status_code=400, detail="change_id 格式无效")
+    change = platform_store.get_file_change_review(change_id, context.principal.account_id, context.space_id)
+    if not change:
+        raise HTTPException(status_code=404, detail="变更记录不存在")
+    if change["status"] != "pending":
+        raise HTTPException(status_code=409, detail="该变更已处理")
+    if not change.get("backup_path"):
+        raise HTTPException(status_code=400, detail="该变更没有可回滚的备份")
+    backup_root = (PROJECT_ROOT / ".idea-assistant" / "backup").resolve()
+    backup = (backup_root / Path(change["backup_path"]).name).resolve()
+    if not _path_within(backup, backup_root) or not backup.is_file():
+        raise HTTPException(status_code=404, detail="备份文件缺失")
+    target = Path(change["file_path"]).resolve()
+    if not any(_path_within(target, Path(root)) for root in approved_workspaces):
+        raise HTTPException(status_code=403, detail="目标路径不在允许的工作区内")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(backup.read_bytes())
+    updated = platform_store.review_file_change(change_id, context.principal.account_id, context.space_id, "reverted", context.principal.principal_id)
+    platform_store.write_audit("file_change.reverted", context, resource_type="file_change", resource_id=change_id, action="revert", decision="allowed", metadata={"tool_name": updated["tool_name"], "file_path": updated["file_path"]})
+    return updated
 
 
 # ===================================================================
@@ -1054,13 +1196,22 @@ async def chat_with_assistant(request: Request):
     if memory_context:
         runner_message = f"以下是用户明确保存的长期记忆，仅作必要上下文：\n{memory_context}\n\n当前用户请求：\n{runner_message}"
 
-    result = await agent_runners[agent_id].run(user_message=runner_message, history=history[-10:], llm_model_config=model_config)
+    execution_context = ExecutionContext(
+        request_context=context,
+        agent_id=agent_id,
+        is_owner=platform_store.route_for_principal(context.principal) == "owner_idea",
+    )
+    result = await agent_runners[agent_id].run(
+        user_message=runner_message,
+        history=history[-10:],
+        llm_model_config=model_config,
+        execution_context=execution_context,
+    )
 
     reply = result.get("reply", "抱歉，我暂时无法处理这个请求。")
     tool_calls_log = result.get("tool_calls_log", [])
-    if agent_id == "idea" and platform_store.is_owner_controller(context.principal) and tool_calls_log:
-        _record_daily_activity(context, tool_calls_log)
     iterations = result.get("iterations", 1)
+    _record_daily_activity(context, tool_calls_log)
 
     # 提取调度信息（如果有 dispatch_to_agent）
     dispatched_to = None
@@ -1122,6 +1273,15 @@ async def list_conversations(request: Request):
             for item in visible
         ],
     }
+
+
+@app.delete("/api/conversations/{conversation_id}")
+async def delete_conversation(conversation_id: str, request: Request):
+    conversation_id = _validate_conversation_id(conversation_id)
+    context = require_context(request)
+    if not platform_store.delete_conversation(context.principal.account_id, context.space_id, conversation_id):
+        raise HTTPException(status_code=404, detail="会话不存在")
+    return {"status": "deleted", "conversation_id": conversation_id}
 
 
 @app.get("/api/conversations/{conversation_id}")
@@ -1191,6 +1351,16 @@ async def list_workspaces():
             for path in existing_workspace_paths()
         ]
     }
+
+
+@app.delete("/api/tasks/{task_id}")
+async def delete_task(task_id: str, request: Request):
+    if not isinstance(task_id, str) or not VALID_ID.fullmatch(task_id):
+        raise HTTPException(status_code=400, detail="task_id 格式无效")
+    context = require_context(request)
+    if not platform_store.delete_task(context.principal.account_id, context.space_id, task_id):
+        raise HTTPException(status_code=404, detail="任务不存在")
+    return {"status": "deleted", "task_id": task_id}
 
 
 @app.get("/api/tasks")
@@ -1341,32 +1511,8 @@ async def mcp_list_tools():
 
 @app.post("/mcp/tools/call")
 async def mcp_call_tool(request: Request):
-    """MCP 工具调用"""
-    body = await request.json()
-    tool_name = body.get("name") or body.get("tool_name")
-    arguments = body.get("arguments") or body.get("input") or {}
-
-    logger.info(f"MCP tool call: {tool_name}")
-
-    func = idea_tool_registry.get_tool(tool_name)
-    if not func:
-        return {"content": [{"type": "text", "text": json.dumps({"error": f"未知工具: {tool_name}"}, ensure_ascii=False)}]}
-
-    try:
-        result = await func(**arguments)
-        return {
-            "content": [{
-                "type": "text",
-                "text": json.dumps({
-                    "success": result.success,
-                    "output": result.output[:5000],
-                    "metadata": result.metadata,
-                }, ensure_ascii=False, indent=2),
-            }]
-        }
-    except Exception as e:
-        logger.error(f"MCP tool error: {e}", exc_info=True)
-        return {"content": [{"type": "text", "text": json.dumps({"error": str(e)}, ensure_ascii=False)}]}
+    """Legacy direct tool execution endpoint is permanently closed."""
+    raise HTTPException(status_code=410, detail="直连工具调用已关闭；请使用受控 MCP 端点。")
 
 
 # ===================================================================

@@ -15,7 +15,12 @@
 **/dist-electron/
 **/release/
 PROJECT_MEMORY.md
-IDEA/
+IDEA/KEY.md
+IDEA/preconfigured-accounts.json
+IDEA/idea-agent-mcp-*.json
+IDEA/trae-mcp-*.json
+IDEA/index/
+IDEA/.uploads/
 shared_rag/KEY.md
 **/.obsidian/
 **/.idea/
@@ -26,7 +31,15 @@ Project-IDEA/IDEA Assistant/
 Project-IDEA/IDEA Assistant SRH/
 Project-IDEA/server/backups/
 Project-IDEA/server/static/
-ShirohaV1.1/
+Project-IDEA/setup/
+**/.idea-assistant/
+ShirohaV1.1/node_modules/
+ShirohaV1.1/dist/
+*.rar
+*.zip
+*.blockmap
+.dbg/
+.git-worktrees/
 paper-watcher/*.sqlite3
 **/*.sqlite3
 **/*.pem

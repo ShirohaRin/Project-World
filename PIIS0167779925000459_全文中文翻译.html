@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+
+<html lang="zh-CN"><head><meta charset="utf-8"/><meta content="width=device-width,initial-scale=1" name="viewport"/><title>知识综合与 AI 增强生物制造中的大语言模型｜全文中文翻译</title>
+<style>body{margin:0;background:#f4f7f8;color:#1f2933;font:16px/1.85 "Microsoft YaHei",Arial,sans-serif}main{max-width:920px;margin:36px auto;background:#fff;padding:52px 68px;box-shadow:0 2px 14px #0001}h1,h2,h3{color:#164e63;line-height:1.4}h1{font-size:30px;border-bottom:3px solid #2c7a7b;padding-bottom:16px}h2{font-size:23px;margin-top:42px;border-left:5px solid #2c7a7b;padding-left:12px}h3{font-size:18px;margin-top:26px}.en{color:#62717d}.meta,.note{background:#f0f7f7;padding:15px 18px;border-left:4px solid #2c7a7b}.caption{font-size:14px;text-align:center;background:#f7fafc;padding:10px;color:#4b5563}.refs{white-space:pre-wrap;font-size:13px;line-height:1.65;background:#f8fafc;padding:18px;border:1px solid #e1e8ed}table{width:100%;border-collapse:collapse;font-size:14px}th,td{border:1px solid #d8e1e5;padding:8px;vertical-align:top;text-align:left}th{background:#164e63;color:#fff}footer{margin-top:36px;border-top:1px solid #d8e1e5;padding-top:14px;color:#667085;font-size:13px}@media(max-width:700px){main{margin:0;padding:26px 20px}}</style></head>
+<body><main>
+<h1>知识综合与 AI 增强生物制造中的大语言模型</h1>
+<div class="en">Large language model for knowledge synthesis and AI-enhanced biomanufacturing</div>
+<p class="meta"><b>作者：</b>Wenyu Li、Zhitao Mao、Zhengyang Xiao、Xiaoping Liao、Mattheos Koffas、Yixin Chen、Hongwu Ma、Yinjie J. Tang<br/><b>文献：</b><i>Trends in Biotechnology</i>，2025 年 8 月，第 43 卷第 8 期；开放获取；https://doi.org/10.1016/j.tibtech.2025.02.008</p>
+<h2>摘要</h2>
+<p>大语言模型（LLM）正在改变合成生物学（SynBio）的教育和研究。本综述涵盖 LLM 在生物制造中的进展与潜在影响。首先，我们总结近期发展，并比较美国和中国语言模型回答合成生物学基础问题的能力。其次，我们讨论 LLM 从非结构化数据提取合成生物学信息、构建知识图谱以及实现检索增强生成的应用。第三，我们预期 LLM 不仅将变革代谢建模和工程中的“设计—构建—测试—学习”（DBTL）循环，而且将在未来生物制造中实现自动驾驶实验室。最后，我们强调：需要建立 LLM 基准，促进可信赖的知识综合，制定防止滥用的生物安全框架，并鼓励人工智能科学家、合成生物学研究者和生物过程工程师之间的协作。</p>
+<div class="note"><b>要点</b><br/>• 对近期 LLM 在合成生物学研究中的可信赖性进行比较。<br/>• 知识图谱促进文献数据检索与组织。<br/>• LLM 使代谢模型获得新洞见和预测能力。<br/>• LLM 自动化实验设计、决策和自动驾驶实验室。</div>
+<h2>面向未来生物技术的 LLM 快速增长</h2>
+<p>生物制造是利用工程化生物系统生产高价值化学品和药物。合成生物学与系统生物学的进步，使生物技术的指数级增长正在重塑生物制造格局。同时，大语言模型已成为一类突破性的生成式 AI，借助知识生成、总结、分类和复杂问题求解革新了研究[1]。近期突破显示，LLM 具有类人智能潜力，可辅助生物学研究和教育。已发布的 LLM 中，一些开源且便于定制，另一些则提供具有专有优化的开箱即用方案；它们在任务类型、模型架构、参数规模、可访问性和上下文长度方面各有不同（表 1 及补充信息文件 S1）。图 1 表明，美国和中国是 AI 研究的领先国家。当前工业界在大模型开发中发挥主要作用，而学术界产出多数生物学模型。</p>
+<p>生物信息学数据的丰富加速了 LLM 在生物技术中的采用[2]。第一，遗传和蛋白质测序数据激增，数据集条目多达 70 亿，推动了蛋白质语言模型（pLM；见术语表）[3]。例如，拥有 70 亿参数的基因组基础模型 Evo 能以单核苷酸分辨率从基因组序列预测蛋白质功能，例如成簇规律间隔短回文重复序列（CRISPR）/CRISPR 相关蛋白（Cas）系统，并能学习 DNA 突变如何影响整体适合度[4]。第二，诸如 BioGPT 的 LLM 用于生物医学文献知识挖掘[5]。第三，语言模型如 LOWE（LLM 编排工作流引擎）支持药物发现和新化合物的生物合成。目前，LLM 与多种 AI 方法正协同演化，以解析生命规律并设计新的生物系统[6]。更广泛地说，NASA 和 IBM 正在构建跨越生物学、物理学、行星科学及天体物理学的基础模型 INDUS[7]。本综述聚焦 LLM 在生物制造中的应用，并前瞻其如何推动细胞工厂开发的 DBTL 循环新范式。</p>
+<h2>利用 LLM 检索生物技术数据</h2>
+<p>细胞工厂开发需要多层次工程来优化生物制造。研究者不仅要处理基因表达、酶工程和通路修饰，还需整体理解放大生物反应器条件下（如胁迫、代谢负担、遗传突变和氧限制）微生物的响应与调控[8]。训练 AI 模型必须具有可信、完整的知识数据库；可通过挖掘合成生物学（或代谢工程）出版物构建该库（截至 2024 年 10 月，PubMed 搜索结果逾 125 000 篇）。由于文献中没有结构化数据集[9]，LLM 可自动进行以往依赖劳动密集型人工输入的数据标注和检索[5]。预训练 LLM 能从合成生物学文献中蒸馏并选择特征，包括生物反应器条件、底物、产物、营养补充剂、生物合成通路步骤及合成生物学遗传元件等[10]；这些特征会影响生物制造性能的设计与预测。多种 LLM（如 Llama 2）已成功用于医学研究的特征识别[11,12]，也可用于从文本文件中提取生物制造信息[13]。此外，最新的 GPT-4o 和 o1 甚至可从图中提取发酵数据，便于校准生物过程模型参数[14]。</p>
+<p>为提高 LLM 的可靠性、可解释性和推理能力，人们利用知识图谱将不同文献来源的合成生物学信息可视化和组织化[15]。语言模型自身还可在多模态知识图谱中寻找相似术语，从而扩展其综合异质数据集的效用[16]。人类知识持续微调 LLM 性能：量化低秩适配（QLoRA）[17]/低秩适配（LoRA）[18] 等技术通过选择性微调模型的一部分参数，显著助力训练。然而，小样本量有时会降低模型保留和有效运用通用知识的能力（即过拟合）。为应对这些挑战，提出了人类反馈强化学习（RLHF）[19]和检索增强生成（RAG）[20]。OpenAGI[21]、SELF-ALIGN[22] 等平台利用 RLHF，在保持研究完整性的同时，以最少人工监督增强任务求解能力；RAG 框架将检索器模型与外部文档和定制数据结合，从而改善信息检索[7]。</p>
+<h2>合成生物学问答中 LLM 可信赖性的比较</h2>
+<p>我们开发了问答系统 SynBioGPT，以来自文献的数据库测试开源 LLM 性能，数据库包含 51 777 篇摘要和 23 318 篇开放获取全文 PDF。训练使用一张 NVIDIA A40（40G），每个模型约占用 20G。我们采用 LangChain 切分内容、OpenSearch 建索引，并将切分片段嵌入为 knn_vector 以支持检索。用 100 个高质量问答对测试后，我们将片段大小优化为 300、Top N 为 8，微调 LLM 参数，并使用温度系数 0.01 的提示工程以保持输出一致。评估包含 79 个具体问题和 21 个开放问题，覆盖基因突变、产物查询和竞争通路探索（补充信息文件 S2）。在八个 LLM 中（图 2A），Llama3 准确度最佳。采用合成生物学论文摘要进行 RAG 后，所有 LLM 的准确度均从 25% 显著提高至 65% 以上；进一步以论文全文进行 RAG 后，阿里巴巴的 Qwen 显示出与 Llama3 相近的准确度（约 85%）。</p>
+<p>基于我们近期的生成式 AI 研究[10]，图 2B 比较了 Qwen 和 OpenAI GPT-4 从 7 篇酵母发酵论文中检索数据的能力。总体而言，GPT-4 能获得比仅含 140 亿参数的 Qwen 更多的表格数据。当参数量增至 720 亿（即使用稍多计算资源）时，Qwen 获得的数据量大致与 GPT-4 相同。我们还采用面向摘要评估的召回率（ROUGE-L）和双语评估替补法（BLEU）（图 2C、D）两项 AI 评价指标。两种评价均显示，RAG 提升了 LLM 应对复杂问题的性能；ROUGE-L 明显优于 BLEU，表明 RAG 有效增强了 LLM 提取上下文相关信息的能力。然而，RAG 在提高检索数据精度方面仍有限制。</p>
+<h2>表 1．全球开发的代表性现成 LLM</h2>
+<table><tr><th>模型（国家）</th><th>规模（上下文窗口）</th><th>说明</th><th>发布/可访问性</th></tr><tr><td>ChatGPT o 系列（美国）</td><td>o1 200k；o1-mini 128k；o3-mini 200k</td><td>用于逐步逻辑问题求解的 OpenAI 推理模型</td><td>2025 年 1 月；API、网页</td></tr><tr><td>Qwen 2.5（中国）</td><td>base、VL、1M、Coder、Math</td><td>同时具备多模态和多语言能力</td><td>2025 年 1 月；API、网页、阿里云</td></tr><tr><td>DeepSeek（中国）</td><td>V3/R1（各 128k）</td><td>R1 通过大规模强化学习训练的推理模型</td><td>2025 年 1 月；API、网页</td></tr><tr><td>LLaMA 3.3（美国）</td><td>70B（128k）</td><td>在数万亿 token 上预训练的开源纯解码器模型集合</td><td>2024 年 12 月；API</td></tr><tr><td>Mistral（法国）、ChatGLM 4（中国）、Falcon 2（阿联酋）、ChatGPT-4o（美国）、Yi 1.5（中国）、Gemini 1.5 Pro（美国）、Cohere Command R+（加拿大）、Claude 3 Opus（美国）、Gemma 2、Orca 2、ERNIE Bot 4.0、Vicuna 1.5、PaLM 2、Jurassic 2</td><td>详见原表；范围为 2k–2M</td><td>涵盖多模态、多语言、对话、代码、数学与研究等用途</td><td>2022–2024 年；API、网页或云服务</td></tr></table>
+<p class="caption">注：该表涵盖截至 2025 年 1 月的主要 LLM。输入 token 长度：1k=一千；1M=一百万；1B=十亿；1T=万亿。闭源/部分开放模型在原表中以 c 标示。</p>
+<h2>作为生物序列模型的 LLM</h2>
+<p>来自功能基因组学研究的测序数据（DNA/RNA/蛋白质）天然适合语言模型，因为其以字母为构件。近期，AI 与组学方法被整合以模拟分子和细胞的多样行为，为创建 AI 虚拟细胞（AIVC）带来突破性机遇[23]。具体而言，AIVC 的第一层将 DNA、RNA 和蛋白质建模为核苷酸或氨基酸的字符序列，形成分子层面的通用表征。与传统序列预测深度学习模型[24]相比，LLM 结构更统一，且不需要大量任务专用数据即可适配。这种适配性来自预训练和微调过程，使 LLM 能针对目标序列提取或生成提供多模态、端到端方案。基于 LLM 的序列模型包括 ProGen[25,26]、xTrimoPGLM[27]、ProGPT2[28] 和 ProLLaMA[29]，后者已展现优异的蛋白质性质预测和结构优化能力。值得注意的是，OpenCRISPR-1[30]用 CRISPR-Cas Atlas 微调基于 ProGen 的模型，以生成活性和特异性增强的多样 CRISPR-Cas 蛋白。Nvidia 的 BioNeMo 生物分子语言模型还结合 AlphaFold 等先进 AI 建模工具，精确预测逾 40 000 种人类蛋白质的结构[6]。</p>
+<p>除 pLM 外，基因表达也是决定代谢调控和细胞功能的一种生物语言。近期研究建立了单细胞基础预训练模型：scFoundation 用于基因表达及药物反应预测[31]，scGPT 用于多组学数据分析[32]。此外，scMulan 使用多任务生成式预训练语言模型来解码单细胞转录组数据中的细胞功能[33]。当前序列语言模型仍缺少专为测序数据定制、能够有效捕获并解释其生物学意义的分词器。图神经网络与测序数据的整合（图序列模型）在推动从基因组到表型的预测方面潜力巨大[34,35]。</p>
+<p class="caption">图 1．比较 2020—2024 年发布的前 100 个大规模 AI 模型（训练需超过 10²³ 次浮点运算）的桑基图（补充信息文件 S1）。图中概述多模态 LLM 的领域和所属机构；各列显示每类模型的百分比，模型按发表日期从新到旧排序。</p>
+<h2>LLM 驱动的细胞工厂开发</h2>
+<p>细胞工厂开发需要酶工程、通路设计和发酵优化。由于代谢调控复杂，生物制造开发依赖 DBTL 循环，其中菌株开发同时受模型预测和实验测试指引。我们设想，经由 DBTL，LLM 与微生物细胞工厂的发展会相互受益（图 3）。LLM 可指引微生物细胞工厂开发：通过将文献和实验报告转化为文本并选择特征，LLM 加快机器学习工作流，以预测细胞在生物反应器条件下的性能。传统 ML 模型的特征往往不足以描述多层次生物学性质[36]；作为知识提取器，LLM 可识别和排序隐藏影响因素，使 ML 更可解释[37]。这些因素和相应特征评分可指引发酵优化并降低实验成本。LLM 还能为菌株工程提供有效策略。一项近期研究表明，LLM 可从逾 29 000 条记录（涵盖 1 210 种产物及 751 种生物）提取大规模代谢工程方法，从而增强 DBTL 循环[38]。另一项研究显示，带 RAG 的 Qwen 不仅能为解脂耶氏酵母通路工程提供遗传靶点和实验设计，还能提出新的生物合成通路假设[15]。</p>
+<p>DBTL 循环需要可靠的代谢预测。但 LLM 的数学推理较弱，因而会在复杂工艺条件下预测代谢物产量等定量目标时失败[39]。因此，可将 LLM 与基因组尺度模型（GSM）[36,40]、技术经济分析（TEA）[41]等白盒模型整合，以扩展 LLM 推理并辅助生物制造商业决策。然而，机理模型作出简化假设，而 LLM 能弥合模型假设与现实条件之间的差距[42]。具体而言，可将基于蛋白质/RNA/DNA 的“语言”纳入多尺度组学数据和 GSM，以改善表型理解和生物学量化[43,44]。例如，从蛋白质序列和/或底物结构深度学习得到的酶周转速率知识，可促进工业 CHO 细胞系的代谢建模[45]。</p>
+<p>LLM 与 AI 和组学数据的整合有望推动基因组尺度建模演化为全细胞建模，从而分析微生物细胞工厂中相互作用的遗传与代谢功能，并预测非线性动态响应[23]。这些常称为 AI 虚拟细胞的先进模拟，预计将革新计算机内细胞工程实验，并显著提高 DBTL 循环效率。</p>
+<p class="caption">图 2．合成生物学任务中 LLM 的比较（补充信息文件 S2）。“原始模型”指未增强的默认模型。(A) 八个模型在原始、以收集论文摘要 RAG 增强、以论文全文 RAG 增强三种条件下的正确答案分布。(B) ChatGPT-4 与较小的 Qwen1.5-14B、Qwen1.5-72B 从 7 篇合成生物学论文（文本 1–7）提取表格数据的比较；每个模型测试三次，误差线为标准差，纵轴为生成的表格数据点数。(C) RAG 条件下 LLM 平均 ROUGE-L 分数热图。(D) 最大子序列长度为 4 时的平均 BLEU 分数热图。ROUGE-L 衡量对参考内容的覆盖程度；BLEU 衡量答案对参考的接近度/准确度。</p>
+<p class="caption">图 3．LLM 将菌株开发的“设计—构建—测试—学习”（DBTL）过程简化为统一高效的管线。模块 1（橙色）：序列模型；模块 2（绿色）：LLM 挖掘文本、表格、图形等多种数据类型的多模态能力；模块 3（黄色）：DBTL 循环；模块 4（蓝色）：自动驾驶模块，包括 LLM 和主动学习用于实验设计和任务调度、机器人菌株工程自动化劳动密集流程，以及人工监督的质量控制。</p>
+<h2>具有 LLM 智能体的自动驾驶实验室</h2>
+<p>尽管 DBTL 是当前细胞工厂开发策略，我们设想 LLM 将作为智能体，通过进一步减轻由硬件支持研究的劳动密集性而赋能生物制造。具体而言，“AI 科学家”是一种利用 LLM 协助人类科学家开展大规模分析和重复 DBTL 任务执行的新型智能系统[46]。这一工作流导致向自动驾驶实验室（SDL）的范式转变，包括意图（将合成生物学目标转换为计算工作流）、决策（决定实验方法）、执行（调度和监测工作流）和分析（将工作流输出实体化）[47]。LLM、机器人和人工监督的协同促进理性设计，最终实现生物铸造厂设计和发酵放大。</p>
+<p>SDL 有以下优势。第一，LLM 通过将复杂任务分解为子推理步骤链来辅助任务规划[39]。例如，ChemCROW 利用思维链推理循环分解复杂任务，并识别与物理世界交互的相关工具[48]；分解蒸馏等方法[49]可将通路优化目标拆成酶选择、通路构建和通量分析，分别由特定工具解决。第二，LLM 自动化实验设计与规划。例如，蛋白质景观探索自动驾驶机器 SAMPLE[50]学习序列—功能关系来设计目标蛋白；简化分子线性输入系统（SMILES）把化学物结构转换为符号字符串，从而支持酶反应设计[51]。如 ChemCROW[48]和 Coscientist[52]所示，LLM 还可支持信息组织、子任务推理、复杂任务适宜工具的选择、实验方案准备和数据分析。近期，CRISPR-GPT 通过增加领域知识和外部工具来设计基因编辑实验[53]。第三，可将基于 LLM 的知识检索器与云计算和硬件控制整合，以更灵活、可扩展地实现实验室测试自动化[54]。例如，SynThreader 原为用自然语言处理检索实验方案而开发；将其与 LLM 整合可显著提高方案提取效率与准确性[55]。LLM 还可通过预测和监测实验约束与结果降低人工干预，例如在发酵过程中指引培养基制备、pH 调节和其他常规生物制造工作[56]。</p>
+<p>与此同时，AI 进步促进更好的 SDL（图 3）。主动学习（AL）通过识别最有影响、应收集或验证的数据点来确定生物实验的优先级。近期成果显示，GPT-4 和 AL 利用簇边际选择优化无细胞蛋白质合成（CFPS），探索实验条件并提高抗菌蛋白产量[46,57]。此外，自我改进的 LLM 能审视自身推理以发现错误，从而为实验生成越来越精确的假设[58]。最后，数据安全始终是生物医学应用的重要关切。LLM 对齐确保模型既符合伦理/安全考量，也符合科学严谨性[59]。</p>
+<h2>AI—生物技术整合的生物安全</h2>
+<p>当前 AI—生物技术融合中的生物安全标准尚不充分。一方面，LLM 增加了生物武器或病原体合成的潜在风险[60]。以往，多项法规控制对危险和敏感知识的获取。若 LLM 可找到病原体和癌症的疗法[61]，它们也可能制造新的、更有害的病原体用于生物攻击[62]。例如，LLM 可提供关于天花病毒、工程化流感、炭疽杆菌和鼠疫耶尔森菌的信息；还可评估获取和传播生物制剂的可行性、时间、成本和后勤事项[63]。个人可能根据 LLM 的说明，采用反向遗传学等方法获取感染性病毒样本。即使指明有益意图，LLM 仍可能绕过安全措施，说明当前安全协议不足[64]。这是一场与时间赛跑：是实验室中将其付诸实现的个人先完成，还是建立工作程序的安全专家先完成。另一方面，迫切需要 LLM 监管，以确保数据隐私和知识产权机密性[65]。为避免信息泄露，必须使用安全的 LLM 应用程序接口；其他方法包括本地部署、隐私保护技术、零知识证明和联邦学习，以在训练和部署期间保护敏感信息[66]。此外，美国白宫近期 AI 行政命令[67]要求训练 AI 模型的开发者（尤其涉及合成生物学、计算操作超过 10²³ 次者）向联邦政府报告其网络安全、红队测试及其他安全措施。不过，为科学界利益，我们应负责任且建设性地利用技术进步，而非试图阻止其发展。</p>
+<h2>挑战与未来方向</h2>
+<p>LLM 尚未在生物制造行业广泛使用。我们预见以下挑战：生成式 AI 应用的一项关键障碍，是缺少能将不同生物信息学资源的多模态、非结构化数据无缝整合的管线[36,68]。合成生物学研究会产生多类知识，如图像（代谢通路图、分子结构[69–71]、细胞形态图像[72]等）和表格（质谱[73]、多组学表达数据[74]等）。特别是，文献挖掘中的图像到文本任务已在命名实体识别（NER）[75,76]和通路提取[77]等领域得到研究。但传统基于 DL 的图像提取方法常因化学术语不一致[77]、需要人工验证结果[10]等挑战而准确性不足。此外，从文献图形或曲线中提取时间序列数据仍有难度，因为当前 LLM 只能识别数据趋势[78,79]。因此，我们设想未来 LLM 可借助理解合成生物学术语、衔接不同图像格式、自动组织图像到数据以及标准化时间序列数据来解决这些挑战。</p>
+<p>生物系统高度复杂且可重复性差。AI 方法可能受不完整知识库内容、信息偏差以及碎片化或干扰性信息影响。特别是，大部分合成生物学文献数据属于菌株工程、实验室培养和分子表征；但聚焦生物制造工艺放大或长世代生长中菌株稳定性的论文极少。因此，必须从中试研究和发酵行业（即技术成熟度等级 &gt;3）收集数据，以确保 LLM 的质量和商业适用性。未来的合成生物学数据库构建和知识综合可受益于以下 LLM 方法：(i) 为调和冲突[80]并拒绝错误信息[81]，LLM 已显示出通过自主引导评估指令数据来过滤和标准化数据的巨大潜力[82]；(ii) LLM 可借助图网络连接和凸显合成生物学知识节点及来源[15]；(iii) 优化 LLM 长提示以确保有意义的表征[83]；(iv) LLM 接触多样化训练数据时表现更好[84]，因此学术界与产业界共享实验室和大规模发酵数据可微调 LLM 的适用性。这一微调过程包括整理高质量、多样化的实验室实验和工业规模操作数据集，随后进行领域专用预训练和任务专用监督学习[85]。模型借助领域专家反馈迭代改进的 AL 技术，还可进一步提升 LLM 可信赖性[57]。</p>
+<p>如何测试 LLM 仍是开放问题，特别是在推理和事实核查相关任务上。多种基准[86–89]已经出现，用于从不同智能层次评价 LLM。但人为基准不足以评价机器智能，因为 LLM 有时会通过记住重复模式来“作弊”，从而不能识别逻辑不变的含义[39]，或因为它们在训练中见过泄露的元数据信息[84]。随着 LLM 持续演化，基准必须保持动态，才能有效衡量其性能。人们也已尝试通过探究 LLM 如何回答问题的机制[39]、测试其识别释义的能力[89]或使用基于熵的不确定性估计器[81]来应对这些挑战，这些方法或可克服 LLM 有时用以绕过常识性类人推理的统计技巧。</p>
+<h2>结语</h2>
+<p>当前合成生物学和生物制造的研究与教育正在受到 LLM 素养[90]和蛋白质语言模型[91]的重塑。面向生物制造的 LLM 需要大量计算成本、多模态数据资源、自动化设施、领域专家反馈和通行的安全监管规则（见“未解问题”）。学术界和产业界可在推进生物技术 LLM 方面互补；未来研究需要全球性、跨学科协作，推动新的计算进展，并通过良性循环促进科学学习和发现。</p>
+<div class="note"><b>未解问题</b><br/>• 如何设计 LLM，使其整合从分子相互作用到完整生物体的跨尺度生物知识？<br/>• 面对海量组学数据，LLM 能否真正捕捉复杂代谢调控的精妙之处？<br/>• 如何确保可解释 AI 的开发，以从黑箱模型导出可解释结果？<br/>• 自动驾驶实验室最终能否取代传统 DBTL 循环？</div>
+<h2>作者贡献</h2><p>H.M. 和 Y.J.T. 提出综述提纲。W.L.、Z.M. 和 Z.X. 起草手稿。Z.M. 和 X.L. 开发 SynBioGPT 并测试不同 LLM。全体作者均批准本文。</p>
+<h2>致谢</h2><p>美国研究人员获美国国家科学基金会（NSF）项目（#2225809、#2330245）及美国能源部（DOE）Energy Earthshots 项目（#DE-SC0024702）资助。中国研究人员获天津合成生物技术创新能力提升项目（TSBICIP-PTJJ-012）和国家自然科学基金（32300529、12326611）资助。作者澄清，美国和中国研究组之间不存在合作；这篇受邀综述代表两国研究人员共享的观点。手稿提交前已由美国 DOE 和 NSF 的项目主任审阅并预先批准。</p>
+<h2>利益声明</h2><p>作者声明不存在利益冲突。</p>
+<h2>补充信息</h2><p>与本文相关的补充信息可在线获取：https://doi.org/10.1016/j.tibtech.2025.02.008。</p>
+<h2>参考文献</h2>
+<div class="refs">以下完整保留原论文的 91 条书目信息（作者、年份、题名、来源、卷页和 DOI），以确保文献可精确检索。文献题名及出版信息采用国际通行原文书写。
+
+ 
+1. Liang, P. et al. (2023) Holistic evaluation of language models. 
+Ann. N. Y. Acad. Sci. 1525, 140 –146 
+2. Zhang, Y. et al. (2024) A comprehensive survey of scienti ﬁc 
+large language models and their applications in scienti ﬁc d i s -
+covery. In Proceedings of the 2024 Conference on Empirical 
+Methods in Natural Language Processing, Miami, Florida, 
+USA , pp. 8783 –8817 
+3. Cottier, B. et al. (2024) The rising costs of training frontier AI 
+mode
+ls. ArXiv , https://doi.org/10.48550/arXiv.2405.21015 
+4. Nguyen, E. et al. (2024) Sequence modeling and design from 
+molecular to genome scale with Evo. Science 386, eado9336 
+5. Luo, R. et al. (2022) BioGPT: generative pre-trained transformer 
+for biomedical text generation and mining. Brief. Bioinform. 23, 
+bbac409 
+6. Hetmann, M. et al. (2024) Folding the human proteome using 
+BioNeMo: a fused dataset of structural models for machine 
+learning purposes. Sci. Data 11, 591 
+7. Bhattacharjee, B. et al. (2024) INDUS: Effective and ef ﬁcient lan-
+guage models for scienti ﬁc applications. In Proceedings of the 
+2024 Conference on Empirical Methods in Natural Language 
+Processing, Miami, Florida, USA , pp. 98 –112 
+8. Oyetunde, T. et al. (2019) Machine learning framework for as-
+sessment of microbial factory performance. PLoS ONE 14, 
+e0210558 
+9. Wan, J. et al. (2024) OMNIPARSER: a uni ﬁed framework for text 
+spotting, key information extraction and table recognition. In 
+2024 IEEE/C VF Conference on Computer Vision and Pattern 
+Recognition (CVPR), Seattle, Washington , pp. 15641 –15653 
+10. Xiao, Z. et al. (2023) Generative arti ﬁcial intelligence GPT-4 accel-
+erates knowledge mining and machine learning for synthetic biol-
+ogy. ACS Synth. Biol. 12, 2973 –2982 
+11. Remy, F. et al. (2024) BioLORD-2023: semantic textual repre-
+sentations fusing large language models and clinical knowledge 
+graph insights. J. Am. Med. Inform. Assoc. 31, 1844 –1855 
+12. Meng, X. et al. (2024) The application of large language models in 
+medicine: a scoping review. iScience 27, 109713 
+13. Wiest, I. C. et al. (2024) Privacy-preserving large language models 
+for structured medical information retrieval. NPJ Digit. Med. 7, 257 
+14. Xu, V.A. et al. (2025) MAGMA: microbial and algal growth model-
+ing application. New Biotechnol. 85, 16 –22 
+15. Xiao, Z. et al. (2024) Network for knowledge organization 
+(NEKO): An AI knowledge mining work ﬂow for synthetic biology 
+research. Metab. Eng. 87, 60 –67 16. Chandak, P. et al. (2023) Building a knowledge graph to enable 
+precision medicine. Sci. Data 10, 67 
+17. Dettmers, T. et al. (2024) QLORA: ef ﬁcient ﬁnetuning of quan-
+tized LLMs. In Proceedings of the 37th International Conference 
+on Neural Information Processing Systems, New Orleans, LA, 
+USA, Article 441 
+18. Hu, E.J. et al. (2021) LoRA: low-rank adaptation of large 
+lan
+guage models. arXiv , Published online October 16, 2021. 
+http://doi.org/10.48550/arXiv.2106.09685 
+19. Ouyang, L. et al. (2024) Training language models to follow 
+instructions with human feedback. In Proceedings of the 36th 
+International Conference on Neural Information Processing Systems, New Orleans, LA, USA, Article 2011 
+20. Lewis, P. et al. (2020) Retrieval-augmented generation for 
+knowledge-intensive NLP tasks. In Proceedings of the 34th 
+International Conference on Neural Information Processing Systems, Vancouver, BC, Canada, Article 793 
+21. Ge, Y. et al. (2024) OpenAGI: when LLM meets domain ex-
+perts. In Proceedings of the 37th International Conference on 
+Neural Information Processing Systems, New Orleans, LA, 
+USA, Article 242 
+22. Sun, Z. et al. (2023) Principle-driven self-alignment of lan-
+guage models from scratch with minimal human supervi-
+sion. In Proceedings of the 37th International Conference 
+on Neural Information Processing Systems, New Orleans, 
+LA, USA, Article 115 
+23. Bunne, C. 
+ et al. (2024) How to build the virtual cell with arti ﬁcial 
+intelligence : priorities and opportunities. Cell 187, 7045 –7063 
+24. Wang, R. et al. (2023) DeepBIO: an automated and interpretable 
+deep-learning platform for high-throughput biological sequence 
+prediction, functional annotati on and visualization analysis. 
+Nucleic Acids Res. 51, 3017 –3029 
+25. Madani, A. et al. (2023) Large language models generate func-
+tional protein sequences across diverse families. Nat. Biotechnol. 
+41, 1099 –1106 
+26. Nijkamp, E. et al. (2023) ProGen2: Exploring the boundaries of 
+protein language models. Cell Syst. 14, 968 –978 e963 
+27. Chen, B. et al. (2024) xTrimoPGLM: UNIFIED 100B-scale pre-
+tra
+ined transformer for deciphering the language of protein. 
+ArXiv , Published online December 9, 2024. http://doi.org/10. 
+48550/arXiv.2401.06199 
+28. Ferruz, N. et al. (2022) ProtGPT2 is a deep unsupervised lan-
+guage model for protein design. Nat. Commun. 13, 4348
+Trends in Biotechnology, August 2025, Vol. 43, No. 8 1873
+
+Trends in Biotechnology
+OPEN ACCESS
+29. Lv, L. et al. (2024) ProLLaMA: a protein large language model for 
+mu
+lti-task protein language processing. ArXiv , Published online 
+July 16, 2024. https://doi.org/10.48550/arXiv.2402.16445 
+30. Ruffolo, J.A. et al. (2024) Design of highly functional genome ed-
+it
+ors by modeling the universe of CRISPR-Cas sequences. 
+bioRxiv, Published online April 22, 2024. http://doi.org/10. 
+1101/2024.04.22.590591 
+31. Hao, M. et al. (2024) Large-scale foundation model on single-cell 
+transcriptomics. Nat. Methods 21, 1481 –1491 
+32. Cui, H. et al. (2024) scGPT: toward building a foundation model 
+for single-cell multi-omics using generative AI. Nat. Methods 
+21, 1470 –1480 
+33. Bian, H. et al. (2024) scMulan: a multitask generative pre-
+trained language model for single-cell analysis. Research i n 
+Computat ional Molecular Biology: 28th Annual International 
+Conference , 479-482 
+34. Gligorijevic, V. et al. (2021) Structure-based protein function pre-
+diction using graph convolutional networks. Nat. Commun. 12, 
+3168 
+35. Dauparas, J. et al. (2022) Robust deep learning –based protein 
+sequence design using ProteinMPNN. Science 378, 49 –56 
+36. Czajka, J.J. et al. (2021) Integrated knowledge mining, genome-
+scale modeling, and machine learning for predicting Yarrowia 
+lipolytica bioproduction. Metab. Eng. 67, 227 –236 
+37. Pan, S. et al. (2023) Unifying large language models and knowl-
+edge graphs: a roadmap. IEEE Trans. Knowl. Data Eng. 36, 
+3580 –3599 
+38. Li, X. et al. (2024) Leveraging large language models for meta-
+boli
+c engineering design. bioRxiv , Published online September 
+13, 2024. http://doi.org/10.1101/2024.09.09.612023 
+39. Dziri, N. et al. (2024) Faith and fate: limits of transformers on 
+compositionality. In Proceedings of the 37th International Confer-
+ence on Neural Information Processing Systems, New Orleans, 
+LA, USA, Article 3081 
+40. Sabzevari, M. et al. (2022 ) Strain design optimization using rein-
+forcement learning. PLoS Comput. Biol. 18, e1010177 
+41. Fang, Y. et al. (2024) Machine learning-based multi-objective 
+optimization of concentrated solar thermal gasi ﬁcation of bio-
+mass incorporating life cycle assessment and techno-economic 
+analysis. Energy Convers. Manag. 302, 118137 
+42. Goshisht, M.K. (2024) Machine learning and deep l earning in 
+synthetic biology: key architectures, applications, and chal-
+lenges. ACS Omega 9, 9921 –9945 
+43. Magazzu, G. et al. (2021) Multimodal regularized linear models 
+with ﬂux balance analysis for mechanistic integration of omics 
+data. Bioinformatics 37, 3546 –3552 
+44. Schwartz, E. et al. (2024) NumeroLogic: number encoding for 
+enhanced LLMs ’ numerical reasoning. In Proceedings of the 
+2024 Conference on Empirical Methods in Natural Language 
+Processing (Al-Onaizan, Y. et al., eds), pp. 206 –212, Association 
+for Computational Linguistics 
+45. Park, S.Y. et al. (2024) Driving towards digital biomanufacturing by 
+CHO genome-scale models. Trends Biotechnol. 42, 1192 –1203 
+46. Gao, S. et al. (2024) Empowering biomedical discovery with AI 
+agents. Cell 187, 6125 –6151 
+47. Pyzer-Knapp, E.O. et al. (2022) Accelerating materials discovery 
+using arti ﬁcial intelligence, high performance computing and 
+robotics. npj Comput. Mater. 8, 84 
+48. Bran, A.M. et al. (2024) Augmenting large language models with 
+chemistry tools. Nat. Mach. Intell. 6, 525 –535 
+49. Shridhar, K. et al. (2023) Distilling reasoning capabilities into 
+smaller language models. In Annual Meeting of the Association 
+for Compu tational Linguistics, Toronto, Canada , pp. 7059 –7073 
+50. Rapp, J.T. et al. (2024 ) Self-driving laboratories to autonomously 
+naviga te the protein ﬁtness landscape. Nat. Chem. Eng. 1, 
+97–107 
+51. Kosonocky, C.W. et al. (2023) Using alternative SMILES repre-
+sentations to identify novel functional analogues in chemical sim-
+ilarity vector searches. Patterns (N Y) 4, 100865 
+52. Boiko, D.A. et al. (2023) Autonomous chemical research with 
+large language models. Nature 624, 570 –578 
+53. Qu, Y . et al. (2024) CRISPR-GPT: an LLM agent for automated 
+design of gene-editing experiments. bioRxiv , Published online 
+October 15, 2024. http://doi.org/10.1101/2024.04.25.591003 54. Abolhasani, M. and Kumacheva, E. (2023) The rise of self-driving labs in chemical and materials sciences. Nat. Synth. 2, 
+483 –492 
+55. Mehr, S.H.M. et al. (2020) A universal system for digitization and 
+automatic execution of the chemical synthesis literature. Science 
+370, 101 –108 
+56. Wang, L. et al. (2024) A survey on large language model based 
+autonomous agents. Front. Comput. Sci. 18, 186345 
+57. Hérisson, J. et al. (2024) Operate a cell-free biofoundry using 
+l
+arge language models. bioRxiv , Published online October 28, 
+2024. http://doi.org/10.1101/2024.10.28.619828 
+58. Tong, S. et al. (2024) Automating psychological hypothesis gen-
+eration with AI: when large language models meet causal graph. 
+Hum. Soc. Sci. Commun. 11, 896 
+59. Liao, Y. et al. (2024) MedCare: advancing medical LLMs through 
+decoupli ng clinical alignment and knowledge aggregation. In 
+Findings of the Association for Computational Linguistics: 
+EMNLP 2024 (Al-Onaizan, Y. et al., eds), pp. 10562 –10581, As-
+sociation for Computational Linguistics 
+60. Esvelt, K.M. (2022) Delay, Detect, Defend: Preparing for a Future 
+in which Thousands can Release New Pandemics, Geneva 
+Centre for Security Policy , Geneva Centre for Security Policy 
+61. Webster, P. (2023) Six ways large language models are changing 
+healthcare. Nat. Med. 29, 2969 –2971 
+62. Urbina, F. et al. (2022) Dual use of artiﬁ cial intelligence-powered 
+drug discovery. Nat. Mach. Intell. 4, 189 –191 
+63. Mouton, C.A. et al. (2023) The Operational Risks of AI in Large-Scale 
+Biological Attacks: A Red-Team Approach, RAND Corporation 
+64. Soice, E.H. et al. (2023) Can large language models democratize 
+acce
+ss to dual-use biotechnology? ArXiv , Published online June 
+6, 2023. http://doi.org/10.48550/arXiv.2306.03809 
+65. Mesk o, B. and Topol, E.J. (2023) The imperative for regulatory 
+oversight of large language models (or generative AI) in 
+healthcare. NPJ Digit. Med. 6, 120 
+66. Yao, Y. et al. (2024) A survey on large language model (LLM) secu-
+rity and privacy: the good, the bad, and the ugly. High Con ﬁdence 
+Comput. 4, 100211 
+67. Presidential document (2023) Safe, Secure, and Trustworthy 
+Development and Use of Arti ﬁcial Intelligence. Fed. Regist. 
+88, 75191– 75226 
+68. Rehana, H. et al. (2024) Evaluating GPT and BERT models for 
+protein –protein interaction identi ﬁcation in biomedical text. 
+Bioinform. Adv. 4, vbae133 
+69. Luo, Y. et al. (2024) Toward uni ﬁed ai drug discovery with multi-
+modal knowledge. Health Data Sci. 4, 0113 
+70. Koutrouli, M. et al. (2023) Corrigendum: a guide to conquer the 
+biological network era using grap h theory. Front. Bioeng. 
+Biotechnol. 11, 1182500 
+71. Zheng, Z. et al. (2023) Structure-informed language models are 
+protein designers. In Proceedings of the 40th Interna tional Con-
+ference on Machine Learning . Proceedings of Machine Learning 
+Research , pp. 42317 –42338 
+72. Lipowsky, R. et al. (2023) Elucidating the morphology of the en-
+doplasmic reticulum: puzzles and perspectives. ACS Nano 17, 
+11957 –11968 
+73. Mendes, M.L. et al. (2019) An integrated work ﬂow for 
+crosslinking mass spectrometry. Mol. Syst. Biol. 15, e8994 
+74. Monchaud, D. (2023) Template-assembled synthetic G-quartets 
+(TASQs): multiTASQing molecular tools for investigating DNA and 
+RNA G-quadruplex biology. Acc. Chem. Res. 56, 350 –362 
+75. Wang, X. et al. (2019) Multitask learning for biomedical named en-
+tity recognition with cross-sharing structure. BMC Bioinformatics 
+20, 427 
+76. Park, G. et al. (2024) Leveraging LLMs and web-based visualiza-
+tions for pro ﬁling bacterial host organisms and genetic toolboxes. 
+In Workshop on Biomedical Natural Language Processing, 
+Bangkok, Thailand , pp. 370 –379 
+77. Kwon, M.S. et al. (2024) A machine learning framework for 
+extracting information from biological pathway images in the liter-
+ature. Metab. Eng. 86, 1 –11 
+78. Chen, W. et al. (2022) MuRAG: multimodal retrieval-augmented 
+generator for open question answering over images and text. In Empirical Methods in Natural Language Processing, Abu Dhabi, 
+United Arab Emirates , pp. 5558 –5570
+1874 Trends in Biotechnology, August 2025, Vol. 43, No. 8
+
+Trends in Biotechnology
+OPEN ACCESS
+79. Wu, S. et al. (2023) NExT-GPT: Any-to-Any Multimodal LLM. 
+In International Conference on Machine Learning, Vienna, 
+Austria 
+80. Luu, R.K. and Buehler, M.J. (2024) Bioinspired LLM: conversa-
+tional large language model for the mechanics of biological and 
+bio-inspired materials. Adv. Sci. 11, 2306724 
+81. Farquhar, S. et al. (2024) Detecting hallucinations in 
+large language models using semantic entropy. Nature 630, 
+625– 630 
+82. Polak, M.P. and Morgan, D. (2024) Extracting accurate 
+materials data from research papers with conversational language models and prompt engineering. Nat. Commun. 15, 
+1569 
+83. Liu, N.F. et al. (2024) Lost in the middle: how language 
+models use long contexts. Trans. Assoc. Comput. Linguist. 12, 
+157 –173 
+84. Deng, C. et al. (2024) Investigating data contamination in 
+modern benchmarks for large language models. In Associ-
+ation for Computational Linguistics, Mexico City, Mexico , 
+pp. 8706 –8719 85. Tran, H. et al. (2024) BioInstruct: instruction tuning of large lan-
+guage models for biomedical natural language processing. 
+J. Am. Med. Inform. Assoc. 31, 1821 –1832 
+86. Zheng, L. et al. (2024) Judging LLM-as-a-judge with MT-Bench 
+and C
+hatbot Arena. In Proceedings of the 37th International 
+Conference on Neural Information Processing Systems, New 
+Orleans, LA, USA, Article 2020 
+87. Zellers, R. et al. (2019) HellaSwag: can a machine really 
+ﬁnish your sentence? In Annual Meeting of the Association for 
+Computational Linguistics, Florence, Italy , pp. 4791 –4800 
+88. Chiang, C.-H. and Lee, H.-Y. (2023) Can large language 
+models be an alternative to human evaluations? In Annual 
+Meeting of the Association for Computational Linguistics, 
+Toronto, Canada , pp. 15607 –15631 
+89. Elazar, Y. et al. (2021) Measuring and improving consistency in 
+pretrained language models. Trans. Assoc. Comput. Linguist. 
+9, 1012 –1031 
+90. Marx, V. (2024) Quest for AI literacy. Nat. Methods 21, 1412 – 1415 
+91. Jiang, K. et al. (2025) Rapid in silico directed evolution by a pro-
+tein language model with EVOLVEpro. Science 387, eadr60 06
+Trends in Biotechnology, August 2025, Vol. 43, No. 8 1875</div>
+<footer>译文依据原 PDF 的 12 页正文逐页核对制作；图题、表题、章节、附加信息及参考文献结构均已保留。术语缩写（LLM、RAG、DBTL、GSM 等）按论文首次出现处说明后沿用。</footer>
+</main></body></html>

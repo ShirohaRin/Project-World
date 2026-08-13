@@ -17,6 +17,7 @@ class PlatformApiTests(unittest.TestCase):
         os.environ["IDEA_AUTH_TOKEN"] = "test-platform-token"
         os.environ["IDEA_PLATFORM_DB_PATH"] = str(Path(cls.temp_dir.name) / "platform.db")
         os.environ["IDEA_AUTH_DEVELOPMENT_MODE"] = "true"
+        os.environ["IDEA_CREDENTIAL_RECOVERY_KEY"] = "zUThLxmtRLhE_sOOxR5pnH0FMU1fRm1E9QzkhBEnLOg="
         cls._previous_rag_service_token = os.environ.get("RAG_IDEA_SERVICE_TOKEN")
         os.environ["RAG_IDEA_SERVICE_TOKEN"] = "test-rag-service-token"
         sys.modules.pop("main", None)
@@ -126,6 +127,9 @@ class PlatformApiTests(unittest.TestCase):
         self.assertEqual(listed.status_code, 200)
         self.assertTrue(any(item["credential_id"] == body["credential_id"] for item in listed.json()["credentials"]))
         self.assertNotIn("token", json.dumps(listed.json()))
+        recovered = self.client.get(f"/api/platform/owner/credentials/{body['credential_id']}/token", headers=self.headers)
+        self.assertEqual(recovered.status_code, 200)
+        self.assertEqual(recovered.json()["token"], body["token"])
         self.assertEqual(self.client.post(f"/api/platform/owner/credentials/{body['credential_id']}/revoke", headers=self.headers).status_code, 200)
         self.assertEqual(self.client.post(f"/api/platform/owner/credentials/{body['credential_id']}/revoke", headers=self.headers).status_code, 404)
 
@@ -158,7 +162,7 @@ class PlatformApiTests(unittest.TestCase):
 
         original_run = self.main.agent_runners["idea"].run
 
-        async def fake_run(user_message, history=None, stream=False):
+        async def fake_run(user_message, history=None, stream=False, execution_context=None):
             return {"reply": "Owner agent reply", "tool_calls_log": [], "iterations": 1}
 
         self.main.agent_runners["idea"].run = fake_run
@@ -434,7 +438,7 @@ class PlatformApiTests(unittest.TestCase):
         active_runners = chat_endpoint.__globals__["agent_runners"]
         original_run = active_runners["idea"].run
 
-        async def fake_run(user_message, history=None, stream=False, llm_model_config=None):
+        async def fake_run(user_message, history=None, stream=False, llm_model_config=None, execution_context=None):
             return {"reply": "Handled.", "tool_calls_log": [{"name": "read_file", "success": True, "args": {"path": "secret"}, "result": "secret"}], "iterations": 1}
 
         active_runners["idea"].run = fake_run
@@ -450,7 +454,7 @@ class PlatformApiTests(unittest.TestCase):
         finally:
             active_runners["idea"].run = original_run
 
-        async def no_tool_run(user_message, history=None, stream=False, llm_model_config=None):
+        async def no_tool_run(user_message, history=None, stream=False, llm_model_config=None, execution_context=None):
             return {"reply": "No tools.", "tool_calls_log": [], "iterations": 1}
 
         active_runners["idea"].run = no_tool_run
@@ -510,9 +514,100 @@ class PlatformApiTests(unittest.TestCase):
         self.main.platform_store.set_project_member(projects[1]["project_id"], principal["principal_id"], ["documents.read"])
         member_headers = {"Authorization": f"Bearer {member['access_token']}", "X-Device-ID": "rag-member", "X-RAG-Service-Token": service_token}
         self.assertEqual(self.client.post(endpoint, headers=member_headers, json={"project_id": projects[0]["project_id"], "permission": "documents.read"}).status_code, 200)
-        self.assertEqual(self.client.post(endpoint, headers=member_headers, json={"project_id": projects[1]["project_id"], "permission": "documents.read"}).status_code, 403)
+        self.assertEqual(self.client.post(endpoint, headers=member_headers, json={"project_id": projects[1]["project_id"], "permission": "documents.read"}).status_code, 200)
         self.assertEqual(self.client.post(endpoint, headers=member_headers, json={"project_id": projects[2]["project_id"], "permission": "documents.read"}).status_code, 403)
         self.assertEqual(self.client.post(endpoint, headers=member_headers, json=missing).status_code, 404)
+
+    def test_mcp_direct_tool_call_is_permanently_closed(self):
+        self.assertEqual(self.client.post("/mcp/tools/call", headers=self.headers, json={"name": "read_file", "arguments": {}}).status_code, 410)
+        self.assertEqual(self.client.post("/mcp/tools/list", headers=self.headers).status_code, 200)
+
+    def test_tool_approval_api_flow(self):
+        approval = self.main.platform_store.create_tool_approval("account-owner", "space-project-world", "principal-owner", "idea", "delete_file", "fp-delete-test", '{"file_path": "secret.txt"}')
+        self.assertEqual(approval["status"], "pending")
+
+        member = self.password_login(self.member_email, self.member_password, "approval-member-device").json()
+        member_headers = {"Authorization": f"Bearer {member['access_token']}", "X-Device-ID": "approval-member-device"}
+        self.assertEqual(self.client.get("/api/platform/approvals", headers=member_headers).status_code, 403)
+
+        listing = self.client.get("/api/platform/approvals", headers=self.headers)
+        self.assertEqual(listing.status_code, 200)
+        self.assertTrue(any(item["approval_id"] == approval["approval_id"] for item in listing.json()["pending"]))
+
+        approved = self.client.post(f"/api/platform/approvals/{approval['approval_id']}/approve", headers=self.headers)
+        self.assertEqual(approved.status_code, 200)
+        self.assertEqual(approved.json()["status"], "approved")
+        self.assertEqual(self.client.post(f"/api/platform/approvals/{approval['approval_id']}/approve", headers=self.headers).json()["status"], "approved")
+
+        denied_approval = self.main.platform_store.create_tool_approval("account-owner", "space-project-world", "principal-owner", "idea", "run_command", "fp-command-test", '{"command": "whoami"}')
+        self.assertEqual(self.client.post(f"/api/platform/approvals/{denied_approval['approval_id']}/deny", headers=self.headers).json()["status"], "denied")
+        self.assertEqual(self.client.post("/api/platform/approvals/approval-missing/approve", headers=self.headers).status_code, 404)
+
+        sync_events = self.client.get("/api/sync/events", headers=self.headers).json()["events"]
+        self.assertTrue(any(event["event_type"] == "approval.requested" for event in sync_events))
+        self.assertTrue(any(event["event_type"] == "approval.decided" for event in sync_events))
+
+    def test_capability_grant_api_flow(self):
+        member_login = self.password_login(self.member_email, self.member_password, "grant-member-device")
+        member_headers = {"Authorization": f"Bearer {member_login.json()['access_token']}", "X-Device-ID": "grant-member-device"}
+        member_account_id = member_login.json()["principal"]["account_id"]
+
+        self.assertEqual(self.client.get("/api/platform/grants", headers=member_headers).status_code, 403)
+        self.assertEqual(self.client.post("/api/platform/grants", headers=member_headers, json={"account_id": member_account_id, "capability": "command"}).status_code, 403)
+
+        created = self.client.post("/api/platform/grants", headers=self.headers, json={"account_id": member_account_id, "capability": "command", "workspace": "space-project-world", "expires_in_days": 7})
+        self.assertEqual(created.status_code, 200)
+        grant = created.json()
+        self.assertEqual(grant["status"], "active")
+        self.assertEqual(grant["capability"], "command")
+        self.assertTrue(grant["expires_at"])
+
+        self.assertEqual(self.client.post("/api/platform/grants", headers=self.headers, json={"account_id": member_account_id, "capability": "no-such-capability"}).status_code, 400)
+
+        listing = self.client.get("/api/platform/grants", headers=self.headers)
+        self.assertEqual(listing.status_code, 200)
+        self.assertTrue(any(item["grant_id"] == grant["grant_id"] for item in listing.json()["grants"]))
+        self.assertTrue(any(item["grant_id"] == grant["grant_id"] for item in self.main.platform_store.list_capability_grants(member_account_id)))
+
+        revoked = self.client.post(f"/api/platform/grants/{grant['grant_id']}/revoke", headers=self.headers)
+        self.assertEqual(revoked.status_code, 200)
+        self.assertEqual(revoked.json()["status"], "revoked")
+        self.assertEqual(self.client.post(f"/api/platform/grants/{grant['grant_id']}/revoke", headers=self.headers).json()["status"], "revoked")
+        self.assertIsNone(self.main.platform_store.find_valid_grant(member_account_id, "command", "space-project-world"))
+
+    def test_file_change_review_accept_and_revert_flow(self):
+        root = Path(self.main.BASE_DIR).parent
+        backup_dir = root / ".idea-assistant" / "backup"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        target = root / "fc-review-target.txt"
+        backup = backup_dir / "fc-review-backup.txt"
+        target.write_text("modified", encoding="utf-8")
+        backup.write_text("original", encoding="utf-8")
+        backup_rel = str(backup.relative_to(root)).replace("\\", "/")
+        try:
+            review = self.main.platform_store.create_file_change_review("account-owner", "space-project-world", "principal-owner", "idea", "edit_file", str(target), backup_rel, "--- a\n+++ b")
+            member = self.password_login(self.member_email, self.member_password, "fc-member-device").json()
+            member_headers = {"Authorization": f"Bearer {member['access_token']}", "X-Device-ID": "fc-member-device"}
+            self.assertEqual(self.client.get("/api/platform/file-changes", headers=member_headers).status_code, 403)
+
+            listing = self.client.get("/api/platform/file-changes", headers=self.headers)
+            self.assertEqual(listing.status_code, 200)
+            self.assertTrue(any(item["change_id"] == review["change_id"] for item in listing.json()["changes"]))
+
+            accepted = self.client.post(f"/api/platform/file-changes/{review['change_id']}/accept", headers=self.headers)
+            self.assertEqual(accepted.status_code, 200)
+            self.assertEqual(accepted.json()["status"], "accepted")
+            self.assertEqual(self.client.post(f"/api/platform/file-changes/{review['change_id']}/revert", headers=self.headers).status_code, 409)
+
+            review2 = self.main.platform_store.create_file_change_review("account-owner", "space-project-world", "principal-owner", "idea", "edit_file", str(target), backup_rel, "diff")
+            reverted = self.client.post(f"/api/platform/file-changes/{review2['change_id']}/revert", headers=self.headers)
+            self.assertEqual(reverted.status_code, 200)
+            self.assertEqual(reverted.json()["status"], "reverted")
+            self.assertEqual(target.read_text(encoding="utf-8"), "original")
+            self.assertEqual(self.client.post("/api/platform/file-changes/change-missing/revert", headers=self.headers).status_code, 404)
+        finally:
+            target.unlink(missing_ok=True)
+            backup.unlink(missing_ok=True)
 
     def test_platform_auth_phase_one_roles_daily_projects_and_memory_scopes(self):
         self.reset_email_cooldown(self.member_email)

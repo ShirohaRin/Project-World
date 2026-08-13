@@ -1,0 +1,922 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>知识库文件管理 - Shiroha</title>
+<style>
+  :root {
+    --bg: #0a0a0f;
+    --glass-bg: rgba(20, 20, 35, 0.65);
+    --glass-border: rgba(255, 255, 255, 0.08);
+    --glass-hover: rgba(255, 255, 255, 0.04);
+    --accent: #7c8aff;
+    --accent-dim: rgba(124, 138, 255, 0.15);
+    --danger: #ff6b7a;
+    --danger-dim: rgba(255, 107, 122, 0.15);
+    --success: #5cdb8b;
+    --text: #e0e0ea;
+    --text-dim: #8888a0;
+    --radius: 14px;
+    --radius-sm: 8px;
+    --transition: 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+    background: var(--bg);
+    background-image:
+      radial-gradient(ellipse at 30% 10%, rgba(124, 138, 255, 0.06) 0%, transparent 60%),
+      radial-gradient(ellipse at 70% 80%, rgba(92, 219, 139, 0.04) 0%, transparent 60%);
+    color: var(--text);
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+  }
+
+  /* ---- Login ---- */
+  .login-card {
+    width: 380px;
+    background: var(--glass-bg);
+    border: 1px solid var(--glass-border);
+    border-radius: var(--radius);
+    padding: 40px;
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    text-align: center;
+  }
+
+  .login-card h1 {
+    font-size: 1.6rem;
+    font-weight: 600;
+    margin-bottom: 6px;
+    background: linear-gradient(135deg, var(--accent), #a78bfa);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+
+  .login-card .sub { color: var(--text-dim); font-size: 0.85rem; margin-bottom: 28px; }
+
+  .login-card label {
+    display: block;
+    text-align: left;
+    font-size: 0.82rem;
+    color: var(--text-dim);
+    margin-bottom: 4px;
+  }
+
+  .login-card select,
+  .login-card input {
+    width: 100%;
+    padding: 12px 14px;
+    margin-bottom: 16px;
+    background: rgba(255,255,255,0.05);
+    border: 1px solid var(--glass-border);
+    border-radius: var(--radius-sm);
+    color: var(--text);
+    font-size: 0.95rem;
+    outline: none;
+    transition: var(--transition);
+  }
+
+  .login-card select:focus,
+  .login-card input:focus { border-color: var(--accent); }
+
+  .login-card button {
+    width: 100%;
+    padding: 12px;
+    background: linear-gradient(135deg, var(--accent), #8b8fff);
+    border: none;
+    border-radius: var(--radius-sm);
+    color: #fff;
+    font-size: 0.95rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: var(--transition);
+  }
+
+  .login-card button:hover { transform: translateY(-1px); box-shadow: 0 6px 20px rgba(124,138,255,0.3); }
+  .login-card .err { color: var(--danger); font-size: 0.82rem; margin-top: 8px; min-height: 20px; }
+
+  /* ---- Main App ---- */
+  .app { width: 100%; max-width: 1100px; display: none; flex-direction: column; gap: 16px; }
+
+  .topbar {
+    display: flex; align-items: center; justify-content: space-between;
+    background: var(--glass-bg); border: 1px solid var(--glass-border);
+    border-radius: var(--radius); padding: 14px 22px;
+    backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
+  }
+
+  .topbar h2 {
+    font-size: 1.15rem; font-weight: 600;
+    background: linear-gradient(135deg, var(--accent), #a78bfa);
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;
+  }
+
+  .topbar .right { display: flex; align-items: center; gap: 12px; }
+  .badge {
+    font-size: 0.75rem; padding: 4px 10px; border-radius: 20px;
+    background: var(--accent-dim); color: var(--accent); font-weight: 600;
+  }
+  .badge.admin { background: var(--danger-dim); color: var(--danger); }
+  .btn {
+    padding: 8px 16px; border-radius: var(--radius-sm); border: 1px solid var(--glass-border);
+    background: rgba(255,255,255,0.05); color: var(--text); cursor: pointer;
+    font-size: 0.82rem; transition: var(--transition); white-space: nowrap;
+  }
+  .btn:hover { background: rgba(255,255,255,0.1); }
+  .btn.accent { background: var(--accent-dim); border-color: var(--accent); color: var(--accent); }
+  .btn.danger { background: var(--danger-dim); border-color: var(--danger); color: var(--danger); }
+
+  /* Tabs */
+  .tabs {
+    display: flex; gap: 0; background: var(--glass-bg); border: 1px solid var(--glass-border);
+    border-radius: var(--radius); overflow: hidden;
+    backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
+  }
+  .tab {
+    flex: 1; padding: 12px 20px; text-align: center; cursor: pointer;
+    font-size: 0.9rem; font-weight: 500; color: var(--text-dim);
+    transition: var(--transition); border-bottom: 2px solid transparent;
+    background: none; border-top: none; border-left: none; border-right: none;
+  }
+  .tab:hover { color: var(--text); background: var(--glass-hover); }
+  .tab.active { color: var(--accent); border-bottom-color: var(--accent); background: var(--accent-dim); }
+
+  /* Content */
+  .content {
+    display: flex; gap: 16px; min-height: 450px;
+  }
+
+  .panel {
+    flex: 1; background: var(--glass-bg); border: 1px solid var(--glass-border);
+    border-radius: var(--radius); padding: 20px; overflow-y: auto; max-height: 55vh;
+    backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
+  }
+
+  .panel-title {
+    font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.08em;
+    color: var(--text-dim); margin-bottom: 14px; font-weight: 600;
+  }
+
+  /* Tree */
+  .tree-item { margin-left: 0; user-select: none; }
+  .tree-row {
+    display: flex; align-items: center; gap: 6px; padding: 6px 8px;
+    border-radius: var(--radius-sm); cursor: pointer; transition: var(--transition);
+    font-size: 0.88rem;
+  }
+  .tree-row:hover { background: var(--glass-hover); }
+  .tree-row.selected { background: var(--accent-dim); }
+  .tree-icon { font-size: 0.85rem; width: 18px; text-align: center; flex-shrink: 0; }
+  .tree-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tree-chevron { font-size: 0.7rem; color: var(--text-dim); transition: var(--transition); width: 12px; }
+  .tree-chevron.open { transform: rotate(90deg); }
+  .tree-children { display: none; }
+  .tree-children.open { display: block; }
+
+  /* Files */
+  .file-row {
+    display: flex; align-items: center; gap: 10px; padding: 8px 12px;
+    border-radius: var(--radius-sm); cursor: pointer; transition: var(--transition);
+    font-size: 0.88rem;
+  }
+  .file-row:hover { background: var(--glass-hover); }
+  .file-icon { font-size: 1rem; }
+  .file-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .file-actions { display: flex; gap: 6px; opacity: 0; transition: var(--transition); }
+  .file-row:hover .file-actions { opacity: 1; }
+  .icon-btn {
+    width: 28px; height: 28px; border-radius: var(--radius-sm); border: none;
+    background: rgba(255,255,255,0.06); color: var(--text-dim); cursor: pointer;
+    font-size: 0.8rem; display: flex; align-items: center; justify-content: center;
+    transition: var(--transition);
+  }
+  .icon-btn:hover { background: var(--accent-dim); color: var(--accent); }
+  .icon-btn.danger:hover { background: var(--danger-dim); color: var(--danger); }
+
+  /* Upload Zone */
+  .upload-zone {
+    border: 2px dashed var(--glass-border); border-radius: var(--radius);
+    padding: 30px 20px; text-align: center; transition: var(--transition);
+    margin-bottom: 16px; cursor: pointer;
+  }
+  .upload-zone:hover, .upload-zone.dragover {
+    border-color: var(--accent); background: var(--accent-dim);
+  }
+  .upload-zone .icon { font-size: 2rem; margin-bottom: 8px; }
+  .upload-zone .hint { font-size: 0.82rem; color: var(--text-dim); }
+  .upload-zone .hint strong { color: var(--accent); }
+  .upload-zone .formats { font-size: 0.72rem; color: var(--text-dim); margin-top: 6px; }
+
+  .upload-progress { display: none; margin-top: 12px; }
+  .upload-progress .bar {
+    height: 4px; border-radius: 2px; background: rgba(255,255,255,0.08); overflow: hidden;
+  }
+  .upload-progress .fill {
+    height: 100%; background: var(--accent); border-radius: 2px; transition: width 0.3s;
+  }
+
+  /* Modal */
+  .modal-overlay {
+    display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.6);
+    align-items: center; justify-content: center; z-index: 100;
+    backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+  }
+  .modal-overlay.show { display: flex; }
+  .modal {
+    background: var(--glass-bg); border: 1px solid var(--glass-border);
+    border-radius: var(--radius); padding: 28px; width: 400px; max-width: 90vw;
+    backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
+  }
+  .modal h3 { font-size: 1.1rem; margin-bottom: 12px; }
+  .modal p { color: var(--text-dim); font-size: 0.88rem; line-height: 1.6; margin-bottom: 18px; word-break: break-word; }
+  .modal .err { color: var(--danger); font-size: 0.82rem; min-height: 18px; margin: -4px 0 10px; }
+  .modal input {
+    width: 100%; padding: 10px 12px; margin-bottom: 14px;
+    background: rgba(255,255,255,0.05); border: 1px solid var(--glass-border);
+    border-radius: var(--radius-sm); color: var(--text); font-size: 0.9rem; outline: none;
+  }
+  .modal input:focus { border-color: var(--accent); }
+  .modal-btns { display: flex; gap: 10px; justify-content: flex-end; }
+
+  /* Toast */
+  .toast-stack {
+    position: fixed; top: 24px; right: 24px; z-index: 200;
+    width: min(360px, calc(100vw - 48px)); display: flex; flex-direction: column; gap: 10px;
+    pointer-events: none;
+  }
+  .toast {
+    padding: 12px 20px; border-radius: var(--radius-sm); font-size: 0.85rem;
+    backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+    max-width: 100%; transition: opacity 0.3s ease, transform 0.3s ease, margin 0.3s ease;
+  }
+  .toast.leaving { opacity: 0; transform: translateX(24px); }
+  .toast.success { background: rgba(92,219,139,0.15); border: 1px solid var(--success); color: var(--success); }
+  .toast.error { background: var(--danger-dim); border: 1px solid var(--danger); color: var(--danger); }
+  .toast.info { background: var(--accent-dim); border: 1px solid var(--accent); color: var(--accent); }
+
+
+  .empty { text-align: center; color: var(--text-dim); padding: 40px 20px; font-size: 0.88rem; }
+  .spacer { flex: 1; }
+  .breadcrumb { font-size: 0.78rem; color: var(--text-dim); margin-bottom: 6px; }
+  .breadcrumb span { cursor: pointer; color: var(--accent); }
+  .breadcrumb span:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+
+<!-- ========== 登录界面 ========== -->
+<div id="loginScreen" class="login-card">
+  <h1>知识库文件管理</h1>
+  <p class="sub">Shiroha 附属服务</p>
+  <label for="loginUsername">账号</label>
+  <input type="text" id="loginUsername" placeholder="请输入账号" autocomplete="username">
+  <label for="loginPwd">密码</label>
+  <input type="password" id="loginPwd" placeholder="请输入密码" autocomplete="current-password">
+  <button onclick="doLogin()">登 录</button>
+  <button class="btn" style="margin-top:10px;width:100%;" onclick="showRegisterModal()">注册访客账号</button>
+  <div id="loginErr" class="err"></div>
+</div>
+
+<!-- ========== 主界面 ========== -->
+<div id="app" class="app">
+  <!-- 顶部栏 -->
+  <div class="topbar">
+    <h2>知识库文件管理</h2>
+    <div class="right">
+      <span id="userBadge" class="badge">访客</span>
+      <button class="btn accent" id="btnRebuild" style="display:none" onclick="confirmChanges()">确认</button>
+      <button class="btn" id="btnAgentToken" style="display:none" onclick="createAgentToken()">个人 Agent Token</button>
+      <button class="btn" onclick="doLogout()">退出</button>
+    </div>
+  </div>
+
+  <!-- 集合 Tab -->
+  <div class="tabs">
+    <button class="tab active" data-col="public" onclick="switchCollection('public')">Public 库（公开知识库）</button>
+    <button class="tab" data-col="data" onclick="switchCollection('data')">Data 库（研究数据）</button>
+    <button class="tab" id="privateTab" data-col="private" onclick="switchCollection('private')">Private 库（我的私密文件）</button>
+  </div>
+
+  <!-- 内容区 -->
+  <div class="content">
+    <!-- 左侧：文件夹树 -->
+    <div class="panel" style="flex:0 0 300px;">
+      <div class="panel-title">文件夹</div>
+      <button class="btn accent" id="btnNewFolder" style="display:none;margin-bottom:12px;width:100%;" onclick="showCreateFolder()">+ 新建文件夹</button>
+      <div id="treeContainer"><div class="empty">加载中...</div></div>
+    </div>
+
+    <!-- 右侧：文件列表 + 上传区 -->
+    <div class="panel">
+      <div class="panel-title" id="filePanelTitle">根目录</div>
+
+      <!-- 上传区域 -->
+      <div class="upload-zone" id="uploadZone">
+        <div class="icon">📁</div>
+        <div class="hint">拖拽文件到此处上传，或 <strong>点击选择文件</strong></div>
+        <div class="formats">支持格式：TXT · MD · PDF · DOCX</div>
+        <input type="file" id="fileInput" multiple accept=".txt,.md,.pdf,.docx" style="display:none">
+      </div>
+      <div class="upload-progress" id="uploadProgress">
+        <div style="display:flex;justify-content:space-between;margin-bottom:4px;">
+          <span style="font-size:0.82rem;" id="uploadStatus">上传中...</span>
+          <span style="font-size:0.82rem;color:var(--text-dim);" id="uploadPercent">0%</span>
+        </div>
+        <div class="bar"><div class="fill" id="uploadBar" style="width:0%"></div></div>
+      </div>
+
+      <!-- 文件列表 -->
+      <div id="fileList"><div class="empty">根目录暂无文件</div></div>
+    </div>
+  </div>
+</div>
+
+<!-- 新建文件夹弹窗 -->
+<div class="modal-overlay" id="modalFolder">
+  <div class="modal">
+    <h3>新建文件夹</h3>
+    <input type="text" id="folderName" placeholder="文件夹名称">
+    <div class="modal-btns">
+      <button class="btn" onclick="closeModal('modalFolder')">取消</button>
+      <button class="btn accent" onclick="doCreateFolder()">创建</button>
+    </div>
+  </div>
+</div>
+
+<!-- 注册访客账号弹窗 -->
+<div class="modal-overlay" id="modalRegister">
+  <div class="modal">
+    <h3>注册访客账号</h3>
+    <p>注册后将自动创建仅自己可访问的 Private 私密文件夹。</p>
+    <input type="text" id="registerUsername" placeholder="账号：3-32 位字母、数字、_ 或 -" autocomplete="username">
+    <input type="password" id="registerPwd" placeholder="密码：至少 8 位" autocomplete="new-password">
+    <input type="password" id="registerPwdConfirm" placeholder="再次输入密码" autocomplete="new-password">
+    <div id="registerErr" class="err"></div>
+    <div class="modal-btns">
+      <button class="btn" onclick="closeModal('modalRegister')">取消</button>
+      <button class="btn accent" onclick="doRegister()">注册并登录</button>
+    </div>
+  </div>
+</div>
+
+<!-- 个人 MCP 配置弹窗 -->
+<div class="modal-overlay" id="modalAgentToken">
+  <div class="modal" style="width:680px;max-height:85vh;overflow-y:auto;">
+    <h3>个人 MCP 配置</h3>
+    <p>此配置仅允许你的 Agent 检索 Public、Data 和你自己的 Private 知识库，不包含管理员、研究或小说库权限。</p>
+    <div style="display:flex;gap:8px;margin:12px 0 16px;flex-wrap:wrap;">
+      <button class="btn accent" id="tutorialTrae" onclick="showMcpTutorial('trae')">TRAE</button>
+      <button class="btn" id="tutorialWorkBuddy" onclick="showMcpTutorial('workbuddy')">WorkBuddy</button>
+      <button class="btn" id="tutorialCodex" onclick="showMcpTutorial('codex')">Codex</button>
+    </div>
+    <div id="mcpTutorial" style="padding:12px;border:1px solid var(--glass-border);border-radius:var(--radius-sm);background:rgba(255,255,255,0.03);margin-bottom:14px;"></div>
+    <label style="display:block;color:var(--text-dim);font-size:0.82rem;margin:12px 0 5px;">个人 Token</label>
+    <input type="text" id="agentTokenValue" readonly onclick="this.select()">
+    <p id="agentTokenExpiry"></p>
+    <label style="display:block;color:var(--text-dim);font-size:0.82rem;margin:12px 0 5px;">MCP 配置</label>
+    <textarea id="mcpConfigValue" readonly onclick="this.select()" style="width:100%;min-height:190px;padding:10px 12px;background:rgba(255,255,255,0.05);border:1px solid var(--glass-border);border-radius:var(--radius-sm);color:var(--text);font:0.78rem ui-monospace,Consolas,monospace;resize:vertical;"></textarea>
+    <div class="modal-btns"><button class="btn accent" onclick="copyMcpConfig()">复制 MCP 配置</button><button class="btn" onclick="copyAgentToken()">复制 Token</button><button class="btn" onclick="closeModal('modalAgentToken')">关闭</button></div>
+  </div>
+</div>
+
+<!-- 删除确认弹窗 -->
+<div class="modal-overlay" id="modalDelete">
+  <div class="modal">
+    <h3>确认删除</h3>
+    <p id="deleteMessage">确定要删除此文件吗？此操作不可撤销。</p>
+    <div class="modal-btns">
+      <button class="btn" onclick="closeModal('modalDelete')">取消</button>
+      <button class="btn danger" id="btnConfirmDelete" onclick="confirmDelete()">删除</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ========== 状态 ==========
+const API_BASE = '/api';
+let authToken = '';
+let userRole = '';        // 'uploader' | 'admin'
+let currentUsername = '';
+let currentCollection = 'public';
+let currentFolder = '';   // 当前浏览的文件夹相对路径
+let pendingDeletePath = '';
+let treeData = { public: [], data: [], private: [] };
+let expandedFolders = {};
+let currentMcpConfig = '';
+let currentMcpTutorial = 'trae';
+
+// ========== 登录 ==========
+async function doLogin() {
+  const username = document.getElementById('loginUsername').value.trim();
+  const pwd = document.getElementById('loginPwd').value;
+  const errEl = document.getElementById('loginErr');
+  errEl.textContent = '';
+  if (!username || !pwd) { errEl.textContent = '请输入账号和密码'; return; }
+  try {
+    const res = await fetch(`${API_BASE}/auth/login`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password: pwd })
+    });
+    const data = await parseApiResponse(res);
+    await enterApp(data);
+  } catch (e) { errEl.textContent = e.message; }
+}
+
+async function enterApp(data) {
+  authToken = data.token;
+  userRole = data.role;
+  currentUsername = data.username;
+  document.getElementById('loginScreen').style.display = 'none';
+  document.getElementById('app').style.display = 'flex';
+  const badge = document.getElementById('userBadge');
+  const privateTab = document.getElementById('privateTab');
+  if (userRole === 'admin') {
+    badge.textContent = `管理员：${currentUsername}`;
+    badge.className = 'badge admin';
+    privateTab.textContent = 'Private 库（全部私密文件）';
+    document.getElementById('btnRebuild').style.display = '';
+    document.getElementById('btnNewFolder').style.display = '';
+  } else {
+    badge.textContent = `访客：${currentUsername}`;
+    badge.className = 'badge';
+    privateTab.textContent = 'Private 库（我的私密文件）';
+    document.getElementById('btnRebuild').style.display = '';
+    document.getElementById('btnRebuild').textContent = '更新我的索引';
+    document.getElementById('btnAgentToken').style.display = '';
+  }
+  await Promise.all(['public', 'data', 'private'].map(loadTree));
+  switchCollection('private');
+}
+
+function showRegisterModal() {
+  document.getElementById('registerErr').textContent = '';
+  document.getElementById('registerUsername').value = '';
+  document.getElementById('registerPwd').value = '';
+  document.getElementById('registerPwdConfirm').value = '';
+  document.getElementById('modalRegister').classList.add('show');
+  document.getElementById('registerUsername').focus();
+}
+
+async function doRegister() {
+  const username = document.getElementById('registerUsername').value.trim();
+  const password = document.getElementById('registerPwd').value;
+  const confirmPassword = document.getElementById('registerPwdConfirm').value;
+  const errEl = document.getElementById('registerErr');
+  errEl.textContent = '';
+  if (!username || !password) { errEl.textContent = '请填写账号和密码'; return; }
+  if (password !== confirmPassword) { errEl.textContent = '两次输入的密码不一致'; return; }
+  try {
+    const res = await fetch(`${API_BASE}/auth/register`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password })
+    });
+    const data = await parseApiResponse(res);
+    closeModal('modalRegister');
+    await enterApp(data);
+  } catch (e) { errEl.textContent = e.message; }
+}
+
+function doLogout() {
+  authToken = '';
+  userRole = '';
+  currentUsername = '';
+  treeData = { public: [], data: [], private: [] };
+  expandedFolders = {};
+  currentFolder = '';
+  document.getElementById('loginScreen').style.display = '';
+  document.getElementById('app').style.display = 'none';
+  document.getElementById('loginUsername').value = '';
+  document.getElementById('loginPwd').value = '';
+}
+
+document.getElementById('loginPwd').addEventListener('keydown', e => {
+  if (e.key === 'Enter') doLogin();
+});
+
+// ========== API ==========
+async function parseApiResponse(res) {
+  const contentType = res.headers.get('content-type') || '';
+  if (!contentType.includes('application/json')) {
+    throw new Error(`接口未返回 JSON（HTTP ${res.status}）。请检查网站服务器是否将 /api 代理到知识库服务。`);
+  }
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.detail || data.error || '请求失败');
+  return data;
+}
+
+async function api(path, options = {}) {
+  const headers = { ...(options.headers || {}) };
+  if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
+  const res = await fetch(`${API_BASE}${path}`, { ...options, headers });
+  return parseApiResponse(res);
+}
+
+// ========== 集合切换 ==========
+async function switchCollection(col) {
+  currentCollection = col;
+  currentFolder = '';
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelector(`.tab[data-col="${col}"]`).classList.add('active');
+  renderTree();
+  renderFiles();
+}
+
+// ========== 加载树 ==========
+async function loadTree(col) {
+  try {
+    const data = await api(`/browse/${col}`);
+    treeData[col] = data.tree;
+  } catch (e) {
+    toast(`加载 ${col} 库失败: ${e.message}`, 'error');
+    treeData[col] = [];
+  }
+}
+
+// ========== 渲染文件夹树 ==========
+function renderTree() {
+  const container = document.getElementById('treeContainer');
+  const tree = treeData[currentCollection];
+  const rootHtml = `<div class="tree-row" data-path="" onclick="onTreeFolderClick('')">
+    <span class="tree-chevron"></span>
+    <span class="tree-icon">📁</span>
+    <span class="tree-name">根目录</span>
+  </div>`;
+  container.innerHTML = rootHtml + buildTreeHTML(tree || [], '');
+  Object.keys(expandedFolders).forEach(key => {
+    const el = document.querySelector(`.tree-children[data-path="${CSS.escape(key)}"]`);
+    if (el) el.classList.add('open');
+    const chev = document.querySelector(`.tree-chevron[data-path="${CSS.escape(key)}"]`);
+    if (chev) chev.classList.add('open');
+  });
+  highlightSelected();
+}
+
+function buildTreeHTML(nodes, parentPath) {
+  let html = '';
+  for (const node of nodes) {
+    const fullPath = parentPath ? `${parentPath}/${node.name}` : node.name;
+    if (node.type === 'folder') {
+      html += `<div class="tree-item">`;
+      html += `<div class="tree-row" data-path="${escHtml(fullPath)}" onclick="onTreeFolderClick('${escHtml(fullPath)}')">`;
+      html += `<span class="tree-chevron" data-path="${escHtml(fullPath)}">▶</span>`;
+      html += `<span class="tree-icon">📂</span>`;
+      html += `<span class="tree-name">${escHtml(node.name)}</span>`;
+      html += `</div>`;
+      html += `<div class="tree-children" data-path="${escHtml(fullPath)}">`;
+      if (node.children && node.children.length > 0) {
+        html += buildTreeHTML(node.children, fullPath);
+      }
+      html += `</div></div>`;
+    }
+  }
+  return html;
+}
+
+function onTreeFolderClick(folderPath) {
+  currentFolder = folderPath;
+  const childrenEl = document.querySelector(`.tree-children[data-path="${CSS.escape(folderPath)}"]`);
+  const chevEl = document.querySelector(`.tree-chevron[data-path="${CSS.escape(folderPath)}"]`);
+  if (childrenEl) {
+    childrenEl.classList.toggle('open');
+    if (childrenEl.classList.contains('open')) {
+      expandedFolders[folderPath] = true;
+      if (chevEl) chevEl.classList.add('open');
+    } else {
+      delete expandedFolders[folderPath];
+      if (chevEl) chevEl.classList.remove('open');
+    }
+  }
+  highlightSelected();
+  renderFiles();
+}
+
+function highlightSelected() {
+  document.querySelectorAll('.tree-row').forEach(r => r.classList.remove('selected'));
+  const row = document.querySelector(`.tree-row[data-path="${CSS.escape(currentFolder)}"]`);
+  if (row) row.classList.add('selected');
+}
+
+function escHtml(str) {
+  return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+
+if (!CSS.escape) {
+  CSS.escape = function(v) { return v.replace(/([^\w-])/g, '\\$1'); };
+}
+
+// ========== 渲染文件列表 ==========
+function renderFiles() {
+  const container = document.getElementById('fileList');
+  const titleEl = document.getElementById('filePanelTitle');
+
+  if (!currentFolder) {
+    titleEl.textContent = '📁 根目录';
+  } else {
+    titleEl.innerHTML = `📂 ${escHtml(currentFolder)}`;
+  }
+
+  const files = findFilesInFolder(treeData[currentCollection], currentFolder);
+  if (!files || files.length === 0) {
+    container.innerHTML = `<div class="empty">${currentFolder ? '此文件夹暂无文件' : '根目录暂无文件'}</div>`;
+    return;
+  }
+
+  let html = '';
+  for (const f of files) {
+    const icon = getFileIcon(f.name);
+    html += `<div class="file-row">`;
+    html += `<span class="file-icon">${icon}</span>`;
+    html += `<span class="file-name" title="${escHtml(f.name)}">${escHtml(f.name)}</span>`;
+    html += `<div class="file-actions">`;
+    html += `<button class="icon-btn" title="下载" onclick="downloadFile('${escHtml(f.path)}')">⬇</button>`;
+    if (userRole === 'admin' || currentCollection === 'private') {
+      html += `<button class="icon-btn danger" title="删除" onclick="deleteFile('${escHtml(f.path)}')">🗑</button>`;
+    }
+    html += `</div></div>`;
+  }
+  container.innerHTML = html;
+}
+
+function findFilesInFolder(tree, targetPath) {
+  if (!targetPath) return tree.filter(n => n.type === 'file');
+  const parts = targetPath.split('/');
+  let current = tree;
+  for (const part of parts) {
+    const node = current.find(n => n.name === part && n.type === 'folder');
+    if (!node || !node.children) return [];
+    current = node.children;
+  }
+  return current.filter(n => n.type === 'file');
+}
+
+function getFileIcon(name) {
+  const ext = name.split('.').pop().toLowerCase();
+  const map = { txt: '📄', md: '📝', pdf: '📕', docx: '📘' };
+  return map[ext] || '📄';
+}
+
+// ========== 上传 ==========
+const uploadZone = document.getElementById('uploadZone');
+const fileInput = document.getElementById('fileInput');
+
+uploadZone.addEventListener('click', () => fileInput.click());
+uploadZone.addEventListener('dragover', e => { e.preventDefault(); uploadZone.classList.add('dragover'); });
+uploadZone.addEventListener('dragleave', () => uploadZone.classList.remove('dragover'));
+uploadZone.addEventListener('drop', e => {
+  e.preventDefault();
+  uploadZone.classList.remove('dragover');
+  handleFiles(e.dataTransfer.files);
+});
+
+fileInput.addEventListener('change', () => {
+  handleFiles(fileInput.files);
+  fileInput.value = '';
+});
+
+async function handleFiles(files) {
+  const progressDiv = document.getElementById('uploadProgress');
+  const statusEl = document.getElementById('uploadStatus');
+  const percentEl = document.getElementById('uploadPercent');
+  const barEl = document.getElementById('uploadBar');
+
+  for (const file of files) {
+    const ext = '.' + file.name.split('.').pop().toLowerCase();
+    if (!['.txt','.md','.pdf','.docx'].includes(ext)) {
+      toast(`不支持的文件格式: ${file.name}`, 'error');
+      continue;
+    }
+
+    progressDiv.style.display = 'block';
+    statusEl.textContent = `上传中: ${file.name}`;
+
+    const formData = new FormData();
+    formData.append('file', file);
+
+    try {
+      const xhr = new XMLHttpRequest();
+      await new Promise((resolve, reject) => {
+        xhr.upload.addEventListener('progress', e => {
+          if (e.lengthComputable) {
+            const pct = Math.round((e.loaded / e.total) * 100);
+            percentEl.textContent = pct + '%';
+            barEl.style.width = pct + '%';
+          }
+        });
+        xhr.addEventListener('load', () => {
+          const contentType = xhr.getResponseHeader('content-type') || '';
+          if (!contentType.includes('application/json')) {
+            reject(new Error(`接口未返回 JSON（HTTP ${xhr.status}）。请检查 /api 代理配置。`));
+            return;
+          }
+          if (xhr.status >= 200 && xhr.status < 300) resolve();
+          else {
+            try { reject(new Error(JSON.parse(xhr.responseText).detail || JSON.parse(xhr.responseText).error || '上传失败')); }
+            catch (_) { reject(new Error('上传失败')); }
+          }
+        });
+        xhr.addEventListener('error', () => reject(new Error('网络错误')));
+        xhr.open('POST', `${API_BASE}/browse/upload?collection=${currentCollection}&folder=${encodeURIComponent(currentFolder)}`);
+        xhr.setRequestHeader('Authorization', `Bearer ${authToken}`);
+        xhr.send(formData);
+      });
+      toast(`${file.name} 上传成功`, 'success');
+    } catch (e) {
+      toast(`${file.name}: ${e.message}`, 'error');
+    }
+  }
+
+  progressDiv.style.display = 'none';
+  barEl.style.width = '0%';
+  percentEl.textContent = '0%';
+
+  await loadTree(currentCollection);
+  renderTree();
+  renderFiles();
+}
+
+// ========== 管理员操作 ==========
+function deleteFile(filePath) {
+  pendingDeletePath = filePath;
+  document.getElementById('deleteMessage').textContent = `确定要删除“${filePath}”吗？此操作不可撤销。`;
+  document.getElementById('modalDelete').classList.add('show');
+}
+
+async function confirmDelete() {
+  const filePath = pendingDeletePath;
+  if (!filePath) return;
+  const button = document.getElementById('btnConfirmDelete');
+  button.disabled = true;
+  try {
+    await api(`/browse/delete?collection=${encodeURIComponent(currentCollection)}&path=${encodeURIComponent(filePath)}`, { method: 'DELETE' });
+    closeModal('modalDelete');
+    toast('已删除', 'success');
+    await loadTree(currentCollection);
+    renderTree();
+    renderFiles();
+  } catch (e) {
+    toast(`删除失败: ${e.message}`, 'error');
+  } finally {
+    button.disabled = false;
+    pendingDeletePath = '';
+  }
+}
+
+async function downloadFile(filePath) {
+  try {
+    const res = await fetch(`${API_BASE}/browse/download?collection=${currentCollection}&path=${encodeURIComponent(filePath)}`, {
+      headers: { 'Authorization': `Bearer ${authToken}` }
+    });
+    if (!res.ok) throw new Error('下载失败');
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filePath.split('/').pop();
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  } catch (e) {
+    toast(`下载失败: ${e.message}`, 'error');
+  }
+}
+
+function showCreateFolder() {
+  if (userRole !== 'admin' && currentCollection !== 'private') {
+    toast('访客仅可在自己的 Private 库创建文件夹', 'info');
+    return;
+  }
+  document.getElementById('modalFolder').classList.add('show');
+  document.getElementById('folderName').value = '';
+  document.getElementById('folderName').focus();
+}
+
+function closeModal(id) {
+  document.getElementById(id).classList.remove('show');
+}
+
+async function doCreateFolder() {
+  const name = document.getElementById('folderName').value.trim();
+  if (!name) { toast('请输入文件夹名称', 'info'); return; }
+  if (name.includes('/')) { toast('文件夹名称不能包含 /', 'error'); return; }
+
+  const parentPath = currentFolder || '';
+  const fullPath = parentPath ? `${parentPath}/${name}` : name;
+
+  try {
+    await api(`/browse/folder?collection=${currentCollection}&path=${encodeURIComponent(fullPath)}`, { method: 'POST' });
+    toast('文件夹已创建', 'success');
+    closeModal('modalFolder');
+    if (parentPath) expandedFolders[parentPath] = true;
+    await loadTree(currentCollection);
+    renderTree();
+  } catch (e) {
+    toast(`创建失败: ${e.message}`, 'error');
+  }
+}
+
+async function confirmChanges() {
+  try {
+    if (userRole !== 'admin') {
+      toast('正在更新 Public、Data 与你的私密索引，请稍候...', 'info');
+      await api('/me/rebuild', { method: 'POST' });
+      toast('索引已更新，Agent 可以使用 Public、Data 和你的新私密文件', 'success');
+      return;
+    }
+    toast('正在确认文件变更并更新索引，请稍候...', 'info');
+    await api(`/browse/rebuild/${currentCollection}`, { method: 'POST' });
+    toast('已确认，索引更新完成', 'success');
+  } catch (e) { toast(`确认失败: ${e.message}`, 'error'); }
+}
+
+async function createAgentToken() {
+  try {
+    const data = await api('/me/private/agent-token', { method: 'POST' });
+    document.getElementById('agentTokenValue').value = data.token;
+    document.getElementById('agentTokenExpiry').textContent = `有效至：${new Date(data.expires_at).toLocaleString()}`;
+    const config = {
+      mcpServers: {
+        'rag-personal-knowledge': {
+          command: 'python',
+          args: ['请替换为本机 rag_mcp_proxy.py 的完整路径'],
+          env: {
+            RAG_SERVER_URL: window.location.origin,
+            RAG_AGENT_TOKEN: data.token
+          }
+        }
+      }
+    };
+    currentMcpConfig = JSON.stringify(config, null, 2);
+    document.getElementById('mcpConfigValue').value = currentMcpConfig;
+    showMcpTutorial('trae');
+    document.getElementById('modalAgentToken').classList.add('show');
+  } catch (e) { toast(`生成 Token 失败: ${e.message}`, 'error'); }
+}
+
+async function copyAgentToken() {
+  const value = document.getElementById('agentTokenValue').value;
+  try { await navigator.clipboard.writeText(value); toast('Token 已复制', 'success'); }
+  catch (_) { document.getElementById('agentTokenValue').select(); toast('请手动复制 Token', 'info'); }
+}
+
+function showMcpTutorial(platform) {
+  currentMcpTutorial = platform;
+  const guide = {
+    trae: `<strong>TRAE 配置</strong><br>1. 将 <code>rag_mcp_proxy.py</code> 保存到本机。<br>2. 打开 TRAE 的 MCP 设置，新增一个 stdio MCP 服务。<br>3. 粘贴下方 JSON，替换 <code>args</code> 中的脚本完整路径。<br>4. 保存并重连 MCP。`,
+    workbuddy: `<strong>WorkBuddy 配置</strong><br>1. 将 <code>rag_mcp_proxy.py</code> 保存到本机。<br>2. 在 WorkBuddy 的 MCP / 工具配置中新增本地 stdio 服务。<br>3. 使用下方 JSON 的 <code>command</code>、<code>args</code> 与 <code>env</code>；替换脚本完整路径。<br>4. 保存后重新连接该工具。`,
+    codex: `<strong>Codex 配置</strong><br>1. 将 <code>rag_mcp_proxy.py</code> 保存到本机。<br>2. 在 Codex 的 MCP 设置中新增本地 stdio 服务，命令为 <code>python</code>，参数为脚本完整路径。<br>3. 将下方配置中的两个环境变量填入该服务：<code>RAG_SERVER_URL</code> 与 <code>RAG_AGENT_TOKEN</code>。<br>4. 保存后重启或重连 MCP。`
+  };
+  document.getElementById('mcpTutorial').innerHTML = guide[platform];
+  ['trae', 'workbuddy', 'codex'].forEach(name => {
+    const button = document.getElementById(`tutorial${name === 'workbuddy' ? 'WorkBuddy' : name === 'trae' ? 'Trae' : 'Codex'}`);
+    button.className = name === platform ? 'btn accent' : 'btn';
+  });
+}
+
+async function copyMcpConfig() {
+  const value = document.getElementById('mcpConfigValue').value;
+  try { await navigator.clipboard.writeText(value); toast(`MCP 配置已复制，请按 ${currentMcpTutorial === 'trae' ? 'TRAE' : currentMcpTutorial === 'workbuddy' ? 'WorkBuddy' : 'Codex'} 教程完成设置`, 'success'); }
+  catch (_) { document.getElementById('mcpConfigValue').select(); toast('请手动复制 MCP 配置', 'info'); }
+}
+
+// ========== 弹窗 ==========
+['modalFolder', 'modalRegister', 'modalAgentToken', 'modalDelete'].forEach(id => {
+  document.getElementById(id).addEventListener('click', e => {
+    if (e.target === e.currentTarget) closeModal(id);
+  });
+});
+
+document.getElementById('folderName').addEventListener('keydown', e => {
+  if (e.key === 'Enter') doCreateFolder();
+});
+
+// ========== Toast ==========
+function toast(msg, type) {
+  let stack = document.getElementById('toastStack');
+  if (!stack) {
+    stack = document.createElement('div');
+    stack.id = 'toastStack';
+    stack.className = 'toast-stack';
+    document.body.appendChild(stack);
+  }
+  const t = document.createElement('div');
+  t.className = `toast ${type}`;
+  t.textContent = msg;
+  stack.appendChild(t);
+  setTimeout(() => t.classList.add('leaving'), 2500);
+  setTimeout(() => {
+    t.remove();
+    if (!stack.children.length) stack.remove();
+  }, 2800);
+}
+</script>
+</body>
+</html>

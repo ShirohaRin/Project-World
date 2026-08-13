@@ -1,0 +1,1749 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>原野 · Shiroha领域</title>
+    <style>
+        :root {
+            --loading-bar-height: 6px;
+            --loading-bar-width: 420px;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            width: 100vw;
+            height: 100vh;
+            height: 100dvh;
+            overflow: hidden;
+            font-family: 'PingFang SC', 'Noto Sans SC', 'Microsoft YaHei', 'Helvetica Neue', sans-serif;
+            -webkit-font-smoothing: antialiased;
+            -webkit-tap-highlight-color: transparent;
+            user-select: none;
+            -webkit-user-select: none;
+            cursor: default;
+            background: #0a0a0a;
+        }
+
+        /* ============ 背景层 ============ */
+        .background-layer {
+            position: fixed;
+            inset: 0;
+            z-index: 0;
+            background-color: #3a4d2d;
+            background-size: cover;
+            background-position: center 40%;
+            background-repeat: no-repeat;
+            animation: bgKenBurns 28s ease-in-out infinite alternate;
+        }
+        @keyframes bgKenBurns {
+            0% { transform: scale(1); }
+            100% { transform: scale(1.08); }
+        }
+        .background-overlay {
+            position: fixed;
+            inset: 0;
+            z-index: 1;
+            background: linear-gradient(180deg,
+                    rgba(20, 30, 15, 0.45) 0%,
+                    rgba(25, 35, 18, 0.3) 40%,
+                    rgba(15, 25, 10, 0.5) 100%);
+            pointer-events: none;
+        }
+
+        /* ============ 粒子微尘 ============ */
+        .dust-particles {
+            position: fixed;
+            inset: 0;
+            z-index: 2;
+            pointer-events: none;
+            opacity: 0.5;
+        }
+        .dust-particle {
+            position: absolute;
+            width: 2px;
+            height: 2px;
+            background: rgba(255, 240, 210, 0.7);
+            border-radius: 50%;
+            animation: floatUp var(--dur) ease-in infinite;
+            animation-delay: var(--delay);
+            bottom: -10px;
+            left: var(--x);
+            opacity: 0;
+        }
+        @keyframes floatUp {
+            0% { transform: translateY(0) translateX(0); opacity: 0; }
+            10% { opacity: 0.8; }
+            80% { opacity: 0.3; }
+            100% { transform: translateY(-105vh) translateX(var(--drift)); opacity: 0; }
+        }
+
+        /* ============ 加载界面层 ============ */
+        .loading-layer {
+            position: fixed;
+            inset: 0;
+            z-index: 10;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            transition: opacity 0.7s ease, visibility 0.7s ease;
+            pointer-events: none;
+        }
+        .loading-layer.fade-out {
+            opacity: 0;
+            visibility: hidden;
+        }
+        .loading-layer.float-away {
+            animation: loadingFloatAway 1.2s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+        }
+        @keyframes loadingFloatAway {
+            0% { transform: translateY(0); opacity: 1; }
+            20% { transform: translateY(-12px); opacity: 1; }
+            100% { transform: translateY(40px); opacity: 0; }
+        }
+        .loading-bar-wrapper {
+            width: var(--loading-bar-width);
+            max-width: 78vw;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 18px;
+        }
+        .loading-hint {
+            font-size: 0.95rem;
+            letter-spacing: 0.15em;
+            color: rgba(255, 255, 255, 0.75);
+            font-weight: 300;
+            text-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+        }
+        .progress-track {
+            width: 100%;
+            height: var(--loading-bar-height);
+            background: rgba(255, 255, 255, 0.18);
+            border-radius: 20px;
+            overflow: hidden;
+            backdrop-filter: blur(4px);
+            box-shadow: inset 0 1px 2px rgba(0,0,0,0.3), 0 2px 8px rgba(0,0,0,0.25);
+        }
+        .progress-fill {
+            height: 100%;
+            width: 0%;
+            border-radius: 20px;
+            background: linear-gradient(90deg, #c9973a, #e0b854, #f0d078, #e8c45a, #d4a843);
+            background-size: 200% 100%;
+            transition: width 0.08s linear;
+            box-shadow: 0 0 18px rgba(228,180,70,0.5);
+            animation: shimmer 2.2s ease-in-out infinite;
+        }
+        @keyframes shimmer {
+            0%, 100% { background-position: 0% 50%; }
+            50% { background-position: 100% 50%; }
+        }
+        .progress-percentage {
+            font-size: 1.1rem;
+            color: rgba(255,255,255,0.85);
+            font-family: 'SF Mono', 'JetBrains Mono', monospace;
+            text-shadow: 0 1px 4px rgba(0,0,0,0.5);
+        }
+        .progress-percentage.complete {
+            color: #f0d078;
+            animation: pulseComplete 0.6s ease-in-out 3;
+        }
+        @keyframes pulseComplete {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        /* ============ 交互层（中央欢迎 + 输入框） ============ */
+        .interaction-layer {
+            position: fixed;
+            inset: 0;
+            z-index: 9;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            opacity: 0;
+            visibility: hidden;
+            transition: opacity 0.6s ease;
+            pointer-events: none;
+        }
+        .interaction-layer.visible {
+            opacity: 1;
+            visibility: visible;
+            pointer-events: auto;
+        }
+        .center-content {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 15px;
+            text-align: center;
+            position: relative;
+        }
+        .center-greeting {
+            font-size: clamp(1.8rem, 4vw, 2.8rem);
+            font-weight: 500;
+            letter-spacing: 0.06em;
+            color: #ffffff;
+            text-shadow: 0 2px 12px rgba(0,0,0,0.55), 0 0 60px rgba(240,210,130,0.3);
+            transition: opacity 0.6s ease;
+        }
+        .shiroha-brand {
+            color: #c084fc;
+            font-weight: 600;
+            text-shadow: 0 0 12px #a855f7, 0 0 28px #7e22ce, 0 0 50px #6b21a8;
+            transition: opacity 0.6s ease;
+            display: inline-block;
+        }
+        .wave-char {
+            display: inline-block;
+            animation: waveFloat 2.5s ease-in-out infinite;
+        }
+        @keyframes waveFloat {
+            0%, 100% { transform: translateY(0); }
+            50% { transform: translateY(-6px); }
+        }
+        .username-display {
+            color: #f0d078;
+            font-weight: 600;
+            text-shadow: 0 0 18px rgba(240, 208, 120, 0.7);
+        }
+        .center-divider {
+            width: 60px;
+            height: 2px;
+            background: rgba(240, 208, 120, 0.5);
+            border-radius: 2px;
+            opacity: 0;
+            transform: scaleX(0);
+            transition: opacity 0.6s ease 0.5s, transform 0.7s ease 0.5s;
+        }
+        .center-content.visible-content .center-divider {
+            opacity: 1;
+            transform: scaleX(1);
+        }
+        .input-group {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 12px;
+            width: 100%;
+            max-width: 300px;
+            opacity: 0;
+            transform: translateY(10px);
+            transition: opacity 0.6s ease 0.8s, transform 0.6s ease 0.8s;
+        }
+        .center-content.visible-content .input-group {
+            opacity: 1;
+            transform: translateY(0);
+        }
+        .username-input {
+            width: 100%;
+            padding: 12px 16px;
+            font-size: 1rem;
+            background: rgba(255, 255, 255, 0.08);
+            border: 1px solid rgba(255, 255, 255, 0.25);
+            border-radius: 30px;
+            color: #fff;
+            outline: none;
+            backdrop-filter: blur(6px);
+            transition: border-color 0.3s;
+        }
+        .username-input::placeholder {
+            color: rgba(255, 255, 255, 0.35);
+            font-weight: 300;
+        }
+        .username-input:focus {
+            border-color: rgba(192, 132, 252, 0.6);
+            background: rgba(255, 255, 255, 0.12);
+            box-shadow: 0 0 15px rgba(168, 85, 247, 0.3);
+        }
+        .confirm-btn {
+            padding: 8px 28px;
+            border-radius: 30px;
+            border: 1px solid rgba(255, 255, 255, 0.4);
+            background: rgba(20, 20, 15, 0.45);
+            backdrop-filter: blur(10px);
+            color: rgba(255, 255, 255, 0.9);
+            font-size: 0.95rem;
+            letter-spacing: 0.1em;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+        .confirm-btn:hover {
+            border-color: rgba(240, 200, 100, 0.6);
+            background: rgba(30, 30, 20, 0.65);
+            box-shadow: 0 0 20px rgba(240, 200, 100, 0.2);
+        }
+
+        /* ============ 主内容层（毛玻璃卡片布局） ============ */
+        .main-layer {
+            position: fixed;
+            inset: 0;
+            z-index: 8;
+            display: flex;
+            gap: 16px;
+            padding: clamp(130px, 16vh, 160px) clamp(24px, 4vw, 48px) clamp(20px, 3vh, 32px);
+            opacity: 0;
+            visibility: hidden;
+            transition: opacity 0.8s ease 0.3s, visibility 0.8s ease 0.3s;
+            pointer-events: none;
+        }
+        .main-layer.visible {
+            opacity: 1;
+            visibility: visible;
+            pointer-events: auto;
+        }
+        .left-col {
+            flex: 1 1 65%;
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+            min-width: 0;
+        }
+        .right-col {
+            flex: 0 0 340px;
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+        }
+        .bottom-row {
+            display: flex;
+            gap: 16px;
+            flex: 0 0 auto;
+        }
+        .bottom-row > .glass-card {
+            flex: 1;
+        }
+        .top-stack {
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+            flex: 1;
+        }
+        .top-stack > .glass-card {
+            flex: 1;
+        }
+
+        /* 玻璃卡片 */
+        .glass-card {
+            background: rgba(30, 35, 25, 0.55);
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            border-radius: 18px;
+            border: 1px solid rgba(255, 255, 255, 0.15);
+            padding: 20px;
+            color: #eae6d9;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
+            transition: transform 0.3s ease, box-shadow 0.3s ease, border-color 0.3s;
+            cursor: pointer;
+        }
+        /* 悬停效果：放大+蓝色发光边框 */
+        .glass-card:hover {
+            transform: scale(1.02);
+            border-color: rgba(100, 180, 255, 0.7);
+            box-shadow: 0 0 20px rgba(100, 180, 255, 0.4), 0 8px 28px rgba(0, 0, 0, 0.35);
+        }
+        .card-header {
+            font-size: 1rem;
+            font-weight: 600;
+            letter-spacing: 0.05em;
+            color: #d4c9a8;
+            margin-bottom: 12px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+            padding-bottom: 8px;
+        }
+        .card-placeholder {
+            flex: 1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: rgba(255, 255, 255, 0.45);
+            font-size: 0.95rem;
+            letter-spacing: 0.04em;
+        }
+
+        /* 音乐播放器内嵌 */
+        .music-player {
+            flex: 1;
+            display: flex;
+            align-items: center;
+            gap: 14px;
+            min-height: 0;
+        }
+        .music-player-btn {
+            flex-shrink: 0;
+            width: 44px;
+            height: 44px;
+            border-radius: 50%;
+            border: 1.5px solid rgba(255, 255, 255, 0.3);
+            background: rgba(255, 255, 255, 0.08);
+            color: #fff;
+            font-size: 1.2rem;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.3s;
+            backdrop-filter: blur(6px);
+            outline: none;
+            padding: 0;
+        }
+        .music-player-btn:hover {
+            border-color: rgba(240, 208, 120, 0.6);
+            background: rgba(255, 255, 255, 0.15);
+            box-shadow: 0 0 14px rgba(240, 200, 100, 0.25);
+        }
+        .music-player-btn.playing {
+            border-color: rgba(240, 208, 120, 0.6);
+            box-shadow: 0 0 16px rgba(240, 200, 100, 0.35);
+            animation: bgmPulse 2.8s infinite;
+        }
+        .music-player-info {
+            flex: 1;
+            min-width: 0;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+        .music-player-title {
+            font-size: 0.9rem;
+            color: #e0d6b8;
+            font-weight: 500;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .music-player-progress {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .music-player-track {
+            flex: 1;
+            height: 4px;
+            background: rgba(255, 255, 255, 0.15);
+            border-radius: 2px;
+            overflow: hidden;
+        }
+        .music-player-fill {
+            height: 100%;
+            width: 0%;
+            border-radius: 2px;
+            background: linear-gradient(90deg, #c9973a, #e0b854, #f0d078);
+            transition: width 0.3s linear;
+        }
+        .music-player-time {
+            font-size: 0.7rem;
+            color: rgba(255, 255, 255, 0.5);
+            font-family: 'SF Mono', 'JetBrains Mono', monospace;
+            flex-shrink: 0;
+            min-width: 36px;
+            text-align: right;
+        }
+        .music-visualizer {
+            width: 100%;
+            height: 36px;
+            border-radius: 4px;
+            opacity: 0.5;
+            transition: opacity 0.3s;
+        }
+        .music-visualizer.active {
+            opacity: 0.85;
+        }
+
+        /* 唱片样式 */
+        .vinyl-record {
+            position: relative;
+            width: 200px;
+            height: 200px;
+            flex-shrink: 0;
+        }
+        .vinyl-disc {
+            width: 100%;
+            height: 100%;
+            border-radius: 50%;
+            background: radial-gradient(circle at center,
+                #1a1a1a 0%,
+                #1a1a1a 16%,
+                #2a2a2a 16.5%,
+                #1a1a1a 17%,
+                #2a2a2a 17.5%,
+                #1a1a1a 18%,
+                #2a2a2a 18.5%,
+                #1a1a1a 19%,
+                #2a2a2a 19.5%,
+                #1a1a1a 20%,
+                #252525 25%,
+                #1a1a1a 30%,
+                #252525 35%,
+                #1a1a1a 40%,
+                #222222 50%,
+                #1a1a1a 60%,
+                #222222 70%,
+                #1a1a1a 80%,
+                #1a1a1a 100%
+            );
+            box-shadow: 0 8px 40px rgba(0,0,0,0.5), 0 0 0 4px rgba(40,40,40,0.8);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            animation: vinylSpin 4s linear infinite;
+            animation-play-state: paused;
+        }
+        .vinyl-disc.spinning {
+            animation-play-state: running;
+        }
+        @keyframes vinylSpin {
+            from { transform: rotate(0deg); }
+            to { transform: rotate(360deg); }
+        }
+        .vinyl-cover {
+            width: 56%;
+            height: 56%;
+            border-radius: 50%;
+            object-fit: cover;
+            position: relative;
+            z-index: 1;
+            box-shadow: 0 0 0 3px rgba(0,0,0,0.6);
+        }
+        .vinyl-center {
+            position: absolute;
+            width: 14%;
+            height: 14%;
+            border-radius: 50%;
+            background: #333;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            z-index: 2;
+            box-shadow: inset 0 1px 3px rgba(255,255,255,0.1);
+        }
+        .vinyl-center::after {
+            content: '';
+            position: absolute;
+            width: 35%;
+            height: 35%;
+            border-radius: 50%;
+            background: #555;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+        }
+
+        /* 左上仪表盘 */
+        .main-dashboard {
+            flex: 2;
+            min-height: 200px;
+        }
+        .dashboard-body {
+            font-size: 1.1rem;
+            line-height: 1.8;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        .date-time {
+            font-size: 1.2rem;
+            font-weight: 500;
+            color: #f0d78c;
+            text-shadow: 0 0 12px rgba(240, 210, 130, 0.4);
+        }
+        .weather-row {
+            display: flex;
+            align-items: baseline;
+            gap: 12px;
+        }
+        .weather-icon { font-size: 2rem; }
+        .temperature { font-size: 2.4rem; font-weight: 300; color: #fff; }
+        .weather-desc { font-size: 1rem; color: #c0b69c; }
+        .recent-activity p {
+            margin: 4px 0;
+            font-size: 0.9rem;
+            color: #b8b08a;
+        }
+
+        @media (max-width: 768px) {
+            .main-layer {
+                flex-direction: column;
+                padding: 120px 16px 16px;
+            }
+            .right-col {
+                flex: 0 0 auto;
+                width: 100%;
+            }
+            .bottom-row {
+                flex-direction: column;
+            }
+        }
+
+        /* ============ 全屏覆盖层 ============ */
+        .fullscreen-overlay {
+            position: fixed;
+            inset: 0;
+            z-index: 200;
+            background: rgba(10, 15, 10, 0.92);
+            backdrop-filter: blur(20px);
+            display: flex;
+            flex-direction: column;
+            opacity: 0;
+            visibility: hidden;
+            transition: opacity 0.4s ease, visibility 0.4s ease;
+            pointer-events: none;
+        }
+        .fullscreen-overlay.active {
+            opacity: 1;
+            visibility: visible;
+            pointer-events: auto;
+        }
+        .fullscreen-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 20px 30px;
+            border-bottom: 1px solid rgba(255,255,255,0.15);
+        }
+        .fullscreen-title {
+            font-size: 1.6rem;
+            color: #f0d78c;
+            font-weight: 600;
+        }
+        .fullscreen-close {
+            width: 44px;
+            height: 44px;
+            border-radius: 50%;
+            border: 1px solid rgba(255,255,255,0.3);
+            background: rgba(255,255,255,0.08);
+            color: white;
+            font-size: 1.5rem;
+            cursor: pointer;
+            transition: all 0.3s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .fullscreen-close:hover {
+            background: rgba(255,100,100,0.3);
+            border-color: #ff6b6b;
+        }
+        .fullscreen-body {
+            flex: 1;
+            padding: 30px;
+            overflow-y: auto;
+            color: #ddd;
+            font-size: 1.1rem;
+            line-height: 1.8;
+        }
+
+        /* ============ BGM 开关按钮 ============ */
+        .bgm-toggle {
+            position: fixed;
+            bottom: clamp(20px, 4vh, 36px);
+            right: clamp(20px, 4vw, 36px);
+            z-index: 100;
+            width: 52px;
+            height: 52px;
+            border-radius: 50%;
+            border: 1.5px solid rgba(255, 255, 255, 0.35);
+            background: rgba(20, 20, 15, 0.55);
+            backdrop-filter: blur(12px);
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.35s;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+            outline: none;
+            font-size: 1.5rem;
+            color: white;
+        }
+        .bgm-toggle:hover {
+            border-color: rgba(255, 255, 255, 0.6);
+            background: rgba(30, 30, 20, 0.7);
+            transform: translateY(-2px);
+        }
+        .bgm-toggle.active {
+            border-color: rgba(240, 208, 120, 0.6);
+            animation: bgmPulse 2.8s infinite;
+        }
+        @keyframes bgmPulse {
+            0%,100%{ box-shadow: 0 4px 22px rgba(0,0,0,0.35); }
+            50%{ box-shadow: 0 4px 26px rgba(240,200,100,0.5); }
+        }
+
+        /* ============ 文件管理入口 ============ */
+        .file-manager-btn {
+            position: fixed;
+            top: clamp(20px, 4vh, 36px);
+            right: clamp(20px, 4vw, 36px);
+            z-index: 100;
+            width: 52px;
+            height: 52px;
+            border-radius: 50%;
+            border: 1.5px solid rgba(255, 255, 255, 0.35);
+            background: rgba(20, 20, 30, 0.55);
+            backdrop-filter: blur(12px);
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.35s;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+            outline: none;
+            font-size: 1.4rem;
+            color: white;
+            text-decoration: none;
+        }
+        .file-manager-btn:hover {
+            border-color: rgba(124, 138, 255, 0.6);
+            background: rgba(25, 25, 40, 0.7);
+            transform: translateY(-2px);
+            box-shadow: 0 6px 24px rgba(124, 138, 255, 0.25);
+        }
+        .file-manager-btn:hover::after {
+            content: '文件管理';
+            position: absolute;
+            top: -32px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(0,0,0,0.8);
+            color: #ccc;
+            font-size: 0.7rem;
+            padding: 3px 10px;
+            border-radius: 8px;
+            white-space: nowrap;
+            pointer-events: none;
+        }
+
+        @media (max-width: 640px) {
+            :root { --loading-bar-width: 82vw; }
+            .bgm-toggle { width:44px; height:44px; font-size:1.2rem; }
+            .file-manager-btn { width:44px; height:44px; font-size:1.1rem; }
+        }
+    </style>
+</head>
+<body>
+    <div class="background-layer" id="backgroundLayer"></div>
+    <div class="background-overlay"></div>
+    <div class="dust-particles" id="dustParticles"></div>
+
+    <!-- 加载界面 -->
+    <div class="loading-layer" id="loadingLayer">
+        <div class="loading-bar-wrapper">
+            <span class="loading-hint" id="loadingHint">正在加载中...</span>
+            <div class="progress-track"><div class="progress-fill" id="progressFill"></div></div>
+            <span class="progress-percentage" id="progressPercentage">0%</span>
+        </div>
+    </div>
+
+    <!-- 中央交互层 -->
+    <div class="interaction-layer" id="interactionLayer">
+        <div class="center-content" id="centerContent">
+            <h1 class="center-greeting" id="centerGreeting">
+                欢迎访问—<span class="shiroha-brand">Shiroha领域</span>
+            </h1>
+            <div class="center-divider"></div>
+            <div class="input-group" id="inputGroup">
+                <input type="text" class="username-input" id="usernameInput" placeholder="您希望我们如何称呼您" maxlength="20">
+                <button class="confirm-btn" id="confirmBtn">进入</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 主内容层（毛玻璃卡片） -->
+    <div class="main-layer" id="mainLayer">
+        <div class="left-col">
+            <div class="glass-card main-dashboard" id="dashboardCard">
+                <div class="card-header">📅 今日概览</div>
+                <div class="dashboard-body">
+                    <div class="date-time" id="dateDisplay">2026年5月13日 星期三</div>
+                    <div class="weather-row" id="weatherDisplay">
+                        <span class="weather-icon">☁️</span>
+                        <span class="temperature">18°C</span>
+                        <span class="weather-desc">多云</span>
+                    </div>
+                    <div class="recent-activity" id="recentActivity">
+                        <p>🌸 最近更新：个人作品集 V2.3</p>
+                        <p>📝 新日志：《夏夜与代码》</p>
+                    </div>
+                </div>
+            </div>
+            <div class="bottom-row">
+                <div class="glass-card artwork-card" id="artworkCard">
+                    <div class="card-header">🎨 艺术作品</div>
+                    <div class="card-placeholder">作品预览</div>
+                </div>
+                <div class="glass-card about-card" id="aboutCard">
+                    <div class="card-header">🧑‍💻 关于本人</div>
+                    <div class="card-placeholder">个人简介</div>
+                </div>
+            </div>
+        </div>
+        <div class="right-col">
+            <div class="top-stack">
+                <div class="glass-card fortune-card" id="fortuneCard">
+                    <div class="card-header">🔮 今日运势</div>
+                    <div class="card-placeholder">点击抽取运势签</div>
+                </div>
+                <div class="glass-card music-card" id="musicCard">
+                    <div class="card-header">🎵 此刻音乐</div>
+                    <div class="music-player" id="musicPlayer">
+                        <button class="music-player-btn" id="musicPlayerBtn" title="播放/暂停">▶️</button>
+                        <div class="music-player-info">
+                            <div class="music-player-title" id="musicPlayerTitle"></div>
+                            <div class="music-player-progress">
+                                <div class="music-player-track">
+                                    <div class="music-player-fill" id="musicPlayerFill"></div>
+                                </div>
+                                <span class="music-player-time" id="musicPlayerTime">00:00</span>
+                            </div>
+                            <canvas class="music-visualizer" id="musicVisualizer"></canvas>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="bottom-row">
+                <div class="glass-card game-card" id="gameCard">
+                    <div class="card-header">🕹️ 小游戏</div>
+                    <div class="card-placeholder">像素贪吃蛇</div>
+                </div>
+                <div class="glass-card tools-card" id="toolsCard">
+                    <div class="card-header">🔧 工具栏</div>
+                    <div class="card-placeholder">常用链接</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- BGM 切换 -->
+    <button class="bgm-toggle" id="bgmToggle" title="背景音乐开关">🔇</button>
+
+    <!-- 文件管理入口 -->
+    <a class="file-manager-btn" id="fileManagerBtn" href="./public/file-manager/index.html" title="文件管理">📂</a>
+
+    <!-- 全屏覆盖层 -->
+    <div class="fullscreen-overlay" id="fullscreenOverlay">
+        <div class="fullscreen-header">
+            <span class="fullscreen-title" id="fullscreenTitle"></span>
+            <button class="fullscreen-close" id="fullscreenClose">✕</button>
+        </div>
+        <div class="fullscreen-body" id="fullscreenBody"></div>
+    </div>
+
+    <script src="./resource/music-config.js"></script>
+    <script>
+        (function() {
+            // ==================== DOM 元素 ====================
+            const loadingLayer = document.getElementById('loadingLayer');
+            const progressFill = document.getElementById('progressFill');
+            const progressPercentage = document.getElementById('progressPercentage');
+            const loadingHint = document.getElementById('loadingHint');
+            const interactionLayer = document.getElementById('interactionLayer');
+            const centerContent = document.getElementById('centerContent');
+            const centerGreeting = document.getElementById('centerGreeting');
+            const inputGroup = document.getElementById('inputGroup');
+            const usernameInput = document.getElementById('usernameInput');
+            const confirmBtn = document.getElementById('confirmBtn');
+            const bgmToggle = document.getElementById('bgmToggle');
+            const fileManagerBtn = document.getElementById('fileManagerBtn');
+            const musicPlayerBtn = document.getElementById('musicPlayerBtn');
+            const musicPlayerFill = document.getElementById('musicPlayerFill');
+            const musicPlayerTime = document.getElementById('musicPlayerTime');
+            const dustContainer = document.getElementById('dustParticles');
+            const backgroundLayer = document.getElementById('backgroundLayer');
+            const centerDivider = document.querySelector('.center-divider');
+            const mainLayer = document.getElementById('mainLayer');
+
+            // 全屏相关元素
+            const fullscreenOverlay = document.getElementById('fullscreenOverlay');
+            const fullscreenTitle = document.getElementById('fullscreenTitle');
+            const fullscreenBody = document.getElementById('fullscreenBody');
+            const fullscreenClose = document.getElementById('fullscreenClose');
+
+            // ==================== 资源配置 ====================
+            const BACKGROUND_PATHS = [
+                './resource/images/bg1.jpg',
+                './resource/images/bg2.jpg',
+                './resource/images/bg3.jpg',
+                './resource/images/bg4.jpg'
+            ];
+            const BGM_URL = getCurrentTrack().url;
+            // 音乐封面路径
+            const BGM_COVER = getCurrentTrack().cover;
+            const BGM_TITLE = getCurrentTrack().title;
+            musicPlayerTitle.textContent = BGM_TITLE;
+            backgroundLayer.style.backgroundImage = `url('${BACKGROUND_PATHS[Math.floor(Math.random() * BACKGROUND_PATHS.length)]}')`;
+
+            // 特殊用户名颜色表
+            const specialColors = {
+                'SRH': '#c084fc',
+                'Shiroha Rin': '#c084fc',
+                'Shiroha Nao': '#ffffff',
+                'IDEA': '#3b82f6',
+                'Hoshina': '#ef4444',
+                'Shiroha Hoshina': '#ef4444'
+            };
+
+            // ==================== BGM 控制 ====================
+            let bgmAudio = null, bgmEnabled = false, bgmActuallyPlaying = false;
+            let progressInterval = null;
+
+            function formatTime(seconds) {
+                const m = Math.floor(seconds / 60);
+                const s = Math.floor(seconds % 60);
+                return m + ':' + (s < 10 ? '0' : '') + s;
+            }
+
+            function updateProgress() {
+                if (!bgmAudio || !bgmActuallyPlaying) return;
+                const pct = bgmAudio.duration ? (bgmAudio.currentTime / bgmAudio.duration * 100) : 0;
+                musicPlayerFill.style.width = pct + '%';
+                musicPlayerTime.textContent = formatTime(bgmAudio.currentTime);
+            }
+
+            function startProgressInterval() {
+                stopProgressInterval();
+                progressInterval = setInterval(updateProgress, 500);
+            }
+
+            function stopProgressInterval() {
+                if (progressInterval) { clearInterval(progressInterval); progressInterval = null; }
+            }
+
+            function startBGM() {
+                if (!bgmAudio) { bgmAudio = new Audio(BGM_URL); bgmAudio.loop = true; bgmAudio.volume = 0.4; }
+                bgmAudio.play().then(() => {
+                    bgmActuallyPlaying = true;
+                    updateBgmUI();
+                    startProgressInterval();
+                    startVisualizer();
+                }).catch(() => {
+                    bgmActuallyPlaying = false;
+                    updateBgmUI();
+                });
+            }
+
+            function stopBGM() {
+                if (bgmAudio) { bgmAudio.pause(); bgmAudio.currentTime = 0; }
+                bgmActuallyPlaying = false;
+                stopProgressInterval();
+                stopVisualizer();
+                updateBgmUI();
+            }
+
+            function updateBgmUI() {
+                bgmToggle.textContent = bgmActuallyPlaying ? '🔊' : '🔇';
+                bgmToggle.classList.toggle('active', bgmActuallyPlaying);
+                musicPlayerBtn.textContent = bgmActuallyPlaying ? '⏸️' : '▶️';
+                musicPlayerBtn.classList.toggle('playing', bgmActuallyPlaying);
+                const fsBtn = document.getElementById('fullscreenBgmBtn');
+                if (fsBtn) fsBtn.textContent = bgmActuallyPlaying ? '⏸️' : '▶️';
+                const vinylDisc = document.getElementById('vinylDisc');
+                if (vinylDisc) vinylDisc.classList.toggle('spinning', bgmActuallyPlaying);
+                if (!bgmActuallyPlaying) {
+                    musicPlayerFill.style.width = '0%';
+                    musicPlayerTime.textContent = '00:00';
+                }
+            }
+
+            function toggleBGM() {
+                if (bgmActuallyPlaying) { bgmEnabled = false; stopBGM(); } else { bgmEnabled = true; startBGM(); }
+            }
+
+            bgmToggle.addEventListener('click', (e) => {
+                e.stopPropagation();
+                toggleBGM();
+            });
+
+            musicPlayerBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                toggleBGM();
+            });
+
+            document.addEventListener('click', () => { if (bgmEnabled && !bgmActuallyPlaying && bgmAudio) startBGM(); }, { passive: true });
+
+            // ==================== 音频可视化 ====================
+            let audioCtx = null, analyser = null, visSource = null, visAnimId = null;
+            const visCanvas = document.getElementById('musicVisualizer');
+            const visCtx = visCanvas.getContext('2d');
+
+            function initAudioContext() {
+                if (audioCtx) return;
+                audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                analyser = audioCtx.createAnalyser();
+                analyser.fftSize = 128;
+                analyser.smoothingTimeConstant = 0.85;
+                if (bgmAudio) {
+                    visSource = audioCtx.createMediaElementSource(bgmAudio);
+                    visSource.connect(analyser);
+                    analyser.connect(audioCtx.destination);
+                }
+            }
+
+            function drawBars(canvas, analyser) {
+                if (!canvas || !canvas.isConnected) return;
+                const dpr = window.devicePixelRatio || 1;
+                const rect = canvas.getBoundingClientRect();
+                const w = rect.width * dpr;
+                const h = rect.height * dpr;
+                if (canvas.width !== w || canvas.height !== h) {
+                    canvas.width = w;
+                    canvas.height = h;
+                }
+                const ctx = canvas.getContext('2d');
+
+                const bufferLength = analyser.frequencyBinCount;
+                const dataArray = new Uint8Array(bufferLength);
+                analyser.getByteFrequencyData(dataArray);
+
+                ctx.clearRect(0, 0, w, h);
+
+                const barCount = 32;
+                const step = Math.floor(bufferLength / barCount);
+                const barWidth = (w / barCount) * 0.7;
+                const gap = (w / barCount) * 0.3;
+                const centerY = h / 2;
+
+                for (let i = 0; i < barCount; i++) {
+                    let sum = 0;
+                    for (let j = 0; j < step; j++) {
+                        sum += dataArray[i * step + j];
+                    }
+                    const avg = sum / step;
+                    const barHeight = (avg / 255) * h * 0.9;
+                    const x = i * (barWidth + gap) + gap / 2;
+
+                    const gradient = ctx.createLinearGradient(x, centerY - barHeight / 2, x, centerY + barHeight / 2);
+                    const alpha = 0.5 + (avg / 255) * 0.5;
+                    gradient.addColorStop(0, 'rgba(240,200,120,' + alpha + ')');
+                    gradient.addColorStop(0.5, 'rgba(220,170,80,' + (alpha * 0.9) + ')');
+                    gradient.addColorStop(1, 'rgba(240,200,120,' + alpha + ')');
+
+                    ctx.fillStyle = gradient;
+                    ctx.fillRect(x, centerY - barHeight / 2, barWidth, Math.max(barHeight, 2));
+                }
+            }
+
+            function drawVisualizer() {
+                if (!analyser) {
+                    visAnimId = requestAnimationFrame(drawVisualizer);
+                    return;
+                }
+
+                drawBars(visCanvas, analyser);
+                const fsCanvas = document.getElementById('fullscreenVisualizer');
+                if (fsCanvas) drawBars(fsCanvas, analyser);
+
+                visAnimId = requestAnimationFrame(drawVisualizer);
+            }
+
+            function startVisualizer() {
+                initAudioContext();
+                if (audioCtx.state === 'suspended') audioCtx.resume();
+                visCanvas.classList.add('active');
+                if (!visAnimId) {
+                    visAnimId = requestAnimationFrame(drawVisualizer);
+                }
+            }
+
+            function stopVisualizer() {
+                visCanvas.classList.remove('active');
+                if (visAnimId) {
+                    cancelAnimationFrame(visAnimId);
+                    visAnimId = null;
+                }
+                visCtx.clearRect(0, 0, visCanvas.width, visCanvas.height);
+            }
+
+            drawVisualizer();
+
+            // ==================== 粒子 ====================
+            function createDust() {
+                let html = '';
+                for (let i = 0; i < 30; i++) {
+                    html += `<div class="dust-particle" style="--x:${Math.random()*100}%;--dur:${8+Math.random()*18}s;--delay:${Math.random()*20}s;--drift:${(Math.random()-0.5)*120}px;width:${1+Math.random()*2.5}px;opacity:${0.25+Math.random()*0.55};"></div>`;
+                }
+                dustContainer.innerHTML = html;
+            }
+            createDust();
+
+            // ==================== 加载进度模拟 ====================
+            const nodes = [
+                { t:0, p:0, h:'正在初始化...' },{ t:380, p:10, h:'正在加载资源...' },{ t:750, p:18, h:'正在加载资源...' },
+                { t:1150, p:24, h:'解析场景数据...' },{ t:1550, p:28, h:'解析场景数据...' },{ t:1950, p:30, h:'准备环境音效...' },
+                { t:2250, p:30, h:'准备环境音效...' },{ t:2750, p:30, h:'校准音频引擎...' },{ t:3150, p:36, h:'加载地形纹理...' },
+                { t:3550, p:44, h:'加载地形纹理...' },{ t:3950, p:52, h:'构建植被系统...' },{ t:4350, p:59, h:'构建植被系统...' },
+                { t:4750, p:64, h:'计算光照阴影...' },{ t:5150, p:67, h:'计算光照阴影...' },{ t:5550, p:67, h:'优化渲染管线...' },
+                { t:6150, p:67, h:'优化渲染管线...' },{ t:6550, p:74, h:'生成远景细节...' },{ t:6950, p:82, h:'生成远景细节...' },
+                { t:7350, p:89, h:'最终校验中...' },{ t:7750, p:94, h:'最终校验中...' },{ t:8150, p:96, h:'即将完成...' },
+                { t:8550, p:96, h:'即将完成...' },{ t:9150, p:96, h:'即将完成...' },{ t:9550, p:99, h:'准备就绪...' },{ t:10000, p:100, h:'完成！' }
+            ];
+            let rafId, startTime, bgmTriggered = false, loadingComplete = false;
+            let specialAnimating = false;
+
+            function getProgress(ms) {
+                if (ms <= nodes[0].t) return { p: nodes[0].p, h: nodes[0].h };
+                if (ms >= nodes[nodes.length-1].t) return { p:100, h:'完成！' };
+                for (let i=0; i<nodes.length-1; i++) {
+                    const c = nodes[i], n = nodes[i+1];
+                    if (ms >= c.t && ms < n.t) {
+                        const s = (ms-c.t)/(n.t-c.t);
+                        return { p: Math.round((c.p+(n.p-c.p)*s)*100)/100, h: s>0.5? n.h: c.h };
+                    }
+                }
+                return { p:100, h:'完成！' };
+            }
+
+            function update(ts) {
+                if (!startTime) startTime = ts;
+                const { p, h } = getProgress(ts-startTime);
+                progressFill.style.width = p+'%';
+                progressPercentage.textContent = Math.round(p)+'%';
+                loadingHint.textContent = h;
+                if (!bgmTriggered && p>=30) { bgmTriggered=true; bgmEnabled=true; startBGM(); }
+                if (p>=100 && !loadingComplete) { loadingComplete=true; progressPercentage.classList.add('complete'); onLoaded(); }
+                return p<100;
+            }
+
+            function animate(ts) { if (update(ts)) rafId = requestAnimationFrame(animate); }
+
+            // 天气图标映射与描述
+            const weatherIconMap = {
+                0: '☀️', 1: '🌤️', 2: '⛅', 3: '☁️', 45: '🌫️', 48: '🌫️',
+                51: '🌧️', 53: '🌧️', 55: '🌧️', 61: '🌧️', 63: '🌧️', 65: '🌧️',
+                71: '❄️', 73: '❄️', 75: '❄️', 77: '❄️', 80: '🌦️', 81: '🌦️', 82: '🌦️',
+                95: '⛈️', 96: '⛈️', 99: '⛈️'
+            };
+            function getWeatherDesc(code) {
+                const map = {
+                    0: '晴朗', 1: '大部晴朗', 2: '局部多云', 3: '多云',
+                    45: '雾', 48: '沉积雾',
+                    51: '小毛毛雨', 53: '毛毛雨', 55: '大毛毛雨',
+                    61: '小雨', 63: '中雨', 65: '大雨',
+                    71: '小雪', 73: '中雪', 75: '大雪',
+                    77: '雪粒', 80: '小阵雨', 81: '中阵雨', 82: '大阵雨',
+                    95: '雷暴', 96: '冰雹雷暴', 99: '强冰雹雷暴'
+                };
+                return map[code] || '未知';
+            }
+
+            // 更新仪表盘
+            async function updateDashboard() {
+                const dateEl = document.getElementById('dateDisplay');
+                const weatherIconEl = document.querySelector('.weather-icon');
+                const tempEl = document.querySelector('.temperature');
+                const descEl = document.querySelector('.weather-desc');
+                const activityEl = document.getElementById('recentActivity');
+
+                const now = new Date();
+                const weekdays = ['日', '一', '二', '三', '四', '五', '六'];
+                dateEl.textContent = `${now.getFullYear()}年${now.getMonth()+1}月${now.getDate()}日 星期${weekdays[now.getDay()]}`;
+
+                try {
+                    const ipRes = await fetch('https://ipapi.co/json/');
+                    if (!ipRes.ok) throw new Error('IP定位失败');
+                    const ipData = await ipRes.json();
+                    const { city, latitude, longitude } = ipData;
+
+                    const weatherRes = await fetch(
+                        `https://api.open-meteo.com/v1/forecast?latitude=${latitude}&longitude=${longitude}&current_weather=true&timezone=auto`
+                    );
+                    if (!weatherRes.ok) throw new Error('天气数据获取失败');
+                    const weatherData = await weatherRes.json();
+                    const current = weatherData.current_weather;
+                    const temp = Math.round(current.temperature);
+                    const code = current.weathercode;
+                    const icon = weatherIconMap[code] || '🌡️';
+                    const desc = getWeatherDesc(code);
+
+                    weatherIconEl.textContent = icon;
+                    tempEl.textContent = `${temp}°C`;
+                    descEl.textContent = desc;
+                    activityEl.innerHTML = `<p>📍 ${city || '未知城市'}</p><p>🌸 最近更新：个人作品集 V2.3</p><p>📝 新日志：《夏夜与代码》</p>`;
+                } catch (err) {
+                    console.warn('天气更新失败:', err);
+                    weatherIconEl.textContent = '🌡️';
+                    tempEl.textContent = '--°C';
+                    descEl.textContent = '获取失败';
+                    activityEl.innerHTML = `<p>📍 未知位置</p><p>🌸 最近更新：个人作品集 V2.3</p><p>📝 新日志：《夏夜与代码》</p>`;
+                }
+            }
+
+            function applyWaveEffect(element) {
+                const children = Array.from(element.childNodes);
+                let globalIndex = 0;
+                const fragment = document.createDocumentFragment();
+                const allSpans = [];
+
+                children.forEach(child => {
+                    if (child.nodeType === Node.TEXT_NODE) {
+                        const chars = child.textContent.split('');
+                        chars.forEach(char => {
+                            const span = document.createElement('span');
+                            span.textContent = char === ' ' ? '\u00A0' : char;
+                            span.className = 'wave-char';
+                            span.style.animation = 'none';
+                            globalIndex++;
+                            fragment.appendChild(span);
+                            allSpans.push({ span, index: globalIndex - 1 });
+                        });
+                    } else if (child.nodeType === Node.ELEMENT_NODE) {
+                        const className = child.className;
+                        const chars = child.textContent.split('');
+                        chars.forEach(char => {
+                            const span = document.createElement('span');
+                            span.textContent = char === ' ' ? '\u00A0' : char;
+                            span.className = 'wave-char ' + className;
+                            span.style.animation = 'none';
+                            globalIndex++;
+                            fragment.appendChild(span);
+                            allSpans.push({ span, index: globalIndex - 1 });
+                        });
+                    }
+                });
+
+                element.innerHTML = '';
+                element.appendChild(fragment);
+
+                requestAnimationFrame(() => {
+                    requestAnimationFrame(() => {
+                        allSpans.forEach(({ span, index }) => {
+                            setTimeout(() => {
+                                span.style.animation = '';
+                                span.style.animationDelay = (index * 0.1) + 's';
+                            }, index * 100);
+                        });
+                    });
+                });
+            }
+
+            function onLoaded() {
+                cancelAnimationFrame(rafId);
+                loadingLayer.classList.add('float-away');
+                setTimeout(() => {
+                    loadingLayer.classList.add('fade-out');
+                    interactionLayer.classList.add('visible');
+                    centerContent.classList.add('visible-content');
+                    applyWaveEffect(centerGreeting);
+                    setTimeout(() => usernameInput.focus(), 900);
+                    updateDashboard();
+                }, 1100);
+            }
+
+            // ==================== 普通用户名动画 ====================
+            function handleDefault(username) {
+                if (specialAnimating) return;
+                specialAnimating = true;
+                confirmBtn.disabled = true;
+                usernameInput.disabled = true;
+
+                const contentRect = centerContent.getBoundingClientRect();
+                centerContent.style.position = 'fixed';
+                centerContent.style.top = contentRect.top + 'px';
+                centerContent.style.left = contentRect.left + 'px';
+                centerContent.style.width = contentRect.width + 'px';
+                centerContent.style.margin = '0';
+
+                confirmBtn.style.transition = 'opacity 2s ease';
+                confirmBtn.style.opacity = '0';
+
+                const inputRect = usernameInput.getBoundingClientRect();
+                const inputStyles = window.getComputedStyle(usernameInput);
+                const originalFontSize = parseFloat(inputStyles.fontSize);
+
+                const textClone = document.createElement('div');
+                textClone.textContent = username;
+                textClone.style.position = 'fixed';
+                textClone.style.left = inputRect.left + 'px';
+                textClone.style.top = inputRect.top + 'px';
+                textClone.style.width = inputRect.width + 'px';
+                textClone.style.height = inputRect.height + 'px';
+                textClone.style.boxSizing = 'border-box';
+                textClone.style.overflow = 'hidden';
+                textClone.style.whiteSpace = 'nowrap';
+                textClone.style.pointerEvents = 'none';
+                textClone.style.zIndex = '60';
+                textClone.style.fontSize = originalFontSize + 'px';
+                textClone.style.fontFamily = inputStyles.fontFamily;
+                textClone.style.fontWeight = inputStyles.fontWeight;
+                textClone.style.color = inputStyles.color;
+                textClone.style.letterSpacing = inputStyles.letterSpacing;
+                textClone.style.wordSpacing = inputStyles.wordSpacing;
+                textClone.style.textTransform = inputStyles.textTransform;
+                textClone.style.textIndent = inputStyles.textIndent;
+                textClone.style.paddingLeft = inputStyles.paddingLeft;
+                textClone.style.paddingRight = inputStyles.paddingRight;
+                textClone.style.paddingTop = inputStyles.paddingTop;
+                textClone.style.paddingBottom = inputStyles.paddingBottom;
+                textClone.style.lineHeight = inputStyles.lineHeight;
+                textClone.style.textAlign = inputStyles.textAlign;
+                textClone.style.background = 'transparent';
+                textClone.style.border = 'none';
+                document.body.appendChild(textClone);
+
+                usernameInput.style.transition = 'opacity 2s ease';
+                usernameInput.style.opacity = '0';
+                textClone.style.transition = 'opacity 2s ease';
+                textClone.style.opacity = '0';
+                centerGreeting.style.transition = 'opacity 2s ease';
+                centerGreeting.style.opacity = '0';
+
+                if (centerDivider) centerDivider.style.display = 'none';
+
+                setTimeout(() => {
+                    if (confirmBtn.parentNode) confirmBtn.remove();
+                    if (usernameInput.parentNode) usernameInput.remove();
+                    if (textClone.parentNode) textClone.remove();
+                    centerGreeting.style.display = 'none';
+                    centerContent.style.display = 'none';
+
+                    const finalDiv = document.createElement('div');
+                    finalDiv.innerHTML = '欢迎访问 <span style="color: gold; font-weight: 600; text-shadow: 0 0 18px rgba(240,208,120,0.7);">' + username + '</span>';
+                    finalDiv.style.position = 'fixed';
+                    finalDiv.style.zIndex = '100';
+                    finalDiv.style.pointerEvents = 'none';
+                    const greetStyles = window.getComputedStyle(centerGreeting);
+                    finalDiv.style.fontSize = greetStyles.fontSize;
+                    finalDiv.style.fontFamily = greetStyles.fontFamily;
+                    finalDiv.style.fontWeight = greetStyles.fontWeight;
+                    finalDiv.style.color = greetStyles.color;
+                    finalDiv.style.textShadow = greetStyles.textShadow;
+                    finalDiv.style.whiteSpace = 'nowrap';
+
+                    const targetTop = Math.max(30, Math.min(window.innerHeight * 0.08, 80));
+                    const targetLeft = Math.max(24, Math.min(window.innerWidth * 0.07, 100));
+
+                    finalDiv.style.top = '-60px';
+                    finalDiv.style.left = targetLeft + 'px';
+                    document.body.appendChild(finalDiv);
+
+                    requestAnimationFrame(() => {
+                        finalDiv.style.transition = 'top 0.7s cubic-bezier(0.22, 0.61, 0.36, 1)';
+                        finalDiv.style.top = targetTop + 'px';
+                    });
+
+                    finalDiv.addEventListener('transitionend', () => {
+                        finalDiv.style.transition = '';
+                        interactionLayer.classList.remove('visible');
+                        mainLayer.classList.add('visible');
+                        bgmToggle.style.display = 'none';
+                        fileManagerBtn.style.display = 'none';
+                        specialAnimating = false;
+                    }, { once: true });
+
+                }, 2000);
+            }
+
+            // ==================== 特殊用户名动画 ====================
+            function specialWelcome(username, color) {
+                if (specialAnimating) return;
+                specialAnimating = true;
+                confirmBtn.disabled = true;
+                usernameInput.disabled = true;
+
+                const contentRect = centerContent.getBoundingClientRect();
+                centerContent.style.position = 'fixed';
+                centerContent.style.top = contentRect.top + 'px';
+                centerContent.style.left = contentRect.left + 'px';
+                centerContent.style.width = contentRect.width + 'px';
+                centerContent.style.margin = '0';
+
+                confirmBtn.style.transition = 'opacity 0.5s ease';
+                confirmBtn.style.opacity = '0';
+                setTimeout(() => { confirmBtn.style.display = 'none'; }, 500);
+
+                const inputRect = usernameInput.getBoundingClientRect();
+                const inputStyles = window.getComputedStyle(usernameInput);
+                const originalFontSize = parseFloat(inputStyles.fontSize);
+
+                const textClone = document.createElement('div');
+                textClone.textContent = username;
+                textClone.style.position = 'fixed';
+                textClone.style.left = inputRect.left + 'px';
+                textClone.style.top = inputRect.top + 'px';
+                textClone.style.width = inputRect.width + 'px';
+                textClone.style.height = inputRect.height + 'px';
+                textClone.style.boxSizing = 'border-box';
+                textClone.style.overflow = 'hidden';
+                textClone.style.whiteSpace = 'nowrap';
+                textClone.style.pointerEvents = 'none';
+                textClone.style.zIndex = '60';
+                textClone.style.fontSize = originalFontSize + 'px';
+                textClone.style.fontFamily = inputStyles.fontFamily;
+                textClone.style.fontWeight = inputStyles.fontWeight;
+                textClone.style.color = inputStyles.color;
+                textClone.style.letterSpacing = inputStyles.letterSpacing;
+                textClone.style.wordSpacing = inputStyles.wordSpacing;
+                textClone.style.textTransform = inputStyles.textTransform;
+                textClone.style.textIndent = inputStyles.textIndent;
+                textClone.style.paddingLeft = inputStyles.paddingLeft;
+                textClone.style.paddingRight = inputStyles.paddingRight;
+                textClone.style.paddingTop = inputStyles.paddingTop;
+                textClone.style.paddingBottom = inputStyles.paddingBottom;
+                textClone.style.lineHeight = inputStyles.lineHeight;
+                textClone.style.textAlign = inputStyles.textAlign;
+                textClone.style.background = 'transparent';
+                textClone.style.border = 'none';
+                document.body.appendChild(textClone);
+
+                usernameInput.style.transition = 'opacity 0.5s ease';
+                usernameInput.style.opacity = '0';
+                setTimeout(() => {
+                    if (usernameInput.parentNode) usernameInput.remove();
+                }, 500);
+
+                textClone.style.width = 'auto';
+                textClone.offsetHeight;
+                textClone.style.transition = 'all 1.5s cubic-bezier(0.4, 0, 0.2, 1)';
+                textClone.style.color = color;
+                textClone.style.fontWeight = '700';
+                textClone.style.textShadow = '0 0 18px currentColor, 0 2px 4px rgba(0,0,0,0.3)';
+                const targetLeftClone = window.innerWidth / 2 - textClone.offsetWidth / 2;
+                textClone.style.left = targetLeftClone + 'px';
+                centerGreeting.style.textShadow = '0 0 18px currentColor, 0 2px 4px rgba(0,0,0,0.3)';
+
+                setTimeout(() => {
+                    textClone.style.transition = 'all 1.8s ease-out';
+                    centerGreeting.style.transition = 'all 1.8s ease-out';
+                    textClone.style.transform = 'scale(1.5)';
+                    if (color === '#ffffff') {
+                        textClone.style.textShadow = '0 0 20px #fff, 0 0 40px #fff, 0 0 70px rgba(255,255,255,0.9), 0 2px 6px rgba(0,0,0,0.4)';
+                        centerGreeting.style.textShadow = '0 0 20px #fff, 0 0 40px #fff, 0 0 70px rgba(255,255,255,0.9), 0 2px 6px rgba(0,0,0,0.4)';
+                    } else {
+                        textClone.style.textShadow = `0 0 20px ${color}, 0 0 40px ${color}, 0 0 70px ${color}CC, 0 2px 6px rgba(0,0,0,0.4)`;
+                        centerGreeting.style.textShadow = `0 0 20px ${color}, 0 0 40px ${color}, 0 0 70px ${color}CC, 0 2px 6px rgba(0,0,0,0.4)`;
+                    }
+
+                    setTimeout(() => {
+                        if (centerDivider) centerDivider.style.display = 'none';
+                        const greetRect = centerGreeting.getBoundingClientRect();
+                        const cloneRect = textClone.getBoundingClientRect();
+
+                        const createParticle = (x, y) => {
+                            const particle = document.createElement('div');
+                            const size = 1 + Math.random() * 2;
+                            particle.style.position = 'fixed';
+                            particle.style.left = x + 'px';
+                            particle.style.top = y + 'px';
+                            particle.style.width = size + 'px';
+                            particle.style.height = size + 'px';
+                            particle.style.background = 'rgba(255, 255, 255, 0.9)';
+                            particle.style.borderRadius = '50%';
+                            particle.style.boxShadow = '0 0 2px rgba(255,255,255,0.6)';
+                            particle.style.pointerEvents = 'none';
+                            particle.style.zIndex = '100';
+                            particle.style.transition = 'all 0.6s ease-out, opacity 0.6s ease-out';
+                            document.body.appendChild(particle);
+                            requestAnimationFrame(() => {
+                                particle.style.transform = `translate(${-30 - Math.random() * 100}px, ${-30 - Math.random() * 100}px)`;
+                                particle.style.opacity = '0';
+                            });
+                            setTimeout(() => { if (particle.parentNode) particle.remove(); }, 600);
+                        };
+
+                        const step = 8;
+                        const probability = 0.4;
+                        [greetRect, cloneRect].forEach(rect => {
+                            for (let x = rect.left; x < rect.right; x += step) {
+                                for (let y = rect.top; y < rect.bottom; y += step) {
+                                    if (Math.random() < probability) {
+                                        const progress = Math.max((x - rect.left) / rect.width, (y - rect.top) / rect.height);
+                                        const delay = progress * 800;
+                                        setTimeout(() => createParticle(x, y), delay);
+                                    }
+                                }
+                            }
+                        });
+
+                        centerGreeting.style.transition = 'all 0.8s ease-out';
+                        centerGreeting.style.opacity = '0';
+                        centerGreeting.style.transform = 'scale(0.8)';
+                        centerGreeting.style.filter = 'blur(2px)';
+                        textClone.style.transition = 'all 0.8s ease-out';
+                        textClone.style.opacity = '0';
+                        textClone.style.transform = 'scale(0.8)';
+                        textClone.style.filter = 'blur(2px)';
+
+                        setTimeout(() => {
+                            if (centerGreeting.parentNode) centerGreeting.style.display = 'none';
+                            if (textClone.parentNode) textClone.remove();
+
+                            setTimeout(() => {
+                                const container = document.createElement('div');
+                                container.style.position = 'fixed';
+                                container.style.inset = '0';
+                                container.style.display = 'flex';
+                                container.style.alignItems = 'center';
+                                container.style.justifyContent = 'center';
+                                container.style.zIndex = '9999';
+                                container.style.pointerEvents = 'none';
+                                document.body.appendChild(container);
+
+                                const fullText = `欢迎回家，${username}`;
+                                const chars = [];
+                                for (let i = 0; i < fullText.length; i++) {
+                                    const span = document.createElement('span');
+                                    span.textContent = fullText[i] === ' ' ? '\u00A0' : fullText[i];
+                                    span.style.display = 'inline-block';
+                                    span.style.position = 'relative';
+                                    span.style.top = '0';
+                                    span.style.opacity = '0';
+                                    span.style.transition = 'opacity 0.4s ease';
+                                    const isUsernamePart = i >= 5;
+                                    if (isUsernamePart) {
+                                        span.style.color = color;
+                                        span.style.fontWeight = '700';
+                                        if (color === '#ffffff') {
+                                            span.style.textShadow = '0 0 20px #ffffff, 0 0 45px #ffffff, 0 2px 6px rgba(0,0,0,0.5)';
+                                        } else {
+                                            span.style.textShadow = `0 0 20px ${color}, 0 0 45px ${color}CC, 0 2px 6px rgba(0,0,0,0.5)`;
+                                        }
+                                    } else {
+                                        span.style.color = '#ffffff';
+                                        span.style.fontWeight = '600';
+                                        span.style.textShadow = '0 0 12px #ffffff, 0 0 25px rgba(255,255,255,0.8), 0 2px 4px rgba(0,0,0,0.4)';
+                                    }
+                                    span.style.fontSize = 'clamp(1.8rem, 4vw, 2.8rem)';
+                                    container.appendChild(span);
+                                    chars.push(span);
+                                }
+
+                                const floatAmplitude = 4;
+                                const floatSpeed = 2000;
+                                const startTime = Date.now();
+                                const floatInterval = setInterval(() => {
+                                    const now = Date.now();
+                                    chars.forEach((span, idx) => {
+                                        const phase = ((now - startTime) + idx * 200) % floatSpeed;
+                                        const progress = phase / floatSpeed;
+                                        const offset = Math.sin(progress * Math.PI * 2) * floatAmplitude;
+                                        span.style.top = offset + 'px';
+                                    });
+                                }, 16);
+                                container._floatInterval = floatInterval;
+
+                                setTimeout(() => {
+                                    chars.forEach((span, i) => {
+                                        setTimeout(() => { span.style.opacity = '1'; }, i * 80);
+                                    });
+                                }, 100);
+
+                                setTimeout(() => {
+                                    clearInterval(container._floatInterval);
+                                    container.style.transition = 'opacity 1s, filter 1s';
+                                    container.style.opacity = '0';
+                                    container.style.filter = 'blur(4px)';
+                                    setTimeout(() => {
+                                        container.remove();
+                                        setTimeout(() => {
+                                            const finalContainer = document.createElement('div');
+                                            finalContainer.style.position = 'fixed';
+                                            finalContainer.style.top = 'clamp(30px, 8vh, 80px)';
+                                            finalContainer.style.left = 'clamp(24px, 7vw, 100px)';
+                                            finalContainer.style.zIndex = '9999';
+                                            finalContainer.style.pointerEvents = 'none';
+                                            finalContainer.style.display = 'flex';
+                                            finalContainer.style.flexWrap = 'wrap';
+                                            document.body.appendChild(finalContainer);
+
+                                            const finalChars = [];
+                                            for (let i = 0; i < fullText.length; i++) {
+                                                const span = document.createElement('span');
+                                                span.textContent = fullText[i] === ' ' ? '\u00A0' : fullText[i];
+                                                span.style.display = 'inline-block';
+                                                span.style.position = 'relative';
+                                                span.style.top = '0';
+                                                span.style.opacity = '0';
+                                                span.style.transition = 'opacity 0.4s ease';
+                                                span.style.fontSize = 'clamp(1.4rem, 3vw, 2rem)';
+                                                const isUsernamePart = i >= 5;
+                                                if (isUsernamePart) {
+                                                    span.style.color = color;
+                                                    span.style.fontWeight = '700';
+                                                    if (color === '#ffffff') {
+                                                        span.style.textShadow = '0 0 15px #ffffff, 0 0 35px #ffffff, 0 2px 6px rgba(0,0,0,0.5)';
+                                                    } else {
+                                                        span.style.textShadow = `0 0 15px ${color}, 0 0 35px ${color}CC, 0 2px 6px rgba(0,0,0,0.5)`;
+                                                    }
+                                                } else {
+                                                    span.style.color = '#ffffff';
+                                                    span.style.fontWeight = '600';
+                                                    span.style.textShadow = '0 0 8px #ffffff, 0 0 20px rgba(255,255,255,0.8), 0 2px 4px rgba(0,0,0,0.4)';
+                                                }
+                                                finalContainer.appendChild(span);
+                                                finalChars.push(span);
+                                            }
+
+                                            const finalFloatInterval = setInterval(() => {
+                                                const now = Date.now();
+                                                finalChars.forEach((span, idx) => {
+                                                    const phase = ((now - startTime) + idx * 200) % floatSpeed;
+                                                    const offset = Math.sin((phase / floatSpeed) * Math.PI * 2) * floatAmplitude;
+                                                    span.style.top = offset + 'px';
+                                                });
+                                            }, 16);
+                                            finalContainer._floatInterval = finalFloatInterval;
+
+                                            setTimeout(() => {
+                                                finalChars.forEach((span, i) => {
+                                                    setTimeout(() => { span.style.opacity = '1'; }, i * 80);
+                                                });
+                                            }, 100);
+
+                                            // 特殊动画完成后显示主界面，并释放动画锁
+                                            setTimeout(() => {
+                                                interactionLayer.classList.remove('visible');
+                                                mainLayer.classList.add('visible');
+                                                bgmToggle.style.display = 'none';
+                                                fileManagerBtn.style.display = 'none';
+                                                specialAnimating = false;
+                                            }, 300);
+
+                                        }, 1000);
+                                    }, 1000);
+                                }, 3000);
+                            }, 1000);
+                        }, 800);
+                    }, 2000);
+                }, 1500);
+            }
+
+            // ==================== 提交处理 ====================
+            function handleConfirm() {
+                const name = usernameInput.value.trim();
+                if (!name) {
+                    usernameInput.focus();
+                    usernameInput.style.borderColor = 'rgba(255,100,100,0.7)';
+                    setTimeout(() => usernameInput.style.borderColor = '', 700);
+                    return;
+                }
+                if (Object.hasOwn(specialColors, name)) {
+                    specialWelcome(name, specialColors[name]);
+                } else {
+                    handleDefault(name);
+                }
+            }
+
+            confirmBtn.addEventListener('click', handleConfirm);
+            usernameInput.addEventListener('keypress', e => { if (e.key==='Enter') handleConfirm(); });
+
+            document.addEventListener('keydown', e => {
+                if ((e.key==='m'||e.key==='M') && !e.ctrlKey && !e.metaKey && document.activeElement===document.body) {
+                    toggleBGM();
+                }
+            });
+
+            // ==================== 卡片交互（全局委托） ====================
+            fullscreenClose.addEventListener('click', (e) => {
+                e.stopPropagation();
+                fullscreenOverlay.classList.remove('active');
+            });
+            fullscreenOverlay.addEventListener('click', (e) => {
+                if (e.target === fullscreenOverlay) fullscreenOverlay.classList.remove('active');
+            });
+
+            // 全屏音乐卡片内的按钮事件委托（持久绑定，不随 innerHTML 重建而丢失）
+            fullscreenBody.addEventListener('click', (e) => {
+                const btn = e.target.closest('#fullscreenBgmBtn');
+                if (!btn) return;
+                e.stopPropagation();
+                toggleBGM();
+                btn.textContent = bgmActuallyPlaying ? '⏸️' : '▶️';
+            });
+
+            document.addEventListener('click', (e) => {
+                // 忽略动画进行中或主内容层不可见
+                if (specialAnimating || !mainLayer.classList.contains('visible')) return;
+                const card = e.target.closest('.glass-card');
+                if (!card || !mainLayer.contains(card)) return;
+
+                const header = card.querySelector('.card-header');
+                const title = header ? header.textContent : '详情';
+                fullscreenTitle.textContent = title;
+
+                if (title.includes('艺术作品')) {
+                    fullscreenBody.innerHTML = '<p>🎨 艺术作品展示区（即将开放）</p><div style="display:flex;gap:20px;flex-wrap:wrap;"><div style="width:200px;height:150px;background:rgba(255,255,255,0.1);border-radius:12px;display:flex;align-items:center;justify-content:center;">示例作品1</div><div style="width:200px;height:150px;background:rgba(255,255,255,0.1);border-radius:12px;display:flex;align-items:center;justify-content:center;">示例作品2</div></div>';
+                } else if (title.includes('关于本人')) {
+                    fullscreenBody.innerHTML = '<p>🧑‍💻 关于本人</p><p>Shiroha Nao，也叫Shiroha Rin，兼有编曲，运营，程序，和苦逼实验室打工人多个身份。</p>';
+                } else if (title.includes('今日运势')) {
+                    fullscreenBody.innerHTML = '<p>🔮 运势占卜模块（即将开放）</p>';
+                } else if (title.includes('此刻音乐')) {
+                    // 音乐封面注册
+                    fullscreenBody.innerHTML = '<div style="display:flex;flex-direction:column;align-items:center;gap:24px;padding:20px;"><div class="vinyl-record"><div class="vinyl-disc' + (bgmActuallyPlaying ? ' spinning' : '') + '" id="vinylDisc"><img class="vinyl-cover" src="' + BGM_COVER + '" alt="音乐封面" onerror="this.style.display=\'none\'"><div class="vinyl-center"></div></div></div><div style="font-size:1.3rem;color:#f0d78c;">' + BGM_TITLE + '</div><div style="color:#aaa;">循环播放中</div><canvas id="fullscreenVisualizer" style="width:100%;max-width:500px;height:80px;border-radius:8px;opacity:0.85;"></canvas><div style="display:flex;align-items:center;gap:16px;"><button id="fullscreenBgmBtn" style="width:56px;height:56px;border-radius:50%;border:1.5px solid rgba(255,255,255,0.3);background:rgba(255,255,255,0.08);color:#fff;font-size:1.5rem;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all 0.3s;">' + (bgmActuallyPlaying ? '⏸️' : '▶️') + '</button><span style="color:#aaa;font-size:0.9rem;">点击' + (bgmActuallyPlaying ? '暂停' : '播放') + '</span></div></div>';
+                } else if (title.includes('小游戏')) {
+                    fullscreenBody.innerHTML = '<p>🕹️ 小游戏区域（即将开放）</p>';
+                } else if (title.includes('工具栏')) {
+                    fullscreenBody.innerHTML = '<p>🔧 常用工具与链接（即将开放）</p>';
+                } else if (title.includes('今日概览')) {
+                    fullscreenBody.innerHTML = '<p>📅 今日概览全屏详情（待扩展）</p>';
+                } else {
+                    fullscreenBody.innerHTML = '<p>内容开发中...</p>';
+                }
+                fullscreenOverlay.classList.add('active');
+            });
+
+            // ==================== 重置并启动加载动画 ====================
+            function startLoading() {
+                startTime = null; loadingComplete = false; bgmTriggered = false; specialAnimating = false;
+                confirmBtn.disabled = false; confirmBtn.style.display = ''; confirmBtn.style.opacity = '';
+                confirmBtn.style.transition = '';
+                usernameInput.disabled = false;
+                usernameInput.style.transition = '';
+                usernameInput.style.background = '';
+                usernameInput.style.borderColor = '';
+                usernameInput.style.backdropFilter = '';
+                usernameInput.style.borderRadius = '';
+                usernameInput.style.padding = '';
+                usernameInput.style.fontSize = '';
+                usernameInput.style.color = '';
+                usernameInput.style.fontWeight = '';
+                usernameInput.style.textShadow = '';
+                usernameInput.style.width = '';
+                usernameInput.style.maxWidth = '';
+                usernameInput.style.opacity = '';
+                if (!usernameInput.parentNode) inputGroup.appendChild(usernameInput);
+                if (!confirmBtn.parentNode) inputGroup.appendChild(confirmBtn);
+                usernameInput.placeholder = '您希望我们如何称呼您';
+                progressFill.style.width = '0%';
+                progressPercentage.textContent = '0%';
+                progressPercentage.classList.remove('complete');
+                loadingHint.textContent = '正在初始化...';
+                loadingLayer.classList.remove('fade-out','float-away');
+                bgmToggle.style.display = '';
+                fileManagerBtn.style.display = '';
+                interactionLayer.classList.remove('visible');
+                centerContent.classList.remove('visible-content','top-left');
+                centerGreeting.innerHTML = '欢迎访问—<span class="shiroha-brand">Shiroha领域</span>';
+                centerGreeting.style.fontSize = '';
+                centerGreeting.style.display = '';
+                centerGreeting.style.opacity = '';
+                centerGreeting.style.transform = '';
+                centerGreeting.style.filter = '';
+                centerGreeting.style.transition = '';
+                centerGreeting.style.textShadow = '';
+                centerContent.style.display = '';
+                centerContent.style.position = ''; centerContent.style.top = ''; centerContent.style.left = ''; centerContent.style.width = ''; centerContent.style.transition = '';
+                inputGroup.style.display = ''; inputGroup.style.opacity = ''; inputGroup.style.transform = '';
+                usernameInput.value = '';
+                if (centerDivider) centerDivider.style.display = '';
+                document.querySelectorAll('.final-greeting,.return-message').forEach(e=>e.remove());
+                mainLayer.classList.remove('visible');
+                fullscreenOverlay.classList.remove('active');
+                if (rafId) cancelAnimationFrame(rafId);
+                rafId = requestAnimationFrame(animate);
+            }
+
+            if (document.readyState==='loading') document.addEventListener('DOMContentLoaded', startLoading);
+            else startLoading();
+        })();
+    </script>
+</body>
+</html>

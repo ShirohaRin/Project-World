@@ -43,3 +43,11 @@ agents:
 
   assistant:
     model: "glm-5.2"
+
+# SSH 远程主机白名单（可选）：IDEA 通过 ssh_run 工具连接这些主机执行命令（需 Owner 审批或 ssh 授权）。
+# 推荐通过环境变量 IDEA_SSH_HOSTS 提供 JSON 数组，例如：
+#   [{"host":"host.example.com","alias":"prod","port":22,"user":"deploy","key_path":"/home/deploy/.ssh/id_ed25519"},
+#    {"host":"10.0.0.5","user":"root","password_env":"IDEA_SSH_PASSWORD_BACKUP"}]
+# 认证方式：key_path（优先）或 password_env 指向的环境变量密码。未配置则 ssh_run 不可用。
+ssh:
+  hosts: []
