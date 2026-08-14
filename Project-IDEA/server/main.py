@@ -34,6 +34,7 @@ import yaml
 from llm.client import LLMClient, selected_model_config
 from tools.registry import ToolRegistry
 from agent_runner import AgentRunner
+from jobs import JobScheduler
 from memory.store import MemoryStore
 from platform_auth import PlatformStore, RequestContext, configured_token, extract_bearer, require_context
 from tool_runtime.permissions import ExecutionContext
@@ -379,7 +380,9 @@ AGENTS = {
     "idea_assistant": {"name": "IDEA Assistant", "role": "普通用户服务智能体", "level": "Service"},
 }
 
-MAX_HISTORY = 50
+# Agent 单次上下文使用的最近消息窗口；runner 内部也只消费最近 10 条，
+# 因此直接按窗口大小查询，避免多拉 MAX_HISTORY 再截断。
+MAX_HISTORY = 10
 MAX_MESSAGE_LENGTH = 20_000
 MAX_MEMORY_LENGTH = 10_000
 VALID_MODEL_KEYS = {"gpt", "deepseek-v4-flash"}
@@ -461,15 +464,19 @@ def _memory_context(context: RequestContext, query: str) -> str:
 
 
 def _global_context(context: RequestContext, exclude_conversation_id: str) -> str:
+    """其他会话的最近摘要。单次批量查询取回所有活跃会话最近 2 条消息（窗口函数），
+    替代原先的「每会话一次独立查询」的 N+1 访问。行为与排序保持兼容。"""
     snippets = []
-    for conversation in platform_store.list_conversations(context.principal.account_id, context.space_id):
-        conversation_id = conversation["conversation_id"]
+    rows = platform_store.recent_message_snippets(context.principal.account_id, context.space_id)
+    by_conversation: dict[str, dict] = {}
+    for row in rows:
+        info = by_conversation.setdefault(row["conversation_id"], {"updated_at": row["updated_at"], "contents": []})
+        info["contents"].append(row["content"])
+    for conversation_id, info in sorted(by_conversation.items(), key=lambda item: item[1]["updated_at"], reverse=True):
         if conversation_id == exclude_conversation_id:
             continue
-        recent = platform_store.list_messages(context.principal.account_id, context.space_id, conversation_id, limit=2)
-        if recent:
-            text = " / ".join(str(item.get("content", ""))[:500] for item in recent)
-            snippets.append(f"会话 {conversation_id[:8]}：{text}")
+        text = " / ".join(str(content)[:500] for content in reversed(info["contents"]))
+        snippets.append(f"会话 {conversation_id[:8]}：{text}")
         if len(snippets) == 3:
             break
     return "\n".join(snippets)
@@ -505,6 +512,9 @@ owner_agent_mcp.configure(
     _record_daily_activity,
 )
 
+# 后台定时作业调度器（Owner 编排的自动化；高危工具仍走审批/授权链）
+job_scheduler = JobScheduler(platform_store, agent_runners["idea"].tools)
+
 # ---------------------------------------------------------------------------
 # FastAPI 应用
 # ---------------------------------------------------------------------------
@@ -513,7 +523,11 @@ async def app_lifespan(app):
     async with AsyncExitStack() as stack:
         await stack.enter_async_context(memory_mcp.mcp.session_manager.run())
         await stack.enter_async_context(owner_agent_mcp.mcp.session_manager.run())
-        yield
+        await job_scheduler.start()
+        try:
+            yield
+        finally:
+            await job_scheduler.stop()
 
 
 app = FastAPI(
@@ -724,6 +738,58 @@ def _path_within(path: Path, root: Path) -> bool:
         return True
     except ValueError:
         return False
+
+
+@app.get("/api/platform/jobs")
+async def list_scheduled_jobs_route(request: Request):
+    context = require_context(request)
+    if platform_store.route_for_principal(context.principal) != "owner_idea":
+        raise HTTPException(status_code=403, detail="仅 Owner 可管理后台作业")
+    jobs = platform_store.list_scheduled_jobs(context.principal.account_id, context.space_id)
+    return {
+        "jobs": [
+            {
+                "id": job["job_id"],
+                "tool_name": job["tool_name"],
+                "args": json.loads(job["args_json"] or "{}"),
+                "interval_seconds": job["interval_seconds"],
+                "status": job["status"],
+                "last_status": job["last_status"],
+                "last_output": job["last_output"],
+                "next_run_at": job["next_run_at"],
+            }
+            for job in jobs
+        ]
+    }
+
+
+@app.post("/api/platform/jobs")
+async def create_scheduled_job_route(request: Request):
+    context = require_context(request)
+    if platform_store.route_for_principal(context.principal) != "owner_idea":
+        raise HTTPException(status_code=403, detail="仅 Owner 可管理后台作业")
+    body = await request.json()
+    tool_name = str(body.get("tool_name", ""))
+    if tool_name not in agent_runners["idea"].tools.get_all_tool_names():
+        raise HTTPException(status_code=400, detail="未知工具")
+    args = body.get("args") or {}
+    try:
+        interval_seconds = float(body.get("interval_seconds", 0))
+        job = platform_store.create_scheduled_job(context.principal.account_id, context.space_id, "idea", tool_name, args, interval_seconds)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+    platform_store.write_audit("scheduled_job.created", context, resource_type="job", resource_id=job["id"], action="create", decision="allowed", metadata={"tool_name": tool_name})
+    return job
+
+
+@app.delete("/api/platform/jobs/{job_id}")
+async def delete_scheduled_job_route(job_id: str, request: Request):
+    context = require_context(request)
+    if platform_store.route_for_principal(context.principal) != "owner_idea":
+        raise HTTPException(status_code=403, detail="仅 Owner 可管理后台作业")
+    if not platform_store.delete_scheduled_job(context.principal.account_id, context.space_id, job_id):
+        raise HTTPException(status_code=404, detail="作业不存在")
+    return {"status": "deleted", "job_id": job_id}
 
 
 @app.get("/api/platform/owner/devices")
@@ -1200,6 +1266,7 @@ async def chat_with_assistant(request: Request):
         request_context=context,
         agent_id=agent_id,
         is_owner=platform_store.route_for_principal(context.principal) == "owner_idea",
+        conversation_id=conversation_id,
     )
     result = await agent_runners[agent_id].run(
         user_message=runner_message,

@@ -356,6 +356,33 @@ class PlatformStore:
                     reviewed_by TEXT
                 );
                 CREATE INDEX IF NOT EXISTS idx_file_change_reviews_lookup ON file_change_reviews(account_id, space_id, status, created_at DESC);
+                -- 会话事件溯源：append-only 事件日志是会话的唯一事实源，消息列表由事件派生。
+                CREATE TABLE IF NOT EXISTS session_events (
+                    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    conversation_id TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    FOREIGN KEY(conversation_id) REFERENCES conversations(conversation_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_session_events_conversation ON session_events(conversation_id, event_id);
+                -- 后台定时作业（jobs/schedule）：Owner 编排、scheduler 扫描到期执行。
+                CREATE TABLE IF NOT EXISTS scheduled_jobs (
+                    job_id TEXT PRIMARY KEY,
+                    account_id TEXT NOT NULL,
+                    space_id TEXT NOT NULL,
+                    agent_id TEXT NOT NULL,
+                    tool_name TEXT NOT NULL,
+                    args_json TEXT NOT NULL DEFAULT '{}',
+                    interval_seconds REAL NOT NULL,
+                    next_run_at REAL NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'active',
+                    last_status TEXT,
+                    last_output TEXT,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_scheduled_jobs_due ON scheduled_jobs(status, next_run_at);
                 """
             )
             columns = {row["name"] for row in connection.execute("PRAGMA table_info(accounts)").fetchall()}
@@ -376,6 +403,9 @@ class PlatformStore:
             credential_columns = {row["name"] for row in connection.execute("PRAGMA table_info(mcp_device_credentials)").fetchall()}
             if "capability" not in credential_columns:
                 connection.execute("ALTER TABLE mcp_device_credentials ADD COLUMN capability TEXT NOT NULL DEFAULT 'memory'")
+            conversation_columns = {row["name"] for row in connection.execute("PRAGMA table_info(conversations)").fetchall()}
+            if "approval_policy" not in conversation_columns:
+                connection.execute("ALTER TABLE conversations ADD COLUMN approval_policy TEXT NOT NULL DEFAULT 'ask'")
             if "credential_kind" not in credential_columns:
                 connection.execute("ALTER TABLE mcp_device_credentials ADD COLUMN credential_kind TEXT NOT NULL DEFAULT 'mcp'")
             if "encrypted_token" not in credential_columns:
@@ -392,6 +422,42 @@ class PlatformStore:
             now = time.time()
             connection.execute("INSERT INTO account_profiles(account_id, work_role, updated_at) SELECT a.account_id, CASE WHEN a.account_id = 'account-owner' OR EXISTS(SELECT 1 FROM owner_account_links l WHERE l.owner_principal_id = 'owner-shiroha-nao' AND l.account_id = a.account_id AND l.status = 'active') THEN 'owner' ELSE 'user' END, ? FROM accounts a WHERE NOT EXISTS(SELECT 1 FROM account_profiles p WHERE p.account_id = a.account_id)", (now,))
             connection.execute("UPDATE account_profiles SET work_role = 'owner', updated_at = ? WHERE account_id = 'account-owner' OR EXISTS(SELECT 1 FROM owner_account_links l WHERE l.owner_principal_id = 'owner-shiroha-nao' AND l.account_id = account_profiles.account_id AND l.status = 'active')", (now,))
+            self._migrate_messages_to_events(connection)
+
+    @staticmethod
+    def _append_session_event(connection, conversation_id: str, event_type: str, payload: dict, created_at: Optional[float] = None) -> None:
+        """追加一条会话事件日志（append-only，event_id 自增即事件序号）。"""
+        connection.execute(
+            "INSERT INTO session_events(conversation_id, event_type, payload_json, created_at) VALUES (?, ?, ?, ?)",
+            (conversation_id, event_type, json.dumps(payload, ensure_ascii=False), created_at if created_at is not None else time.time()),
+        )
+
+    @staticmethod
+    def _migrate_messages_to_events(connection) -> None:
+        """一次性迁移：把历史 conversation_messages 复制为 session_events（逐条幂等）。
+
+        按 message_id 判断是否已迁移，因此会话事件日志里已存在 conversation.created
+        等事件时仍会补齐缺失的消息事件；重复执行不会产生重复事件。
+        迁移后读写全部走事件日志，conversation_messages 表保留但不再写入。
+        """
+        rows = connection.execute("SELECT * FROM conversation_messages ORDER BY created_at").fetchall()
+        for row in rows:
+            migrated = connection.execute(
+                "SELECT 1 FROM session_events WHERE json_extract(payload_json, '$.message_id') = ?",
+                (row["message_id"],),
+            ).fetchone()
+            if migrated:
+                continue
+            payload = {
+                "message_id": row["message_id"],
+                "role": row["role"],
+                "content": row["content"],
+                "metadata": json.loads(row["metadata_json"]),
+            }
+            connection.execute(
+                "INSERT INTO session_events(conversation_id, event_type, payload_json, created_at) VALUES (?, ?, ?, ?)",
+                (row["conversation_id"], f"{row['role']}/message", json.dumps(payload, ensure_ascii=False), row["created_at"]),
+            )
 
     def ensure_owner(self, bootstrap_token: str):
         if not bootstrap_token:
@@ -779,6 +845,7 @@ class PlatformStore:
                     raise ValueError("该会话已属于另一智能体")
                 return dict(row)
             connection.execute("INSERT INTO conversations(conversation_id, account_id, space_id, agent_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)", (conversation_id, account_id, space_id, agent_id, now, now))
+            self._append_session_event(connection, conversation_id, "conversation.created", {"agent_id": agent_id, "created_at": now}, created_at=now)
             self._append_sync_event(connection, account_id, space_id, "conversation", conversation_id, "conversation.created", {"agent_id": agent_id, "created_at": now})
             return {"conversation_id": conversation_id, "account_id": account_id, "space_id": space_id, "agent_id": agent_id, "status": "active", "created_at": now, "updated_at": now}
 
@@ -789,24 +856,93 @@ class PlatformStore:
 
     def list_conversations(self, account_id: str, space_id: str) -> list[dict]:
         with self._connect() as connection:
-            rows = connection.execute("SELECT c.*, COUNT(m.message_id) AS message_count FROM conversations c LEFT JOIN conversation_messages m ON m.conversation_id = c.conversation_id WHERE c.account_id = ? AND c.space_id = ? AND c.status = 'active' GROUP BY c.conversation_id ORDER BY c.updated_at DESC", (account_id, space_id)).fetchall()
+            rows = connection.execute(
+                "SELECT c.*, (SELECT COUNT(*) FROM session_events e WHERE e.conversation_id = c.conversation_id AND e.event_type IN ('user/message', 'assistant/message')) AS message_count "
+                "FROM conversations c WHERE c.account_id = ? AND c.space_id = ? AND c.status = 'active' ORDER BY c.updated_at DESC",
+                (account_id, space_id),
+            ).fetchall()
             return [dict(row) for row in rows]
 
     def count_active_conversations(self) -> int:
         with self._connect() as connection:
             return connection.execute("SELECT COUNT(*) FROM conversations WHERE status = 'active'").fetchone()[0]
 
+    def conversation_approval_policy(self, account_id: str, space_id: str, conversation_id: str) -> str:
+        """会话级审批策略：'ask'（默认，弹审批）或 'never'（任何审批一律拒绝，访客/无人值守场景）。"""
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT approval_policy FROM conversations WHERE conversation_id = ? AND account_id = ? AND space_id = ? AND status = 'active'",
+                (conversation_id, account_id, space_id),
+            ).fetchone()
+        policy = row["approval_policy"] if row else "ask"
+        return policy if policy in ("ask", "never") else "ask"
+
+    def set_conversation_approval_policy(self, account_id: str, space_id: str, conversation_id: str, policy: str) -> bool:
+        if policy not in ("ask", "never"):
+            raise ValueError("审批策略无效")
+        now = time.time()
+        with self._connect() as connection:
+            changed = connection.execute(
+                "UPDATE conversations SET approval_policy = ?, updated_at = ? WHERE conversation_id = ? AND account_id = ? AND space_id = ? AND status = 'active'",
+                (policy, now, conversation_id, account_id, space_id),
+            ).rowcount
+            if changed:
+                self._append_sync_event(connection, account_id, space_id, "conversation", conversation_id, "approval.policy", {"policy": policy})
+            return bool(changed)
+
     def list_messages(self, account_id: str, space_id: str, conversation_id: str, limit: Optional[int] = None) -> list[dict]:
         if not self.get_conversation(account_id, space_id, conversation_id):
             raise LookupError("会话不存在")
-        query = "SELECT * FROM conversation_messages WHERE conversation_id = ? ORDER BY created_at"
-        params: tuple = (conversation_id,)
+        message_types = "('user/message', 'assistant/message')"
         if limit:
-            query = "SELECT * FROM (" + query + " DESC LIMIT ?) ORDER BY created_at"
-            params = (conversation_id, limit)
+            query = (
+                "SELECT payload_json, created_at FROM ("
+                f"SELECT payload_json, created_at, event_id FROM session_events WHERE conversation_id = ? AND event_type IN {message_types} ORDER BY event_id DESC LIMIT ?"
+                ") ORDER BY event_id"
+            )
+            params: tuple = (conversation_id, limit)
+        else:
+            query = (
+                f"SELECT payload_json, created_at FROM session_events WHERE conversation_id = ? AND event_type IN {message_types} ORDER BY event_id"
+            )
+            params = (conversation_id,)
         with self._connect() as connection:
             rows = connection.execute(query, params).fetchall()
-            return [{"id": row["message_id"], "role": row["role"], "content": row["content"], "timestamp": row["created_at"], **json.loads(row["metadata_json"])} for row in rows]
+        messages = []
+        for row in rows:
+            payload = json.loads(row["payload_json"])
+            messages.append({"id": payload["message_id"], "role": payload["role"], "content": payload["content"], "timestamp": row["created_at"], **payload.get("metadata", {})})
+        return messages
+
+    def recent_message_snippets(self, account_id: str, space_id: str, per_conversation: int = 2) -> list[dict]:
+        """批量取每个活跃会话最近的若干条消息（单条窗口函数查询，避免 N+1）。
+
+        返回行按会话分组（每会话最多 per_conversation 条，按事件序号降序，rn=1 为最新），
+        并携带会话的 updated_at 供上层按活跃度排序。数据访问层一次连接完成全部读取。
+        """
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT conversation_id, updated_at, payload_json, rn FROM (
+                    SELECT c.conversation_id, c.updated_at, e.payload_json,
+                           ROW_NUMBER() OVER (PARTITION BY e.conversation_id ORDER BY e.event_id DESC) AS rn
+                    FROM conversations c
+                    JOIN session_events e ON e.conversation_id = c.conversation_id
+                    WHERE c.account_id = ? AND c.space_id = ? AND c.status = 'active'
+                      AND e.event_type IN ('user/message', 'assistant/message')
+                ) WHERE rn <= ?
+                """,
+                (account_id, space_id, per_conversation),
+            ).fetchall()
+        return [
+            {
+                "conversation_id": row["conversation_id"],
+                "updated_at": row["updated_at"],
+                "content": json.loads(row["payload_json"]).get("content", ""),
+                "rn": row["rn"],
+            }
+            for row in rows
+        ]
 
     def append_message(self, account_id: str, space_id: str, conversation_id: str, role: str, content: str, metadata: Optional[dict] = None) -> dict:
         now = time.time()
@@ -814,7 +950,13 @@ class PlatformStore:
             raise LookupError("会话不存在")
         message_id = uuid.uuid4().hex
         with self._connect() as connection:
-            connection.execute("INSERT INTO conversation_messages(message_id, conversation_id, role, content, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)", (message_id, conversation_id, role, content, json.dumps(metadata or {}, ensure_ascii=False), now))
+            self._append_session_event(
+                connection,
+                conversation_id,
+                f"{role}/message",
+                {"message_id": message_id, "role": role, "content": content, "metadata": metadata or {}},
+                created_at=now,
+            )
             connection.execute("UPDATE conversations SET updated_at = ? WHERE conversation_id = ?", (now, conversation_id))
             self._append_sync_event(connection, account_id, space_id, "conversation", conversation_id, "message.appended", {"message_id": message_id, "role": role, "created_at": now})
         return {"id": message_id, "role": role, "content": content, "timestamp": now, **(metadata or {})}
@@ -823,6 +965,7 @@ class PlatformStore:
         with self._connect() as connection:
             changed = connection.execute("UPDATE conversations SET status = 'reset', updated_at = ? WHERE conversation_id = ? AND account_id = ? AND space_id = ? AND status = 'active'", (time.time(), conversation_id, account_id, space_id)).rowcount
             if changed:
+                self._append_session_event(connection, conversation_id, "conversation.reset", {}, created_at=time.time())
                 self._append_sync_event(connection, account_id, space_id, "conversation", conversation_id, "conversation.reset", {})
             return bool(changed)
 
@@ -830,6 +973,7 @@ class PlatformStore:
         with self._connect() as connection:
             changed = connection.execute("UPDATE conversations SET status = 'deleted', updated_at = ? WHERE conversation_id = ? AND account_id = ? AND space_id = ? AND status = 'active'", (time.time(), conversation_id, account_id, space_id)).rowcount
             if changed:
+                self._append_session_event(connection, conversation_id, "conversation.deleted", {}, created_at=time.time())
                 connection.execute("UPDATE tasks SET status = 'deleted', updated_at = ? WHERE conversation_id = ? AND account_id = ? AND space_id = ? AND status != 'deleted'", (time.time(), conversation_id, account_id, space_id))
                 self._append_sync_event(connection, account_id, space_id, "conversation", conversation_id, "conversation.deleted", {})
             return bool(changed)
@@ -845,6 +989,42 @@ class PlatformStore:
         with self._connect() as connection:
             rows = connection.execute("SELECT * FROM tasks WHERE account_id = ? AND space_id = ? AND status != 'deleted' ORDER BY created_at DESC", (account_id, space_id)).fetchall()
             return [{"id": row["task_id"], **{key: row[key] for key in row.keys() if key != "task_id"}} for row in rows]
+
+    def create_scheduled_job(self, account_id: str, space_id: str, agent_id: str, tool_name: str, args: dict, interval_seconds: float) -> dict:
+        if interval_seconds < 30:
+            raise ValueError("调度间隔不能小于 30 秒")
+        job_id, now = uuid.uuid4().hex, time.time()
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT INTO scheduled_jobs(job_id, account_id, space_id, agent_id, tool_name, args_json, interval_seconds, next_run_at, status, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)",
+                (job_id, account_id, space_id, agent_id, tool_name, json.dumps(args or {}, ensure_ascii=False), interval_seconds, now + interval_seconds, now, now),
+            )
+        return {"id": job_id, "account_id": account_id, "space_id": space_id, "agent_id": agent_id, "tool_name": tool_name, "args": args or {}, "interval_seconds": interval_seconds, "status": "active", "next_run_at": now + interval_seconds}
+
+    def list_scheduled_jobs(self, account_id: str, space_id: str) -> list[dict]:
+        with self._connect() as connection:
+            rows = connection.execute("SELECT * FROM scheduled_jobs WHERE account_id = ? AND space_id = ? AND status != 'deleted' ORDER BY created_at DESC", (account_id, space_id)).fetchall()
+            return [dict(row) for row in rows]
+
+    def delete_scheduled_job(self, account_id: str, space_id: str, job_id: str) -> bool:
+        with self._connect() as connection:
+            changed = connection.execute("UPDATE scheduled_jobs SET status = 'deleted', updated_at = ? WHERE job_id = ? AND account_id = ? AND space_id = ? AND status != 'deleted'", (time.time(), job_id, account_id, space_id)).rowcount
+            return bool(changed)
+
+    def due_scheduled_jobs(self, now: Optional[float] = None, limit: int = 20) -> list[dict]:
+        """到期待执行的作业（scheduler 扫描）。"""
+        now = now or time.time()
+        with self._connect() as connection:
+            rows = connection.execute("SELECT * FROM scheduled_jobs WHERE status = 'active' AND next_run_at <= ? ORDER BY next_run_at LIMIT ?", (now, limit)).fetchall()
+            return [dict(row) for row in rows]
+
+    def update_scheduled_job_run(self, job_id: str, last_status: str, last_output: str, next_run_at: float) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE scheduled_jobs SET last_status = ?, last_output = ?, next_run_at = ?, updated_at = ? WHERE job_id = ?",
+                (last_status, last_output[:2000], next_run_at, time.time(), job_id),
+            )
 
     def delete_task(self, account_id: str, space_id: str, task_id: str) -> bool:
         with self._connect() as connection:

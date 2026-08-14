@@ -20,6 +20,7 @@ from urllib.parse import urlparse
 import httpx
 
 from tool_runtime.permissions import ExecutionContext, PolicyDecision, ToolPolicy, ToolPolicyResult
+from tool_runtime.sandbox import SandboxEnforcement, SandboxManager, SandboxMode, restricted_exec_argv
 
 try:
     import paramiko  # type: ignore
@@ -39,6 +40,24 @@ SENSITIVE_SUFFIXES = {".pem", ".key", ".p12", ".pfx", ".db", ".sqlite", ".sqlite
 BACKUP_DIR_NAME = "backup"
 FILE_CHANGE_TOOLS = {"write_file", "edit_file", "delete_file", "restore_file"}
 MAX_SSH_FILE_BYTES = 5 * 1024 * 1024
+# 工具展示意图（对齐 dsh presentCall/presentResult 卡片模型）：工具声明"UI 如何展示我"，
+# 客户端按 card 类型渲染（diff/terminal/search/read/web/generic），服务端无需感知具体 UI。
+TOOL_PRESENTATION = {
+    "read_file": {"card": "read"},
+    "write_file": {"card": "diff"},
+    "edit_file": {"card": "diff"},
+    "delete_file": {"card": "diff"},
+    "restore_file": {"card": "diff"},
+    "list_dir": {"card": "generic"},
+    "search_content": {"card": "search"},
+    "run_command": {"card": "terminal"},
+    "web_search": {"card": "web"},
+    "web_fetch": {"card": "web"},
+    "ssh_run": {"card": "terminal"},
+    "ssh_get": {"card": "generic"},
+    "ssh_put": {"card": "generic"},
+    "dispatch_to_agent": {"card": "generic"},
+}
 SSH_BLOCKED_REMOTE_PATTERNS = [
     re.compile(r"^/etc/(passwd|shadow|sudoers|group)$"),
     re.compile(r"^/root/\.ssh/"),
@@ -91,14 +110,38 @@ class ToolResult:
 class ToolRegistry:
     """Defines tools and enforces policy at the only supported execution sink."""
 
-    def __init__(self, workspace: str = None, allowed_dirs: list[str] = None, policy: ToolPolicy = None, audit_store: Any = None, ssh_hosts: list[dict] = None):
+    def __init__(self, workspace: str = None, allowed_dirs: list[str] = None, policy: ToolPolicy = None, audit_store: Any = None, ssh_hosts: list[dict] = None, sandbox_mode: Optional[SandboxMode] = None):
         self.workspace = str(Path(workspace or DEFAULT_WORKSPACE).resolve())
         self.allowed_dirs = [str(Path(path).resolve()) for path in (allowed_dirs or [self.workspace])]
         self.policy = policy or ToolPolicy()
         self.audit_store = audit_store
         self.ssh_hosts = ssh_hosts if ssh_hosts is not None else load_ssh_hosts_from_env()
+        default_sandbox = os.getenv("IDEA_SANDBOX_MODE", "").strip()
+        try:
+            self.sandbox = SandboxManager(
+                self.workspace,
+                default_mode=sandbox_mode or (SandboxMode(default_sandbox) if default_sandbox else SandboxMode.WORKSPACE_WRITE),
+            )
+        except ValueError:
+            logger.warning("IDEA_SANDBOX_MODE 取值无效，回退 workspace-write")
+            self.sandbox = SandboxManager(self.workspace, SandboxMode.WORKSPACE_WRITE)
         self._tools: dict[str, dict[str, Any]] = {}
+        self._guards: list[Callable[[str, dict, Optional[ExecutionContext]], Optional[str]]] = []
         self._register_all()
+
+    def register_guard(self, guard: Callable[[str, dict, Optional[ExecutionContext]], Optional[str]]) -> Callable[[], None]:
+        """注册一个单调工具守卫（对齐 dsh ToolGuard）。
+
+        守卫只允许"拒绝"：返回 reason 字符串即拒绝该次调用；任何 guard 的拒绝
+        都不可被后续 guard 或调用方覆盖（守卫没有 allow 结果）。返回解除函数。
+        """
+        self._guards.append(guard)
+
+        def unregister() -> None:
+            if guard in self._guards:
+                self._guards.remove(guard)
+
+        return unregister
 
     def _register_all(self) -> None:
         self._tools = {
@@ -157,6 +200,13 @@ class ToolRegistry:
             self._audit(name, decision, execution_context, approval_id=(approval or {}).get("approval_id"))
             if approval and approval.get("granted"):
                 decision = ToolPolicyResult(PolicyDecision.ALLOW, "approval_granted", decision.risk)
+            elif approval and approval.get("policy") == "never":
+                return ToolResult(
+                    False,
+                    f"会话审批策略为 never：该操作需要审批但当前会话禁止弹审批（[{name}] 已拒绝）。",
+                    name,
+                    {"decision": PolicyDecision.REQUIRES_APPROVAL.value, "reason": "approval_policy_never", "approval_id": None},
+                )
             else:
                 approval_id = (approval or {}).get("approval_id")
                 return ToolResult(
@@ -169,6 +219,9 @@ class ToolRegistry:
             self._audit(name, decision, execution_context)
         if decision.decision != PolicyDecision.ALLOW:
             return ToolResult(False, self._denial_message(name, decision.reason_code), name, {"decision": decision.decision.value, "reason": decision.reason_code})
+        guard_reason = self._run_guards(name, args, execution_context)
+        if guard_reason:
+            return ToolResult(False, f"策略拒绝: {guard_reason}", name, {"decision": "deny", "reason": guard_reason})
         tool = self._tools.get(name)
         if not tool:
             return ToolResult(False, f"未知工具: {name}", name, {"decision": "deny", "reason": "unknown_tool"})
@@ -179,14 +232,38 @@ class ToolRegistry:
             else:
                 result = await function(**args)
             result.metadata = {**result.metadata, "decision": decision.decision.value, "reason": decision.reason_code}
+            result.metadata["presentation"] = self._presentation_meta(name, args, result)
+            if result.success:
+                self._validate_output_contract(name, result)
             if result.success and name in FILE_CHANGE_TOOLS:
                 self._record_file_change(name, args, result, execution_context)
             return result
         except TypeError as error:
-            return ToolResult(False, f"参数错误: {error}", name, {"decision": decision.decision.value, "reason": "invalid_arguments"})
+            return ToolResult(False, f"参数错误: {error}", name, {"decision": decision.decision.value, "reason": "invalid_arguments", "presentation": self._presentation_meta(name, args, ToolResult(False, "", name))})
         except Exception:
             logger.exception("Tool execution failed: %s", name)
-            return ToolResult(False, "工具执行异常", name, {"decision": decision.decision.value, "reason": "execution_error"})
+            return ToolResult(False, "工具执行异常", name, {"decision": decision.decision.value, "reason": "execution_error", "presentation": self._presentation_meta(name, args, ToolResult(False, "", name))})
+
+    def _presentation_meta(self, name: str, args: dict, result: ToolResult) -> dict:
+        """组装工具展示意图（对齐 dsh 卡片模型），成功与失败路径一致注入。"""
+        presentation = TOOL_PRESENTATION.get(name, {"card": "generic"})
+        if "diff" in result.metadata and presentation.get("card") == "diff":
+            presentation = {**presentation, "diffs": [{"path": args.get("file_path", ""), "diff": result.metadata["diff"]}]}
+        if name in ("run_command", "ssh_run") and "exit_code" in result.metadata:
+            presentation = {**presentation, "exit_code": result.metadata.get("exit_code")}
+        return presentation
+
+    def _run_guards(self, name: str, args: dict, execution_context: Optional[ExecutionContext]) -> Optional[str]:
+        """按注册顺序运行单调守卫；任一守卫拒绝即返回拒绝原因（不可被覆盖）。"""
+        for guard in self._guards:
+            try:
+                reason = guard(name, args, execution_context)
+            except Exception:
+                logger.exception("tool guard failed for %s", name)
+                reason = "guard_internal_error"
+            if reason:
+                return reason
+        return None
 
     def _find_grant(self, name: str, execution_context: Optional[ExecutionContext]) -> Optional[dict]:
         """查询当前账号在该空间的有效持久授权；命中则直接放行，无需临时审批。"""
@@ -212,6 +289,18 @@ class ToolRegistry:
         if store is None or not hasattr(store, "find_tool_approval"):
             return None
         request_context = execution_context.request_context
+        # 会话级审批策略：never → 直接拒绝且不创建审批请求（对齐 dsh 的 per-session 策略）
+        if execution_context.conversation_id and hasattr(store, "conversation_approval_policy"):
+            try:
+                policy = store.conversation_approval_policy(
+                    request_context.principal.account_id,
+                    request_context.space_id,
+                    execution_context.conversation_id,
+                )
+            except Exception:
+                policy = "ask"
+            if policy == "never":
+                return {"granted": False, "approval_id": None, "policy": "never"}
         fingerprint = hashlib.sha256(json.dumps({"tool": name, "args": args}, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
         existing = store.find_tool_approval(
             request_context.principal.account_id,
@@ -277,6 +366,29 @@ class ToolRegistry:
             )
         except Exception:
             logger.warning("Unable to record file change review for %s", name)
+
+    def _validate_output_contract(self, name: str, result: ToolResult) -> None:
+        """可选输出契约校验（对齐 dsh ToolOutputDefinition）。
+
+        工具可声明 output schema（如 {"type": "object"}）；执行成功后若输出不是
+        符合契约的 JSON，在 metadata["output_contract"] 标记失败（不改变 success，
+        输出仍为文本契约默认通过）。
+        """
+        tool = self._tools.get(name)
+        output = (tool or {}).get("output")
+        if not output:
+            return
+        expected = output.get("type")
+        if expected == "string":
+            return
+        try:
+            parsed = json.loads(result.output)
+        except json.JSONDecodeError:
+            result.metadata["output_contract"] = f"expected {expected}, got non-JSON"
+            return
+        valid = (expected == "object" and isinstance(parsed, dict)) or (expected == "array" and isinstance(parsed, list)) or (expected in ("number", "boolean", "null") and isinstance(parsed, (int, float, bool, type(None))))
+        if not valid:
+            result.metadata["output_contract"] = f"expected {expected}, got {type(parsed).__name__}"
 
     @staticmethod
     def _approval_message(name: str, args: dict, approval_id: Optional[str]) -> str:
@@ -499,7 +611,11 @@ class ToolRegistry:
             return None
 
     async def run_command(self, command: str, working_dir: str = ".", timeout_seconds: int = 60) -> ToolResult:
-        """仅在 Owner 批准授权放行后执行；工作目录限定在工作区、环境最小化、输出与超时受限。"""
+        """仅在 Owner 批准授权放行后执行；工作目录限定在工作区、环境最小化、输出与超时受限。
+
+        命令通过 OS 级沙箱（bwrap / Windows 受限令牌）执行：沙箱模式与强制力如实返回，
+        后端不可用时降级 partial 并叠加应用层防护。
+        """
         try:
             if any(pattern.search(command) for pattern in DANGEROUS_COMMAND_PATTERNS):
                 return ToolResult(False, "命令黑名单：包含破坏性/危险操作，即使审批也禁止执行。", "run_command", {"exit_code": -1})
@@ -511,23 +627,36 @@ class ToolRegistry:
                 full_command = ["powershell", "-NoProfile", "-NonInteractive", "-Command", command]
             else:
                 full_command = ["bash", "-c", command]
-            process = await asyncio.create_subprocess_exec(
-                *full_command,
-                cwd=str(wd),
-                env=self._minimal_env(),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            try:
-                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
-            except asyncio.TimeoutError:
-                process.kill()
-                await process.wait()
-                return ToolResult(False, f"命令执行超过 {timeout} 秒，已终止。", "run_command", {"exit_code": -1})
-            output = stdout.decode("utf-8", errors="replace") + stderr.decode("utf-8", errors="replace")
+            policy = self.sandbox.resolve()
+            wrapped = self.sandbox.wrap_command(full_command, policy)
+            sandbox_info = {"sandbox_mode": policy.mode.value, "sandbox_enforcement": self.sandbox.backend.enforcement.value}
+            # Windows 受限令牌后端：走受限令牌启动（真实 OS 级强制）
+            if os.name == "nt" and self.sandbox.backend.name == "windows-restricted-token" and policy.mode is not SandboxMode.DANGER_FULL_ACCESS:
+                exit_code, stdout, stderr, enforcement = await asyncio.to_thread(
+                    restricted_exec_argv, wrapped, str(wd), self._minimal_env(), timeout
+                )
+                sandbox_info["sandbox_enforcement"] = enforcement.value
+            else:
+                process = await asyncio.create_subprocess_exec(
+                    *wrapped,
+                    cwd=str(wd),
+                    env=self._minimal_env(),
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                try:
+                    stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
+                except asyncio.TimeoutError:
+                    process.kill()
+                    await process.wait()
+                    return ToolResult(False, f"命令执行超过 {timeout} 秒，已终止。", "run_command", {"exit_code": -1, **sandbox_info})
+                exit_code = process.returncode
+                stdout = stdout.decode("utf-8", errors="replace")
+                stderr = stderr.decode("utf-8", errors="replace")
+            output = stdout + stderr
             if len(output) > 100_000:
                 output = output[:100_000] + "\n...（输出已截断）"
-            return ToolResult(process.returncode == 0, f"$ {command}\n\n{output}" if output else f"$ {command}\n\n(无输出)", "run_command", {"exit_code": process.returncode})
+            return ToolResult(exit_code == 0, f"$ {command}\n\n{output}" if output else f"$ {command}\n\n(无输出)", "run_command", {"exit_code": exit_code, **sandbox_info})
         except PermissionError as error:
             return ToolResult(False, f"权限拒绝: {error}", "run_command")
         except FileNotFoundError:

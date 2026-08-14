@@ -27,6 +27,7 @@ class ExecutionContext:
     request_context: Any
     agent_id: str
     is_owner: bool = False
+    conversation_id: Optional[str] = None
 
     @property
     def principal(self) -> Any:
@@ -53,7 +54,7 @@ class ExecutionContext:
         return self.request_context.request_id
 
     def for_child_agent(self, agent_id: str) -> "ExecutionContext":
-        return ExecutionContext(self.request_context, agent_id, self.is_owner)
+        return ExecutionContext(self.request_context, agent_id, self.is_owner, self.conversation_id)
 
 
 @dataclass(frozen=True)

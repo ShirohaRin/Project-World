@@ -2,6 +2,7 @@
 LLM 客户端 — 支持豆包(Doubao)、智谱(GLM)、OpenAI 兼容 API
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -80,6 +81,25 @@ class LLMClient:
         self.default_provider = os.getenv("LLM_PROVIDER", "doubao")
         self.default_model = os.getenv("LLM_MODEL", "Doubao-Seed-2.1-Pro")
 
+        # 共享 HTTP 连接池：一个进程内复用同一 AsyncClient，避免每轮对话重建
+        # TLS 握手与连接（对齐 dsh 适配器的连接复用思路）。懒创建并绑定
+        # 当前事件循环；TestClient 等场景切换 loop 时自动重建。
+        self._client: Optional[httpx.AsyncClient] = None
+        self._client_loop: Optional[asyncio.AbstractEventLoop] = None
+
+    def _get_client(self) -> httpx.AsyncClient:
+        loop = asyncio.get_running_loop()
+        if self._client is None or self._client_loop is not loop:
+            self._client = httpx.AsyncClient(timeout=120)
+            self._client_loop = loop
+        return self._client
+
+    async def aclose(self) -> None:
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
+            self._client_loop = None
+
     def _connection(self, model: str, provider: str, llm_model_config: Optional[dict]) -> tuple[str, str, str]:
         if llm_model_config is not None:
             return llm_model_config["model"], llm_model_config["base_url"], llm_model_config["api_key"]
@@ -131,42 +151,42 @@ class LLMClient:
             body["tool_choice"] = "auto"
 
         try:
-            async with httpx.AsyncClient(timeout=120) as client:
-                resp = await client.post(
-                    url,
-                    headers={
-                        "Authorization": f"Bearer {api_key}",
-                        "Content-Type": "application/json",
-                    },
-                    json=body,
-                )
-                if resp.status_code != 200:
-                    logger.error(f"LLM API error: {resp.status_code} — {resp.text[:300]}")
-                    return self._fallback_response(messages, f"LLM 调用失败 ({resp.status_code})")
+            client = self._get_client()
+            resp = await client.post(
+                url,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json=body,
+            )
+            if resp.status_code != 200:
+                logger.error(f"LLM API error: {resp.status_code} — {resp.text[:300]}")
+                return self._fallback_response(messages, f"LLM 调用失败 ({resp.status_code})")
 
-                data = resp.json()
-                choice = data["choices"][0]
-                msg = choice.get("message", {})
+            data = resp.json()
+            choice = data["choices"][0]
+            msg = choice.get("message", {})
 
-                result = {
-                    "content": msg.get("content", ""),
-                    "finish_reason": choice.get("finish_reason", "stop"),
-                    "usage": data.get("usage", {}),
-                }
+            result = {
+                "content": msg.get("content", ""),
+                "finish_reason": choice.get("finish_reason", "stop"),
+                "usage": data.get("usage", {}),
+            }
 
-                # 处理 function calling
-                tool_calls = msg.get("tool_calls")
-                if tool_calls:
-                    result["tool_calls"] = [
-                        {
-                            "id": tc.get("id", ""),
-                            "name": tc["function"]["name"],
-                            "arguments": json.loads(tc["function"]["arguments"]),
-                        }
-                        for tc in tool_calls
-                    ]
+            # 处理 function calling
+            tool_calls = msg.get("tool_calls")
+            if tool_calls:
+                result["tool_calls"] = [
+                    {
+                        "id": tc.get("id", ""),
+                        "name": tc["function"]["name"],
+                        "arguments": json.loads(tc["function"]["arguments"]),
+                    }
+                    for tc in tool_calls
+                ]
 
-                return result
+            return result
 
         except Exception as e:
             logger.error(f"LLM error: {e}", exc_info=True)
@@ -212,48 +232,48 @@ class LLMClient:
             body["tool_choice"] = "auto"
 
         try:
-            async with httpx.AsyncClient(timeout=120) as client:
-                async with client.stream(
-                    "POST", url,
-                    headers={
-                        "Authorization": f"Bearer {api_key}",
-                        "Content-Type": "application/json",
-                    },
-                    json=body,
-                ) as resp:
-                    # 累积 tool_call 内容
-                    tool_call_acc = {}
-                    async for line in resp.aiter_lines():
-                        if not line.startswith("data: "):
-                            continue
-                        data_str = line[6:]
-                        if data_str == "[DONE]":
-                            break
-                        try:
-                            chunk = json.loads(data_str)
-                            delta = chunk.get("choices", [{}])[0].get("delta", {})
-                            fc = delta.get("tool_calls")
+            client = self._get_client()
+            async with client.stream(
+                "POST", url,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json=body,
+            ) as resp:
+                # 累积 tool_call 内容
+                tool_call_acc = {}
+                async for line in resp.aiter_lines():
+                    if not line.startswith("data: "):
+                        continue
+                    data_str = line[6:]
+                    if data_str == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(data_str)
+                        delta = chunk.get("choices", [{}])[0].get("delta", {})
+                        fc = delta.get("tool_calls")
 
-                            if fc:
-                                for tc in fc:
-                                    idx = tc.get("index", 0)
-                                    if idx not in tool_call_acc:
-                                        tool_call_acc[idx] = {"id": tc.get("id", ""), "name": "", "arguments": ""}
-                                    if "function" in tc:
-                                        if "name" in tc["function"]:
-                                            tool_call_acc[idx]["name"] = tc["function"]["name"]
-                                        if "arguments" in tc["function"]:
-                                            tool_call_acc[idx]["arguments"] += tc["function"]["arguments"]
-                            elif delta.get("content"):
-                                yield {"type": "text", "content": delta["content"]}
-                        except json.JSONDecodeError:
-                            continue
+                        if fc:
+                            for tc in fc:
+                                idx = tc.get("index", 0)
+                                if idx not in tool_call_acc:
+                                    tool_call_acc[idx] = {"id": tc.get("id", ""), "name": "", "arguments": ""}
+                                if "function" in tc:
+                                    if "name" in tc["function"]:
+                                        tool_call_acc[idx]["name"] = tc["function"]["name"]
+                                    if "arguments" in tc["function"]:
+                                        tool_call_acc[idx]["arguments"] += tc["function"]["arguments"]
+                        elif delta.get("content"):
+                            yield {"type": "text", "content": delta["content"]}
+                    except json.JSONDecodeError:
+                        continue
 
-                    # 如果累积了 tool calls，发出
-                    if tool_call_acc:
-                        yield {"type": "tool_call", "calls": list(tool_call_acc.values())}
+                # 如果累积了 tool calls，发出
+                if tool_call_acc:
+                    yield {"type": "tool_call", "calls": list(tool_call_acc.values())}
 
-                    yield {"type": "done"}
+                yield {"type": "done"}
 
         except Exception as e:
             logger.error(f"Stream error: {e}", exc_info=True)

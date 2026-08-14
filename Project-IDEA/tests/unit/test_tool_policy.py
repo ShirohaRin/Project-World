@@ -9,7 +9,7 @@ from pathlib import Path
 
 from platform_auth import Principal, RequestContext
 from tool_runtime.permissions import ExecutionContext, PolicyDecision, ToolPolicy
-from tool_runtime.registry import ToolRegistry
+from tool_runtime.registry import ToolRegistry, ToolResult
 
 
 class RecordingAuditStore:
@@ -588,6 +588,189 @@ class GrantFlowTests(unittest.TestCase):
         result = run(self.registry.execute("read_file", {"file_path": target}, self.member_context))
         self.assertFalse(result.success)
         self.assertIn("权限拒绝", result.output)
+
+
+class GuardMonotonicityTests(unittest.TestCase):
+    """单调守卫：只能拒绝、拒绝不可被覆盖、可解除（对齐 dsh ToolGuard）。"""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.workspace = Path(self.temp.name)
+        (self.workspace / "sample.txt").write_text("guard target", encoding="utf-8")
+        self.registry = ToolRegistry(workspace=str(self.workspace), allowed_dirs=[str(self.workspace)], audit_store=RecordingAuditStore())
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_guard_rejects_and_denial_cannot_be_overridden(self):
+        self.registry.register_guard(lambda name, args, ctx: "blocked-by-first" if name == "read_file" else None)
+        # 后注册的 guard 试图放行无效：任何 guard 拒绝即拒绝（无 allow 结果）
+        self.registry.register_guard(lambda name, args, ctx: None)
+        result = run(self.registry.execute("read_file", {"file_path": str(self.workspace / "sample.txt")}, None))
+        self.assertFalse(result.success)
+        self.assertEqual(result.metadata["reason"], "blocked-by-first")
+
+    def test_guard_only_denies_target_tool(self):
+        self.registry.register_guard(lambda name, args, ctx: "no-reads" if name == "read_file" else None)
+        allowed = run(self.registry.execute("list_dir", {"path": "."}, None))
+        self.assertTrue(allowed.success, allowed.output)
+
+    def test_unregister_restores_allow(self):
+        unregister = self.registry.register_guard(lambda name, args, ctx: "no-reads" if name == "read_file" else None)
+        denied = run(self.registry.execute("read_file", {"file_path": str(self.workspace / "sample.txt")}, None))
+        self.assertFalse(denied.success)
+        unregister()
+        allowed = run(self.registry.execute("read_file", {"file_path": str(self.workspace / "sample.txt")}, None))
+        self.assertTrue(allowed.success, allowed.output)
+
+    def test_throwing_guard_fails_closed(self):
+        def broken_guard(name, args, ctx):
+            raise RuntimeError("boom")
+
+        self.registry.register_guard(broken_guard)
+        result = run(self.registry.execute("read_file", {"file_path": str(self.workspace / "sample.txt")}, None))
+        self.assertFalse(result.success)
+        self.assertEqual(result.metadata["reason"], "guard_internal_error")
+
+
+class PolicyAwareStore(InMemoryApprovalStore):
+    """带会话级审批策略的内存 store（模拟 PlatformStore.conversation_approval_policy）。"""
+
+    def __init__(self, policy="ask"):
+        super().__init__()
+        self._policy = policy
+
+    def conversation_approval_policy(self, account_id, space_id, conversation_id):
+        return self._policy
+
+
+class NeverApprovalPolicyTests(unittest.TestCase):
+    """会话级 ask/never 审批策略：never 会话不弹审批、不创建审批请求。"""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.workspace = Path(self.temp.name)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def _context(self, conversation_id):
+        return ExecutionContext(
+            request_context=RequestContext("req-1", Principal("p-1", "account-1", "member", "token-1"), "dev-1", "space-1"),
+            agent_id="idea",
+            is_owner=False,
+            conversation_id=conversation_id,
+        )
+
+    def test_never_policy_rejects_without_creating_approval(self):
+        store = PolicyAwareStore(policy="never")
+        registry = ToolRegistry(workspace=str(self.workspace), allowed_dirs=[str(self.workspace)], audit_store=store)
+        result = run(registry.execute("run_command", {"command": "echo hi", "working_dir": "."}, self._context("conv-1")))
+        self.assertEqual(result.metadata["decision"], "requires_approval")
+        self.assertEqual(result.metadata["reason"], "approval_policy_never")
+        self.assertEqual(len(store.approvals), 0, "never 会话不应创建审批请求")
+
+    def test_ask_policy_creates_approval(self):
+        store = PolicyAwareStore(policy="ask")
+        registry = ToolRegistry(workspace=str(self.workspace), allowed_dirs=[str(self.workspace)], audit_store=store)
+        result = run(registry.execute("run_command", {"command": "echo hi", "working_dir": "."}, self._context("conv-1")))
+        self.assertEqual(result.metadata["decision"], "requires_approval")
+        self.assertEqual(result.metadata["reason"], "approval_required")
+        self.assertEqual(len(store.approvals), 1)
+
+    def test_never_without_conversation_falls_back_to_ask(self):
+        store = PolicyAwareStore(policy="never")
+        registry = ToolRegistry(workspace=str(self.workspace), allowed_dirs=[str(self.workspace)], audit_store=store)
+        result = run(registry.execute("run_command", {"command": "echo hi", "working_dir": "."}, self._context(None)))
+        self.assertEqual(result.metadata["reason"], "approval_required")
+        self.assertEqual(len(store.approvals), 1)
+
+
+class OutputContractTests(unittest.TestCase):
+    """工具输出契约：声明 output schema 后执行成功即校验（对齐 dsh ToolOutputDefinition）。"""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.registry = ToolRegistry(workspace=self.temp.name, allowed_dirs=[self.temp.name], audit_store=RecordingAuditStore())
+        self.registry._tools["json_probe"] = {
+            "function": self.registry.read_file,
+            "schema": self.registry._schema("json_probe", "probe", {}, []),
+            "output": {"type": "object"},
+        }
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_string_output_matches_string_contract(self):
+        self.registry._tools["read_file"]["output"] = {"type": "string"}
+        target = Path(self.temp.name) / "s.txt"
+        target.write_text("x", encoding="utf-8")
+        result = run(self.registry.execute("read_file", {"file_path": str(target)}, None))
+        self.assertTrue(result.success)
+        self.assertNotIn("output_contract", result.metadata)
+
+    def test_non_json_output_fails_object_contract(self):
+        result = ToolResult(True, "not-json", "json_probe")
+        self.registry._validate_output_contract("json_probe", result)
+        self.assertIn("output_contract", result.metadata)
+        self.assertIn("expected object", result.metadata["output_contract"])
+
+    def test_valid_json_object_passes_contract(self):
+        result = ToolResult(True, '{"ok": true}', "json_probe")
+        self.registry._validate_output_contract("json_probe", result)
+        self.assertNotIn("output_contract", result.metadata)
+
+    def test_json_array_fails_object_contract(self):
+        result = ToolResult(True, "[1, 2, 3]", "json_probe")
+        self.registry._validate_output_contract("json_probe", result)
+        self.assertIn("output_contract", result.metadata)
+        self.assertIn("got list", result.metadata["output_contract"])
+
+
+class PresentationIntentTests(unittest.TestCase):
+    """工具展示意图：工具结果携带 card 类型与结构化展示数据（对齐 dsh 卡片模型）。"""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.workspace = Path(self.temp.name)
+        (self.workspace / "p.txt").write_text("before", encoding="utf-8")
+        self.registry = ToolRegistry(workspace=str(self.workspace), allowed_dirs=[str(self.workspace)], audit_store=RecordingAuditStore())
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_read_file_carries_read_card(self):
+        result = run(self.registry.execute("read_file", {"file_path": str(self.workspace / "p.txt")}, None))
+        self.assertTrue(result.success)
+        self.assertEqual(result.metadata["presentation"]["card"], "read")
+
+    def test_edit_file_carries_diff_card_with_diffs(self):
+        result = run(self.registry.execute("edit_file", {"file_path": str(self.workspace / "p.txt"), "old_str": "before", "new_str": "after"}, None))
+        self.assertFalse(result.success)  # 需要 Owner 上下文
+        # Owner 上下文下成功并携带 diff 卡片
+        owner = ExecutionContext(
+            request_context=RequestContext("req-o", Principal("p-o", "acct-o", "owner", "t-o"), "dev-1", "space-1"),
+            agent_id="idea",
+            is_owner=True,
+        )
+        allowed = run(self.registry.execute("edit_file", {"file_path": str(self.workspace / "p.txt"), "old_str": "before", "new_str": "after"}, owner))
+        self.assertTrue(allowed.success, allowed.output)
+        presentation = allowed.metadata["presentation"]
+        self.assertEqual(presentation["card"], "diff")
+        self.assertEqual(presentation["diffs"][0]["path"], str(self.workspace / "p.txt"))
+        self.assertIn("-before", presentation["diffs"][0]["diff"])
+
+    def test_run_command_carries_terminal_card(self):
+        store = InMemoryApprovalStore()
+        store.create_capability_grant("acct-o", "owner", "command", workspace="space-1")
+        registry = ToolRegistry(workspace=str(self.workspace), allowed_dirs=[str(self.workspace)], audit_store=store)
+        owner = ExecutionContext(
+            request_context=RequestContext("req-o", Principal("p-o", "acct-o", "owner", "t-o"), "dev-1", "space-1"),
+            agent_id="idea",
+            is_owner=True,
+        )
+        result = run(registry.execute("run_command", {"command": "echo card", "working_dir": "."}, owner))
+        self.assertEqual(result.metadata["presentation"]["card"], "terminal")
 
 
 if __name__ == "__main__":
