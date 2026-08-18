@@ -2,6 +2,7 @@
 
 import asyncio
 import base64
+import inspect
 import json
 import logging
 import os
@@ -157,11 +158,16 @@ async def main() -> None:
         result = await asyncio.to_thread(functions[name], *(arguments.get(key, 5) if key == "top_k" else arguments.get(key) for key in ordered))
         return types.CallToolResult(content=[types.TextContent(type="text", text=result)])
 
-    server = Server(
-        "rag-owner-admin",
-        on_list_tools=list_tools,
-        on_call_tool=call_tool,
-    )
+    if "on_list_tools" in inspect.signature(Server).parameters:
+        server = Server(
+            "rag-owner-admin",
+            on_list_tools=list_tools,
+            on_call_tool=call_tool,
+        )
+    else:
+        server = Server("rag-owner-admin")
+        server.list_tools()(list_tools)
+        server.call_tool()(call_tool)
 
     log.info("Owner RAG MCP 已启动；服务地址：%s", SERVER_URL)
     async with stdio_server() as (read_stream, write_stream):
