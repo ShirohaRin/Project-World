@@ -128,34 +128,40 @@ async def main() -> None:
     }
     properties = {"project_id": {"type": "string"}, "collection": {"type": "string", "enum": sorted(COLLECTIONS)}, "document_path": {"type": "string"}, "content": {"type": "string"}, "local_path": {"type": "string"}, "query": {"type": "string"}, "top_k": {"type": "integer", "minimum": 1, "maximum": 10, "default": 5}}
 
-    server = Server("rag-owner-admin")
-
-    @server.list_tools()
-    async def list_tools() -> list[types.Tool]:
-        return [
-            types.Tool(
-                name=name,
-                description=description,
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        key: properties[key]
-                        for key in required + (["top_k"] if name == "search_project_knowledge" else [])
+    async def list_tools(_, __) -> types.ListToolsResult:
+        return types.ListToolsResult(
+            tools=[
+                types.Tool(
+                    name=name,
+                    description=description,
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            key: properties[key]
+                            for key in required + (["top_k"] if name == "search_project_knowledge" else [])
+                        },
+                        "required": required,
                     },
-                    "required": required,
-                },
-            )
-            for name, (description, required) in specs.items()
-        ]
+                )
+                for name, (description, required) in specs.items()
+            ]
+        )
 
-    @server.call_tool()
-    async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextContent]:
+    async def call_tool(_, params: types.CallToolRequestParams) -> types.CallToolResult:
+        name = params.name
+        arguments = params.arguments or {}
         functions = {"list_project_documents": list_project_documents, "read_project_document": read_project_document, "update_project_document": update_project_document, "upload_project_document": upload_project_document, "delete_project_document": delete_project_document, "rebuild_project_index": rebuild_project_index, "search_project_knowledge": search_project_knowledge}
         if name not in functions:
             raise ValueError(f"未知工具：{name}")
         ordered = specs[name][1] + (["top_k"] if name == "search_project_knowledge" else [])
         result = await asyncio.to_thread(functions[name], *(arguments.get(key, 5) if key == "top_k" else arguments.get(key) for key in ordered))
-        return [types.TextContent(type="text", text=result)]
+        return types.CallToolResult(content=[types.TextContent(type="text", text=result)])
+
+    server = Server(
+        "rag-owner-admin",
+        on_list_tools=list_tools,
+        on_call_tool=call_tool,
+    )
 
     log.info("Owner RAG MCP 已启动；服务地址：%s", SERVER_URL)
     async with stdio_server() as (read_stream, write_stream):
