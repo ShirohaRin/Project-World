@@ -157,7 +157,7 @@ class PlatformApiTests(unittest.TestCase):
         idea_headers = {"Authorization": f"Bearer {idea_credential.json()['token']}", "Content-Type": "application/json", "Accept": "application/json", "Host": "localhost:8000"}
         tools = self.client.post(endpoint, headers=idea_headers, json={"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
         self.assertEqual(tools.status_code, 200)
-        self.assertSetEqual({item["name"] for item in tools.json()["result"]["tools"]}, {"idea_chat", "idea_memory_save", "idea_session_get", "idea_task_status"})
+        self.assertSetEqual({item["name"] for item in tools.json()["result"]["tools"]}, {"idea_chat", "idea_memory_save", "idea_memory_search", "idea_session_get", "idea_task_status"})
         self.assertEqual(self.client.post("/mcp/memory/mcp", headers=idea_headers, json={"jsonrpc": "2.0", "id": 3, "method": "tools/list", "params": {}}).status_code, 401)
 
         original_run = self.main.agent_runners["idea"].run
@@ -182,6 +182,10 @@ class PlatformApiTests(unittest.TestCase):
             saved_memory = json.loads(saved.json()["result"]["content"][0]["text"])
             self.assertEqual(saved_memory["namespace"], "owner/owner-shiroha-nao")
             self.assertIn(saved_memory["id"], {item["id"] for item in self.main.platform_store.list_memories("account-owner", "space-project-world", ["owner/owner-shiroha-nao"])})
+            searched = self.client.post(endpoint, headers=idea_headers, json={"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": {"name": "idea_memory_search", "arguments": {"query": "Owner MCP memory write", "limit": 5}}})
+            self.assertEqual(searched.status_code, 200)
+            results = json.loads(searched.json()["result"]["content"][0]["text"])
+            self.assertIn(saved_memory["id"], {item["id"] for item in results["memories"]})
         finally:
             self.main.agent_runners["idea"].run = original_run
 
@@ -238,6 +242,13 @@ class PlatformApiTests(unittest.TestCase):
         tasks = self.client.get("/api/tasks", headers=self.headers)
         self.assertEqual(tasks.status_code, 200)
         self.assertEqual(tasks.json()["count"], 1)
+
+        deleted = self.client.delete(f"/api/conversations/{conversation_id}", headers=self.headers)
+        self.assertEqual(deleted.status_code, 200)
+        self.assertEqual(deleted.json()["conversation_id"], conversation_id)
+        self.assertEqual(self.client.get("/api/conversations", headers=self.headers).json()["count"], 0)
+        self.assertEqual(self.client.get("/api/tasks", headers=self.headers).json()["count"], 0)
+        self.assertEqual(self.client.get(f"/api/conversations/{conversation_id}", headers=self.headers).status_code, 404)
 
     def test_conversations_tasks_and_events_survive_module_reload(self):
         created = self.client.post("/api/conversations/new", headers=self.headers, json={"agent_id": "idea"})

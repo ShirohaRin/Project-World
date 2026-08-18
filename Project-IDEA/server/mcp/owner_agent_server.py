@@ -145,6 +145,36 @@ def idea_memory_save(content: str, category: str = "general") -> str:
 
 
 @mcp.tool()
+def idea_memory_search(query: str, limit: int = 10) -> str:
+    """检索当前 Owner 私域长期记忆，不调用 LLM 或执行智能体任务。"""
+    context = _context()
+    if not isinstance(query, str) or not (1 <= len(query.strip()) <= 500):
+        raise ValueError("query 必须为 1 到 500 个字符")
+    if not isinstance(limit, int):
+        raise ValueError("limit 必须是整数")
+
+    namespace = memory_namespaces(context).get("owner")
+    if not namespace:
+        raise PermissionError("当前身份无权读取 Owner 私域记忆")
+    memories = platform_store.list_memories(
+        context.principal.account_id,
+        context.space_id,
+        [namespace],
+        query=query.strip(),
+        limit=max(1, min(limit, 50)),
+    )
+    platform_store.write_audit(
+        "mcp.idea_memory_searched",
+        context,
+        action="search",
+        resource_type="memory",
+        decision="allowed",
+        metadata={"namespace": namespace, "result_count": len(memories)},
+    )
+    return json.dumps({"count": len(memories), "memories": memories}, ensure_ascii=False)
+
+
+@mcp.tool()
 def idea_session_get(conversation_id: str, limit: int = 20) -> str:
     """读取当前 Owner 空间内一段可跨设备续接的 IDEA 会话。"""
     context = _context()
