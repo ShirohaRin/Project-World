@@ -9,7 +9,7 @@ const targets = {
 
 if (!(flavor in targets)) throw new Error('Expected assistant or owner flavor')
 
-const source = resolve('..', 'release', flavor === 'owner' ? 'IDEA-Owner' : 'IDEA-Assistant', 'win-unpacked')
+const source = resolve('..', flavor === 'owner' ? 'setup' : 'release/IDEA-Assistant', 'win-unpacked')
 const destination = resolve('..', targets[flavor])
 
 if (!existsSync(source)) throw new Error(`Portable package does not exist: ${source}`)

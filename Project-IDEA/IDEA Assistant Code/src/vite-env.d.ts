@@ -16,7 +16,7 @@ interface Window {
     testService: () => Promise<ServiceHealth>
     checkForUpdates: () => Promise<UpdateStatus>
     installUpdate: () => Promise<UpdateStatus>
-    sendChat: (request: { agentId: string; message: string; conversationId?: string; useMemory?: boolean; modelKey?: ModelKey }) => Promise<ServiceChatResponse>
+    sendChat: (request: { agentId: string; message: string; contextBlocks?: Array<{ path: string; name: string; content: string }>; conversationId?: string; useMemory?: boolean; modelKey?: ModelKey }) => Promise<ServiceChatResponse>
     listConversations: () => Promise<ConversationSummary[]>
     getConversation: (conversationId: string) => Promise<ConversationDetail>
     deleteConversation: (conversationId: string) => Promise<void>
@@ -42,6 +42,7 @@ interface Window {
     revertOwnerFileChange?: (changeId: string) => Promise<void>
     listAuditEvents?: () => Promise<AuditEvent[]>
     createMemory?: (memory: { scope: 'personal' | 'shared' | 'owner'; category: string; content: string }) => Promise<MemoryRecord>
+    updateMemory?: (memory: { id: string; revision: number; category: string; content: string }) => Promise<MemoryRecord>
     deleteMemory?: (memory: { id: string; revision: number }) => Promise<void>
     onExecutionOutput: (listener: (event: ExecutionOutput) => void) => () => void
   }

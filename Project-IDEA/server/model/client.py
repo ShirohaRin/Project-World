@@ -8,7 +8,7 @@ import logging
 import os
 import time
 import urllib.request
-from typing import AsyncIterator, Optional
+from typing import Any, AsyncIterator, Optional
 
 import httpx
 
@@ -44,6 +44,29 @@ PROVIDERS = {
 }
 
 MODEL_ENV_PREFIXES = {"gpt": "GPT", "deepseek-v4-flash": "DEEPSEEK"}
+DEFAULT_CONTEXT_WINDOW_TOKENS = 1_000_000
+DEFAULT_MAX_OUTPUT_TOKENS = 16_384
+
+
+def _positive_int_env(name: str, default: int) -> int:
+    try:
+        return max(1, int(os.getenv(name, str(default))))
+    except ValueError:
+        return default
+
+
+def estimate_tokens(value: Any) -> int:
+    """Estimate tokens consistently without requiring a model-specific tokenizer."""
+    if value is None:
+        return 0
+    if not isinstance(value, str):
+        value = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    ascii_chars = sum(character.isascii() for character in value)
+    return (ascii_chars + 3) // 4 + (len(value) - ascii_chars + 1) // 2
+
+
+def estimate_request_tokens(messages: list[dict], tools: Optional[list[dict]] = None) -> int:
+    return 2 + sum(4 + estimate_tokens(message.get("role", "")) + estimate_tokens(message.get("content")) + estimate_tokens(message.get("tool_calls")) for message in messages) + (estimate_tokens(tools) if tools else 0)
 
 
 def selected_model_config(model_key: str) -> Optional[dict]:
@@ -56,6 +79,8 @@ def selected_model_config(model_key: str) -> Optional[dict]:
         "model": os.getenv(f"{prefix}_LLM_MODEL", "").strip(),
         "base_url": os.getenv(f"{prefix}_API_BASE_URL", "").strip().rstrip("/"),
         "api_key": os.getenv(f"{prefix}_API_KEY", "").strip(),
+        "context_window_tokens": _positive_int_env(f"{prefix}_CONTEXT_WINDOW_TOKENS", DEFAULT_CONTEXT_WINDOW_TOKENS),
+        "max_output_tokens": _positive_int_env(f"{prefix}_MAX_OUTPUT_TOKENS", DEFAULT_MAX_OUTPUT_TOKENS),
     }
 
 
@@ -114,6 +139,21 @@ class LLMClient:
     def get_base_url(self, provider: str) -> str:
         return self.providers.get(provider, {}).get("base_url", "")
 
+    @staticmethod
+    def _request_budget(messages: list[dict], tools: Optional[list[dict]], requested_max_tokens: int, llm_model_config: Optional[dict]) -> tuple[int, dict]:
+        context_window_tokens = int((llm_model_config or {}).get("context_window_tokens", DEFAULT_CONTEXT_WINDOW_TOKENS))
+        configured_max_output_tokens = int((llm_model_config or {}).get("max_output_tokens", DEFAULT_MAX_OUTPUT_TOKENS))
+        input_tokens = estimate_request_tokens(messages, tools)
+        available_output_tokens = context_window_tokens - input_tokens
+        max_tokens = min(requested_max_tokens, configured_max_output_tokens, available_output_tokens)
+        usage = {
+            "estimated_input_tokens": input_tokens,
+            "context_window_tokens": context_window_tokens,
+            "requested_max_tokens": requested_max_tokens,
+            "max_tokens": max(0, max_tokens),
+        }
+        return max_tokens, usage
+
     async def chat(
         self,
         messages: list[dict],
@@ -139,6 +179,14 @@ class LLMClient:
         if system_prompt:
             req_messages.append({"role": "system", "content": system_prompt})
         req_messages.extend(messages)
+        max_tokens, estimated_usage = self._request_budget(req_messages, tools, max_tokens, llm_model_config)
+        if max_tokens < 1:
+            logger.warning("LLM context budget exhausted: %s", estimated_usage)
+            return {
+                "content": "⚠️ 当前请求的上下文已超过模型预算，请减少文件上下文或重试。",
+                "finish_reason": "length",
+                "usage": estimated_usage,
+            }
 
         body = {
             "model": model_id,
@@ -149,6 +197,7 @@ class LLMClient:
         if tools:
             body["tools"] = tools
             body["tool_choice"] = "auto"
+        logger.info("LLM request usage: %s", estimated_usage)
 
         try:
             client = self._get_client()
@@ -168,10 +217,12 @@ class LLMClient:
             choice = data["choices"][0]
             msg = choice.get("message", {})
 
+            usage = {**estimated_usage, **data.get("usage", {})}
+            logger.info("LLM response usage: %s", usage)
             result = {
                 "content": msg.get("content", ""),
                 "finish_reason": choice.get("finish_reason", "stop"),
-                "usage": data.get("usage", {}),
+                "usage": usage,
             }
 
             # 处理 function calling
@@ -219,6 +270,12 @@ class LLMClient:
         if system_prompt:
             req_messages.append({"role": "system", "content": system_prompt})
         req_messages.extend(messages)
+        max_tokens, estimated_usage = self._request_budget(req_messages, tools, max_tokens, llm_model_config)
+        if max_tokens < 1:
+            logger.warning("LLM stream context budget exhausted: %s", estimated_usage)
+            yield {"type": "text", "content": "⚠️ 当前请求的上下文已超过模型预算，请减少文件上下文或重试。"}
+            yield {"type": "done", "usage": estimated_usage}
+            return
 
         body = {
             "model": model_id,
@@ -230,6 +287,7 @@ class LLMClient:
         if tools:
             body["tools"] = tools
             body["tool_choice"] = "auto"
+        logger.info("LLM stream request usage: %s", estimated_usage)
 
         try:
             client = self._get_client()

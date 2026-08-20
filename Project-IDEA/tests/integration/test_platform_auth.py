@@ -444,6 +444,30 @@ class PlatformApiTests(unittest.TestCase):
         )
         self.assertEqual(updated.status_code, 200)
         self.assertEqual(updated.json()["revision"], 2)
+    def test_chat_context_blocks_are_ephemeral_and_limited(self):
+        chat_endpoint = next(route.endpoint for route in self.client.app.routes if getattr(route, "path", None) == "/api/assistant/chat")
+        active_runners = chat_endpoint.__globals__["agent_runners"]
+        original_run = active_runners["idea"].run
+        received = {}
+
+        async def fake_run(user_message, history=None, stream=False, llm_model_config=None, execution_context=None):
+            received["message"] = user_message
+            return {"reply": "Handled.", "tool_calls_log": [], "iterations": 1}
+
+        active_runners["idea"].run = fake_run
+        try:
+            response = self.client.post("/api/assistant/chat", headers=self.headers, json={"agent_id": "idea", "message": "answer this", "context_blocks": [{"path": "src/main.py", "name": "main.py", "content": "print('context')"}]})
+            self.assertEqual(response.status_code, 200)
+            self.assertIn("src/main.py", received["message"])
+            self.assertIn("print('context')", received["message"])
+            self.assertEqual(received["message"].count("answer this"), 1)
+            conversation_id = response.json()["conversation_id"]
+            messages = self.client.get(f"/api/conversations/{conversation_id}", headers=self.headers).json()["messages"]
+            self.assertEqual(messages[0]["content"], "answer this")
+            self.assertEqual(self.client.post("/api/assistant/chat", headers=self.headers, json={"agent_id": "idea", "message": "too large", "context_blocks": [{"path": "large.txt", "name": "large.txt", "content": "x" * 4_000_001}]}).status_code, 413)
+        finally:
+            active_runners["idea"].run = original_run
+
     def test_daily_activity_delete_and_cleanup(self):
         chat_endpoint = next(route.endpoint for route in self.client.app.routes if getattr(route, "path", None) == "/api/assistant/chat")
         active_runners = chat_endpoint.__globals__["agent_runners"]
