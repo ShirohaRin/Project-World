@@ -218,6 +218,168 @@ class TestConversationStore:
         assert last == "conversation.deleted"
 
 
+class TestAgentRunStore:
+    def test_run_lifecycle_records_safe_snapshot_and_sync_events(self, platform_store):
+        store = platform_store
+        conversation_id = store.create_conversation("acct-1", "space-1", "idea")["conversation_id"]
+        snapshot = store.create_runtime_snapshot(
+            "acct-1",
+            "space-1",
+            conversation_id,
+            {
+                "agent_id": "idea",
+                "model_key": "gpt",
+                "prompt_version": "idea.v1",
+                "prompt_hash": "a" * 64,
+                "history_message_count": 3,
+                "context_block_count": 1,
+                "context_block_tokens": 20,
+                "memory_count": 1,
+                "memory_tokens": 10,
+                "secret": "must not be stored",
+                "context_blocks": [{"content": "private file content"}],
+            },
+        )
+        assert "secret" not in snapshot["payload"]
+        assert "context_blocks" not in snapshot["payload"]
+        assert snapshot["payload"]["prompt_version"] == "idea.v1"
+        assert snapshot["payload"]["prompt_hash"] == "a" * 64
+
+        run = store.create_agent_run(
+            "acct-1",
+            "space-1",
+            conversation_id,
+            "idea",
+            snapshot["id"],
+            "gpt",
+            prompt_version="idea.v1",
+            prompt_hash="a" * 64,
+        )
+        assert run["prompt_version"] == "idea.v1"
+        assert run["prompt_hash"] == "a" * 64
+        completed = store.complete_agent_run("acct-1", "space-1", run["id"], "Done.", 2, [{"name": "read_file", "success": True, "args": {"path": "private"}}])
+        assert completed is not None
+        assert completed["status"] == "completed"
+        assert completed["tool_calls"] == [{"name": "read_file", "success": True}]
+        assert completed["summary"] == "Done."
+
+        events = store.list_sync_events("acct-1", "space-1", 0, 100)
+        assert [event["event_type"] for event in events if event["aggregate_id"] == run["id"]] == ["agent_run.created", "agent_run.completed"]
+        assert [event["type"] for event in store.list_agent_run_events("acct-1", "space-1", run["id"])] == ["run.started", "tools.completed", "run.completed"]
+
+    def test_failed_run_and_scope_isolation(self, platform_store):
+        store = platform_store
+        conversation_id = store.create_conversation("acct-1", "space-1", "idea")["conversation_id"]
+        snapshot = store.create_runtime_snapshot("acct-1", "space-1", conversation_id, {})
+        run = store.create_agent_run("acct-1", "space-1", conversation_id, "idea", snapshot["id"], "gpt")
+        failed = store.fail_agent_run("acct-1", "space-1", run["id"], "ProviderError\nsecret details")
+        assert failed is not None and failed["status"] == "failed"
+        assert failed["error"] == "ProviderError secret details"
+        assert store.get_agent_run("acct-2", "space-1", run["id"]) is None
+        assert store.list_agent_runs("acct-2", "space-1") == []
+
+    def test_runtime_snapshot_counts_active_runs_tasks_and_approvals(self, platform_store):
+        store = platform_store
+        conversation_id = store.create_conversation("acct-1", "space-1", "idea")["conversation_id"]
+        snapshot = store.create_runtime_snapshot("acct-1", "space-1", conversation_id, {})
+        store.create_agent_run("acct-1", "space-1", conversation_id, "idea", snapshot["id"], "gpt")
+        store.create_task("acct-1", "space-1", "idea", "Continue", "", conversation_id)
+        store.create_tool_approval("acct-1", "space-1", "p-1", "idea", "run_command", "run-fingerprint", "run")
+        runtime = store.runtime_snapshot("acct-1", "space-1")
+        assert runtime["task_counts"] == {"active": 1, "pending": 1}
+        assert runtime["pending_approvals"] == 1
+
+
+class TestAgentAndRuntimeRegistry:
+    def test_registry_omits_disabled_agents(self, platform_store):
+        store = platform_store
+        with store._connect() as connection:
+            connection.execute("UPDATE agent_registry SET status = 'disabled' WHERE agent_id = 'pwa'")
+        assert all(agent["agent_id"] != "pwa" for agent in store.list_agent_registry())
+
+    def test_registry_returns_latest_active_version(self, platform_store):
+        store = platform_store
+        with store._connect() as connection:
+            connection.execute(
+                "INSERT INTO agent_registry(agent_id, version, display_name, model_policy_json, tool_policy_json, memory_scopes_json, delegation_policy_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                ("pwa", 2, "PWA v2", '["gpt"]', '["file.read"]', '["shared"]', '[]', time.time()),
+            )
+        agents = {agent["agent_id"]: agent for agent in store.list_agent_registry()}
+        assert agents["pwa"]["version"] == 2
+        assert agents["pwa"]["models"] == ["gpt"]
+
+    def test_runtime_registration_is_scoped_upsert_and_sanitized(self, platform_store):
+        store = platform_store
+        first = store.register_device_runtime(
+            "acct-1", "space-1", "desktop-a", "desktop",
+            {"workspace": True, "terminal": True, "secret": "never persisted"},
+        )
+        second = store.register_device_runtime(
+            "acct-1", "space-1", "desktop-a", "desktop",
+            {"browser": True, "plugins": True},
+        )
+        assert first["id"] == second["id"]
+        assert second["capabilities"] == {
+            "workspace": False, "terminal": False, "local_models": False,
+            "gpu": False, "browser": True, "computer": False,
+            "mcp": False, "plugins": True,
+        }
+        assert store.list_device_runtimes("acct-2", "space-1") == []
+
+    def test_runtime_heartbeat_requires_existing_runtime_and_marks_it_online(self, platform_store):
+        store = platform_store
+        assert store.heartbeat_device_runtime("acct-1", "space-1", "desktop-a", "desktop") is None
+        created = store.register_device_runtime("acct-1", "space-1", "desktop-a", "desktop", {})
+        with store._connect() as connection:
+            connection.execute("UPDATE device_runtimes SET status = 'offline', last_seen_at = 0 WHERE runtime_id = ?", (created["id"],))
+        heartbeat = store.heartbeat_device_runtime("acct-1", "space-1", "desktop-a", "desktop")
+        assert heartbeat is not None and heartbeat["status"] == "online"
+        assert store.runtime_snapshot("acct-1", "space-1")["device_runtimes"][0]["id"] == created["id"]
+
+    def test_handoff_lifecycle_enforces_ownership_and_state(self, platform_store):
+        store = platform_store
+        conversation_id = store.create_conversation("acct-1", "space-1", "idea")["conversation_id"]
+        snapshot = store.create_runtime_snapshot("acct-1", "space-1", conversation_id, {})
+        target = store.register_device_runtime("acct-1", "space-1", "desktop-a", "desktop", {})
+        handoff = store.create_task_handoff(
+            "acct-1", "space-1", conversation_id, "idea", snapshot["id"],
+            "cloud_to_local", target_runtime_id=target["id"],
+        )
+        assert handoff["status"] == "pending"
+        with pytest.raises(ValueError):
+            store.transition_task_handoff("acct-1", "space-1", handoff["id"], "accepted", "other-runtime", "desktop-a")
+        with pytest.raises(ValueError):
+            store.transition_task_handoff("acct-1", "space-1", handoff["id"], "accepted", target["id"])
+        accepted = store.transition_task_handoff("acct-1", "space-1", handoff["id"], "accepted", target["id"], "desktop-a")
+        assert accepted is not None and accepted["status"] == "accepted"
+        running = store.transition_task_handoff("acct-1", "space-1", handoff["id"], "running", target["id"], "desktop-a")
+        assert running is not None and running["status"] == "running"
+        completed = store.transition_task_handoff("acct-1", "space-1", handoff["id"], "completed", target["id"], "desktop-a")
+        assert completed is not None and completed["status"] == "completed"
+        assert store.get_task_handoff("acct-2", "space-1", handoff["id"]) is None
+
+    def test_stale_pending_and_accepted_handoffs_are_cancelled_but_running_is_preserved(self, platform_store):
+        store = platform_store
+        conversation_id = store.create_conversation("acct-1", "space-1", "idea")["conversation_id"]
+        target = store.register_device_runtime("acct-1", "space-1", "desktop-a", "desktop", {})
+        now = time.time()
+        handoffs = []
+        for status in ("pending", "accepted", "running"):
+            snapshot = store.create_runtime_snapshot("acct-1", "space-1", conversation_id, {})
+            handoff = store.create_task_handoff("acct-1", "space-1", conversation_id, "idea", snapshot["id"], "cloud_to_local", target_runtime_id=target["id"])
+            if status != "pending":
+                store.transition_task_handoff("acct-1", "space-1", handoff["id"], "accepted", target["id"], "desktop-a")
+            if status == "running":
+                store.transition_task_handoff("acct-1", "space-1", handoff["id"], "running", target["id"], "desktop-a")
+            handoffs.append(handoff["id"])
+        with store._connect() as connection:
+            connection.execute("UPDATE task_handoffs SET created_at = ?, accepted_at = ?, started_at = ?", (now - 3600, now - 3600, now - 3600))
+        assert store.expire_stale_task_handoffs("acct-1", "space-1", now) == 2
+        assert store.get_task_handoff("acct-1", "space-1", handoffs[0])["error"] == "handoff_expired_pending"
+        assert store.get_task_handoff("acct-1", "space-1", handoffs[1])["error"] == "handoff_expired_accepted"
+        assert store.get_task_handoff("acct-1", "space-1", handoffs[2])["status"] == "running"
+
+
 class TestScheduledJobs:
     def test_job_lifecycle_create_list_due_update_delete(self, platform_store):
         store = platform_store

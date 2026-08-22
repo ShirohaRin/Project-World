@@ -27,12 +27,13 @@ class AgentRunner:
         self.model = model
         self.provider = provider
 
-    async def run(self, user_message: str, history: list[dict] = None, stream: bool = False, llm_model_config: Optional[dict] = None, execution_context: Optional[ExecutionContext] = None) -> dict:
+    async def run(self, user_message: str, history: list[dict] = None, stream: bool = False, llm_model_config: Optional[dict] = None, execution_context: Optional[ExecutionContext] = None, system_prompt: Optional[str] = None) -> dict:
+        active_system_prompt = system_prompt or (execution_context.prompt_text if execution_context else None) or self.system_prompt
         messages = self._build_messages(user_message, history)
         tool_schemas = self.tools.schemas_for(execution_context)
         tool_calls_log = []
         for iterations in range(1, MAX_TOOL_ROUNDS + 1):
-            response = await self.llm.chat(messages=messages, tools=tool_schemas, model=self.model, provider=self.provider, system_prompt=self.system_prompt, llm_model_config=llm_model_config)
+            response = await self.llm.chat(messages=messages, tools=tool_schemas, model=self.model, provider=self.provider, system_prompt=active_system_prompt, llm_model_config=llm_model_config)
             if response.get("content"):
                 return {"reply": response["content"], "tool_calls_log": tool_calls_log, "iterations": iterations, "usage": response.get("usage", {})}
             tool_calls = response.get("tool_calls", [])
@@ -48,7 +49,8 @@ class AgentRunner:
                 ])
         return {"reply": f"已达到最大工具调用轮次 ({MAX_TOOL_ROUNDS})。", "tool_calls_log": tool_calls_log, "iterations": MAX_TOOL_ROUNDS}
 
-    async def run_stream(self, user_message: str, history: list[dict] = None, llm_model_config: Optional[dict] = None, execution_context: Optional[ExecutionContext] = None) -> AsyncIterator[dict]:
+    async def run_stream(self, user_message: str, history: list[dict] = None, llm_model_config: Optional[dict] = None, execution_context: Optional[ExecutionContext] = None, system_prompt: Optional[str] = None) -> AsyncIterator[dict]:
+        active_system_prompt = system_prompt or (execution_context.prompt_text if execution_context else None) or self.system_prompt
         messages = self._build_messages(user_message, history)
         tool_schemas = self.tools.schemas_for(execution_context)
         tool_calls_log = []
@@ -56,7 +58,7 @@ class AgentRunner:
         while iterations < MAX_TOOL_ROUNDS:
             iterations += 1
             has_tool_call = False
-            async for chunk in self.llm.chat_stream(messages=messages, tools=tool_schemas, model=self.model, provider=self.provider, system_prompt=self.system_prompt, llm_model_config=llm_model_config):
+            async for chunk in self.llm.chat_stream(messages=messages, tools=tool_schemas, model=self.model, provider=self.provider, system_prompt=active_system_prompt, llm_model_config=llm_model_config):
                 if chunk["type"] == "text":
                     yield {"type": "text", "content": chunk["content"]}
                 elif chunk["type"] == "tool_call":
@@ -77,7 +79,20 @@ class AgentRunner:
                         ])
             if not has_tool_call:
                 break
-        yield {"type": "done", "iterations": iterations, "tool_calls_count": len(tool_calls_log)}
+        yield {
+            "type": "done",
+            "iterations": iterations,
+            "tool_calls_count": len(tool_calls_log),
+            "tool_calls": [
+                {
+                    "name": item["name"],
+                    "success": item["success"],
+                    "decision": item.get("decision"),
+                    "reason": item.get("reason"),
+                }
+                for item in tool_calls_log
+            ],
+        }
 
     @staticmethod
     def _build_messages(user_message: str, history: list[dict] = None) -> list[dict]:

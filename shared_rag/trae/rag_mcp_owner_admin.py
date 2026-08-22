@@ -26,7 +26,12 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [RAG-OWNER-MCP] %(le
 log = logging.getLogger("rag-owner-mcp")
 
 
-def require_project_id(value: Any) -> str:
+def require_project_id(value: Any, *, optional: bool = False) -> str:
+    """Owner / 完整权限 IDEA 可省略 project_id（省略时返回 all，表示整个 RAG 库）。"""
+    if value is None or value == "":
+        if optional:
+            return "all"
+        raise ValueError("project_id 必须是非空字符串。")
     if not isinstance(value, str) or not value.strip():
         raise ValueError("project_id 必须是非空字符串。")
     return value.strip()
@@ -63,12 +68,12 @@ def request_json(method: str, endpoint: str, *, params: dict[str, Any] | None = 
 
 
 def list_project_documents(project_id: str, collection: str) -> str:
-    project_id, collection = require_project_id(project_id), require_collection(collection)
+    project_id, collection = require_project_id(project_id, optional=True), require_collection(collection)
     return json.dumps(request_json("GET", f"/api/projects/{quote(project_id, safe='')}/documents/{collection}"), ensure_ascii=False, indent=2)
 
 
 def read_project_document(project_id: str, collection: str, document_path: str) -> str:
-    project_id, collection, document_path = require_project_id(project_id), require_collection(collection), require_document_path(document_path)
+    project_id, collection, document_path = require_project_id(project_id, optional=True), require_collection(collection), require_document_path(document_path)
     if not SERVER_URL or not IDEA_OWNER_TOKEN:
         raise RuntimeError("RAG_SERVER_URL 或 RAG_IDEA_OWNER_TOKEN 尚未配置。")
     try:
@@ -84,14 +89,14 @@ def read_project_document(project_id: str, collection: str, document_path: str) 
 
 
 def update_project_document(project_id: str, collection: str, document_path: str, content: str) -> str:
-    project_id, collection, document_path = require_project_id(project_id), require_collection(collection), require_document_path(document_path)
+    project_id, collection, document_path = require_project_id(project_id, optional=True), require_collection(collection), require_document_path(document_path)
     if Path(document_path).suffix.lower() not in {".txt", ".md"} or not isinstance(content, str):
         raise ValueError("仅可用字符串内容更新 .txt 或 .md 文档。")
     return json.dumps(request_json("PUT", f"/api/projects/{quote(project_id, safe='')}/documents/{collection}/{quote(document_path, safe='/')}", body={"content": content}), ensure_ascii=False, indent=2)
 
 
 def upload_project_document(project_id: str, collection: str, local_path: str) -> str:
-    project_id, collection = require_project_id(project_id), require_collection(collection)
+    project_id, collection = require_project_id(project_id, optional=True), require_collection(collection)
     path = Path(local_path).expanduser().resolve() if isinstance(local_path, str) else None
     if not path or not path.is_file() or path.suffix.lower() not in UPLOAD_EXTENSIONS:
         raise ValueError("local_path 必须是存在的 TXT、MD、PDF 或 DOCX 文件。")
@@ -101,17 +106,17 @@ def upload_project_document(project_id: str, collection: str, local_path: str) -
 
 
 def delete_project_document(project_id: str, collection: str, document_path: str) -> str:
-    project_id, collection, document_path = require_project_id(project_id), require_collection(collection), require_document_path(document_path)
+    project_id, collection, document_path = require_project_id(project_id, optional=True), require_collection(collection), require_document_path(document_path)
     return json.dumps(request_json("DELETE", f"/api/projects/{quote(project_id, safe='')}/documents/{collection}/{quote(document_path, safe='/')}"), ensure_ascii=False, indent=2)
 
 
 def rebuild_project_index(project_id: str, collection: str) -> str:
-    project_id, collection = require_project_id(project_id), require_collection(collection)
+    project_id, collection = require_project_id(project_id, optional=True), require_collection(collection)
     return json.dumps(request_json("POST", f"/api/projects/{quote(project_id, safe='')}/rebuild", params={"collection": collection}), ensure_ascii=False, indent=2)
 
 
 def search_project_knowledge(project_id: str, collection: str, query: str, top_k: int = 5) -> str:
-    project_id, collection = require_project_id(project_id), require_collection(collection)
+    project_id, collection = require_project_id(project_id, optional=True), require_collection(collection)
     if not isinstance(query, str) or not query.strip() or not isinstance(top_k, int):
         raise ValueError("query 必须非空，top_k 必须是整数。")
     return json.dumps(request_json("POST", f"/api/projects/{quote(project_id, safe='')}/search", params={"collection": collection}, body={"query": query.strip(), "top_k": max(1, min(top_k, 10))}), ensure_ascii=False, indent=2)
@@ -119,15 +124,15 @@ def search_project_knowledge(project_id: str, collection: str, query: str, top_k
 
 async def main() -> None:
     specs = {
-        "list_project_documents": ("列出项目集合内文档；项目列表仅在 IDEA 控制台管理。", ["project_id", "collection"]),
-        "read_project_document": ("读取项目文档。", ["project_id", "collection", "document_path"]),
-        "update_project_document": ("更新项目 TXT 或 Markdown 文档。", ["project_id", "collection", "document_path", "content"]),
-        "upload_project_document": ("上传本机文档到项目集合。", ["project_id", "collection", "local_path"]),
-        "delete_project_document": ("删除项目文档。", ["project_id", "collection", "document_path"]),
-        "rebuild_project_index": ("重建项目集合索引。", ["project_id", "collection"]),
-        "search_project_knowledge": ("检索项目集合知识。", ["project_id", "collection", "query"]),
+        "list_project_documents": ("列出项目集合内文档（Owner 省略 project_id 时列出整个 RAG 库）。", ["collection"]),
+        "read_project_document": ("读取项目文档（Owner 省略 project_id 时从整个 RAG 库定位）。", ["collection", "document_path"]),
+        "update_project_document": ("更新项目 TXT 或 Markdown 文档（Owner 省略 project_id 时对整个 RAG 库定位）。", ["collection", "document_path", "content"]),
+        "upload_project_document": ("上传本机文档到项目集合（Owner 省略 project_id 时上传到整个 RAG 库）。", ["collection", "local_path"]),
+        "delete_project_document": ("删除项目文档（Owner 省略 project_id 时对整个 RAG 库定位）。", ["collection", "document_path"]),
+        "rebuild_project_index": ("重建项目集合索引（Owner 省略 project_id 时重建整个 RAG 库索引）。", ["collection"]),
+        "search_project_knowledge": ("检索项目集合知识（Owner 省略 project_id 时检索整个 RAG 库）。", ["collection", "query"]),
     }
-    properties = {"project_id": {"type": "string"}, "collection": {"type": "string", "enum": sorted(COLLECTIONS)}, "document_path": {"type": "string"}, "content": {"type": "string"}, "local_path": {"type": "string"}, "query": {"type": "string"}, "top_k": {"type": "integer", "minimum": 1, "maximum": 10, "default": 5}}
+    properties = {"project_id": {"type": "string", "description": "项目 id；Owner 可省略以查询整个 RAG 库"}, "collection": {"type": "string", "enum": sorted(COLLECTIONS)}, "document_path": {"type": "string"}, "content": {"type": "string"}, "local_path": {"type": "string"}, "query": {"type": "string"}, "top_k": {"type": "integer", "minimum": 1, "maximum": 10, "default": 5}}
 
     async def list_tools(*_args: Any) -> types.ListToolsResult:
         return types.ListToolsResult(

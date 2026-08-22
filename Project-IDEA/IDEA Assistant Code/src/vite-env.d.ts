@@ -14,15 +14,31 @@ interface Window {
     passwordLogin: (email: string, password: string) => Promise<{ route: string; principal: { account_id: string; role: string } }>
     logout: () => Promise<void>
     testService: () => Promise<ServiceHealth>
+    getNekoRuntime: () => Promise<NekoRuntime>
+    getRagRuntime: () => Promise<RagRuntime>
+    getRagStats: () => Promise<RagStats>
+    getRagDocuments: () => Promise<RagDocList>
+    ragSearch: (collection: string, query: string, topK?: number) => Promise<RagSearchResponse>
+    ragIngest: (collection: string) => Promise<Array<{ status: string; filename: string; collection: string }>>
+    ragRebuild: (collection?: string) => Promise<{ status: string; message: string }>
     checkForUpdates: () => Promise<UpdateStatus>
     installUpdate: () => Promise<UpdateStatus>
     sendChat: (request: { agentId: string; message: string; contextBlocks?: Array<{ path: string; name: string; content: string }>; conversationId?: string; useMemory?: boolean; modelKey?: ModelKey }) => Promise<ServiceChatResponse>
+    sendChatStream: (request: { agentId: string; message: string; contextBlocks?: Array<{ path: string; name: string; content: string }>; conversationId?: string; useMemory?: boolean; modelKey?: ModelKey }) => Promise<ServiceChatResponse>
+    onChatStreamEvent: (listener: (event: ChatStreamEvent) => void) => () => void
     listConversations: () => Promise<ConversationSummary[]>
     getConversation: (conversationId: string) => Promise<ConversationDetail>
     deleteConversation: (conversationId: string) => Promise<void>
     listTasks: () => Promise<TaskSummary[]>
     deleteTask: (taskId: string) => Promise<void>
     getSyncEvents: (after: number) => Promise<SyncSnapshot>
+    getRuntimeSnapshot: () => Promise<RuntimeSnapshot>
+    registerRuntime: () => Promise<DeviceRuntime>
+    heartbeatRuntime: () => Promise<DeviceRuntime>
+    listPendingHandoffs: () => Promise<TaskHandoff[]>
+    executeHandoff: (handoffId: string, workspace: string) => Promise<{ sessionId: string }>
+    listRuns: () => Promise<RunSummary[]>
+    getRunDetail: (runId: string) => Promise<RunSummary>
     listMemories?: () => Promise<MemoryRecord[]>
     listOwnerDevices?: () => Promise<OwnerDevice[]>
     approveOwnerDevice?: (ownerDeviceId: string) => Promise<void>
@@ -52,10 +68,22 @@ interface ExecutionOutput { sessionId: string; stream: 'system' | 'stdout' | 'st
 interface FileTreeEntry { name: string; path: string; kind: 'file' | 'directory'; children?: FileTreeEntry[] }
 interface ServiceConfig { serverUrl: string; spaceId: string; deviceId: string; signedIn: boolean; route?: string }
 interface ServiceHealth { status: string; version?: string; llmAvailable?: boolean }
+interface NekoRuntime { status: 'starting' | 'ready' | 'error' | 'stopped'; url?: string; error?: string }
+interface RagRuntime { status: 'starting' | 'ready' | 'error' | 'stopped'; url?: string; error?: string }
+interface RagStats { status: string; private_records: number; public_records: number; novel_records: number; data_records: number; embedding_model: string }
+interface RagDocList { private: string[]; public: string[]; novel: string[]; data: string[] }
+interface RagSearchResult { rank: number; similarity: number; source: string; content: string }
+interface RagSearchResponse { query: string; collection: string; total_results: number; results: RagSearchResult[] }
 interface UpdateInfo { version: string; releaseNotes: string; publishedAt: string }
 interface UpdateStatus { state: 'checked' | 'current' | 'available' | 'downloading' | 'downloaded' | 'error'; update?: UpdateInfo; message?: string }
 type ModelKey = 'gpt' | 'deepseek-v4-flash'
-interface ServiceChatResponse { reply: string; conversationId: string; agentId: string; dispatchedTo?: string | null; modelKey: ModelKey }
+interface ServiceChatResponse { reply: string; conversationId: string; agentId: string; dispatchedTo?: string | null; modelKey: ModelKey; runId: string }
+interface ChatStreamEvent { type: 'run.started' | 'model.text.delta' | 'tool.started' | 'tool.completed' | 'run.completed' | 'run.failed'; payload: Record<string, unknown> }
+interface RunEvent { id: string; type: 'run.started' | 'tool.started' | 'tool.completed' | 'tools.completed' | 'run.completed' | 'run.failed'; detail: string; created_at: number }
+interface RunSummary { id: string; conversation_id: string; task_id?: string | null; agent_id: string; status: 'running' | 'completed' | 'failed'; model_key: ModelKey; started_at: number; finished_at?: number | null; iterations?: number | null; tool_calls: Array<{ name: string; success: boolean }>; summary?: string | null; error?: string | null; events?: RunEvent[] }
+interface DeviceRuntime { id: string; device_id: string; kind: 'desktop' | 'owner_desktop' | 'cloud'; capabilities: { workspace: boolean; terminal: boolean; local_models: boolean; gpu: boolean; browser: boolean; computer: boolean; mcp: boolean; plugins: boolean }; status: 'online' | 'offline'; registered_at: number; last_seen_at: number }
+interface TaskHandoff { id: string; conversation_id: string; agent_id: string; snapshot_id: string; direction: 'local_to_cloud' | 'cloud_to_local'; status: 'pending' | 'accepted' | 'running' | 'completed' | 'failed' | 'cancelled'; created_at: number; has_execution_manifest?: boolean; manifest_hash?: string | null }
+interface RuntimeSnapshot { observed_at: number; cloud: { status: 'online' | 'degraded' | 'offline'; detail?: string }; device_runtimes: DeviceRuntime[]; active_runs: RunSummary[]; recent_runs: RunSummary[]; task_counts: { active: number; pending: number }; pending_approvals: number }
 interface ConversationSummary { id: string; agent_id: string; messages: number; created_at: number; updated_at: number }
 interface ConversationDetail { id: string; messages: Array<{ id: string; role: 'user' | 'assistant'; content: string; timestamp: number }> }
 interface TaskSummary { id: string; title: string; conversation_id?: string | null; status: string; created_at: number }

@@ -1,7 +1,11 @@
+import asyncio
+import hashlib
 import importlib
 import json
 import os
 import sys
+
+from platform_auth import Principal
 import tempfile
 import unittest
 import gc
@@ -157,12 +161,12 @@ class PlatformApiTests(unittest.TestCase):
         idea_headers = {"Authorization": f"Bearer {idea_credential.json()['token']}", "Content-Type": "application/json", "Accept": "application/json", "Host": "localhost:8000"}
         tools = self.client.post(endpoint, headers=idea_headers, json={"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
         self.assertEqual(tools.status_code, 200)
-        self.assertSetEqual({item["name"] for item in tools.json()["result"]["tools"]}, {"idea_chat", "idea_memory_save", "idea_memory_search", "idea_session_get", "idea_task_status"})
+        self.assertSetEqual({item["name"] for item in tools.json()["result"]["tools"]}, {"idea_chat", "idea_memory_save", "idea_memory_search", "idea_session_get", "idea_task_status", "idea_task_handoff_create"})
         self.assertEqual(self.client.post("/mcp/memory/mcp", headers=idea_headers, json={"jsonrpc": "2.0", "id": 3, "method": "tools/list", "params": {}}).status_code, 401)
 
         original_run = self.main.agent_runners["idea"].run
 
-        async def fake_run(user_message, history=None, stream=False, execution_context=None):
+        async def fake_run(user_message, history=None, stream=False, llm_model_config=None, execution_context=None):
             return {"reply": "Owner agent reply", "tool_calls_log": [], "iterations": 1}
 
         self.main.agent_runners["idea"].run = fake_run
@@ -171,6 +175,8 @@ class PlatformApiTests(unittest.TestCase):
             self.assertEqual(chat.status_code, 200)
             payload = json.loads(chat.json()["result"]["content"][0]["text"])
             self.assertEqual(payload["agent_id"], "idea")
+            self.assertIn("run_id", payload)
+            self.assertEqual(self.client.get(f"/api/runs/{payload['run_id']}", headers=self.headers).json()["status"], "completed")
             conversation_id = payload["conversation_id"]
             second_headers = {"Authorization": f"Bearer {idea_credential_b.json()['token']}", "Content-Type": "application/json", "Accept": "application/json", "Host": "localhost:8000"}
             session = self.client.post(endpoint, headers=second_headers, json={"jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": {"name": "idea_session_get", "arguments": {"conversation_id": conversation_id}}})
@@ -217,13 +223,15 @@ class PlatformApiTests(unittest.TestCase):
         self.assertEqual(denied.status_code, 403)
 
     def test_conversations_and_tasks_are_scoped_to_space(self):
+        initial_conversation_ids = {item["id"] for item in self.client.get("/api/conversations", headers=self.headers).json()["conversations"]}
+        initial_task_ids = {item["id"] for item in self.client.get("/api/tasks", headers=self.headers).json()["tasks"]}
         created = self.client.post("/api/conversations/new", headers=self.headers, json={"agent_id": "idea"})
         self.assertEqual(created.status_code, 200)
         conversation_id = created.json()["id"]
 
         visible = self.client.get("/api/conversations", headers=self.headers)
         self.assertEqual(visible.status_code, 200)
-        self.assertEqual(visible.json()["count"], 1)
+        self.assertEqual({item["id"] for item in visible.json()["conversations"]} - initial_conversation_ids, {conversation_id})
 
         missing = self.client.get(
             f"/api/conversations/{conversation_id}",
@@ -241,13 +249,15 @@ class PlatformApiTests(unittest.TestCase):
 
         tasks = self.client.get("/api/tasks", headers=self.headers)
         self.assertEqual(tasks.status_code, 200)
-        self.assertEqual(tasks.json()["count"], 1)
+        self.assertEqual({item["id"] for item in tasks.json()["tasks"]} - initial_task_ids, {task.json()["id"]})
 
         deleted = self.client.delete(f"/api/conversations/{conversation_id}", headers=self.headers)
         self.assertEqual(deleted.status_code, 200)
         self.assertEqual(deleted.json()["conversation_id"], conversation_id)
-        self.assertEqual(self.client.get("/api/conversations", headers=self.headers).json()["count"], 0)
-        self.assertEqual(self.client.get("/api/tasks", headers=self.headers).json()["count"], 0)
+        remaining_conversation_ids = {item["id"] for item in self.client.get("/api/conversations", headers=self.headers).json()["conversations"]}
+        remaining_task_ids = {item["id"] for item in self.client.get("/api/tasks", headers=self.headers).json()["tasks"]}
+        self.assertEqual(remaining_conversation_ids, initial_conversation_ids)
+        self.assertEqual(remaining_task_ids, initial_task_ids)
         self.assertEqual(self.client.get(f"/api/conversations/{conversation_id}", headers=self.headers).status_code, 404)
 
     def test_conversations_tasks_and_events_survive_module_reload(self):
@@ -465,6 +475,196 @@ class PlatformApiTests(unittest.TestCase):
             messages = self.client.get(f"/api/conversations/{conversation_id}", headers=self.headers).json()["messages"]
             self.assertEqual(messages[0]["content"], "answer this")
             self.assertEqual(self.client.post("/api/assistant/chat", headers=self.headers, json={"agent_id": "idea", "message": "too large", "context_blocks": [{"path": "large.txt", "name": "large.txt", "content": "x" * 4_000_001}]}).status_code, 413)
+        finally:
+            active_runners["idea"].run = original_run
+
+    def test_agent_and_runtime_registry_endpoints_are_authenticated_and_safe(self):
+        self.assertEqual(self.client.get("/api/agents").status_code, 401)
+        agents = self.client.get("/api/agents", headers=self.headers)
+        self.assertEqual(agents.status_code, 200)
+        self.assertTrue(any(agent["agent_id"] == "idea" for agent in agents.json()["agents"]))
+
+        device_headers = {**self.headers, "X-Device-ID": "runtime-test-device"}
+        registered = self.client.post(
+            "/api/runtimes/register",
+            headers=device_headers,
+            json={"runtime_kind": "desktop", "capabilities": {"workspace": True, "terminal": True, "secret": "not stored"}},
+        )
+        self.assertEqual(registered.status_code, 200)
+        self.assertTrue(registered.json()["capabilities"]["workspace"])
+        self.assertNotIn("secret", registered.json()["capabilities"])
+        heartbeat = self.client.post("/api/runtimes/heartbeat", headers=device_headers, json={"runtime_kind": "desktop"})
+        self.assertEqual(heartbeat.status_code, 200)
+        runtimes = self.client.get("/api/runtimes", headers=device_headers)
+        self.assertEqual(runtimes.status_code, 200)
+        self.assertTrue(any(runtime["id"] == registered.json()["id"] for runtime in runtimes.json()["runtimes"]))
+        snapshot = self.client.get("/api/runtime/snapshot", headers=device_headers)
+        self.assertTrue(any(runtime["id"] == registered.json()["id"] for runtime in snapshot.json()["device_runtimes"]))
+        self.assertEqual(
+            self.client.post("/api/runtimes/register", headers=device_headers, json={"runtime_kind": "cloud", "capabilities": {}}).status_code,
+            400,
+        )
+
+    def test_handoff_endpoints_follow_state_machine(self):
+        conversation_id = self.main.platform_store.create_conversation("account-owner", "space-project-world", "idea")["conversation_id"]
+        snapshot = self.main.platform_store.create_runtime_snapshot("account-owner", "space-project-world", conversation_id, {})
+        runtime = self.main.platform_store.register_device_runtime("account-owner", "space-project-world", "handoff-device", "desktop", {})
+        created = self.client.post(
+            "/api/handoffs",
+            headers=self.headers,
+            json={"conversation_id": conversation_id, "snapshot_id": snapshot["id"], "agent_id": "idea", "direction": "cloud_to_local", "target_runtime_id": runtime["id"]},
+        )
+        self.assertEqual(created.status_code, 200)
+        handoff_id = created.json()["id"]
+        self.assertEqual(created.json()["status"], "pending")
+        manifest = {"kind": "run_file", "relative_path": "src/main.py", "mode": "run"}
+        executable_without_approval = self.client.post("/api/handoffs", headers=self.headers, json={"conversation_id": conversation_id, "snapshot_id": snapshot["id"], "agent_id": "idea", "direction": "cloud_to_local", "target_runtime_id": runtime["id"], "execution_manifest": manifest})
+        self.assertEqual(executable_without_approval.status_code, 400)
+        self.assertEqual(self.client.post(f"/api/handoffs/{handoff_id}/accepted", headers=self.headers, json={}).status_code, 400)
+        self.assertEqual(self.client.post(f"/api/handoffs/{handoff_id}/accepted", headers={**self.headers, "X-Device-ID": "handoff-device"}, json={"runtime_id": runtime["id"]}).json()["status"], "accepted")
+        target_headers = {**self.headers, "X-Device-ID": "handoff-device"}
+        self.assertEqual(self.client.post(f"/api/handoffs/{handoff_id}/running", headers=target_headers, json={"runtime_id": runtime["id"]}).json()["status"], "running")
+        self.assertEqual(self.client.post(f"/api/handoffs/{handoff_id}/completed", headers=target_headers, json={"runtime_id": runtime["id"]}).json()["status"], "completed")
+        listed = self.client.get("/api/handoffs", headers=self.headers)
+        self.assertTrue(any(item["id"] == handoff_id for item in listed.json()["handoffs"]))
+
+    def test_pending_handoffs_are_visible_only_to_target_runtime_device(self):
+        device_id = "handoff-poll-device"
+        headers = {**self.headers, "X-Device-ID": device_id}
+        runtime = self.main.platform_store.register_device_runtime("account-owner", "space-project-world", device_id, "desktop", {})
+        conversation_id = self.main.platform_store.create_conversation("account-owner", "space-project-world", "idea")["conversation_id"]
+        snapshot = self.main.platform_store.create_runtime_snapshot("account-owner", "space-project-world", conversation_id, {})
+        handoff = self.main.platform_store.create_task_handoff(
+            "account-owner", "space-project-world", conversation_id, "idea", snapshot["id"], "cloud_to_local", target_runtime_id=runtime["id"],
+        )
+        pending = self.client.get(f"/api/handoffs/pending?runtime_id={runtime['id']}", headers=headers)
+        self.assertEqual(pending.status_code, 200)
+        self.assertEqual([item["id"] for item in pending.json()["handoffs"]], [handoff["id"]])
+        denied = self.client.get(f"/api/handoffs/pending?runtime_id={runtime['id']}", headers={**self.headers, "X-Device-ID": "other-device"})
+        self.assertEqual(denied.status_code, 403)
+        self.assertEqual(self.client.post(f"/api/handoffs/{handoff['id']}/accepted", headers=headers, json={"runtime_id": runtime["id"]}).status_code, 200)
+        active = self.client.get(f"/api/handoffs/active?runtime_id={runtime['id']}", headers=headers)
+        self.assertEqual(active.status_code, 200)
+        self.assertEqual([item["id"] for item in active.json()["handoffs"]], [handoff["id"]])
+        denied_active = self.client.get(f"/api/handoffs/active?runtime_id={runtime['id']}", headers={**self.headers, "X-Device-ID": "other-device"})
+        self.assertEqual(denied_active.status_code, 403)
+
+    def test_registry_policy_controls_chat_model_and_dispatch(self):
+        with self.main.platform_store._connect() as connection:
+            original = connection.execute(
+                "SELECT model_policy_json FROM agent_registry WHERE agent_id = 'idea' AND version = 1"
+            ).fetchone()[0]
+            connection.execute(
+                "UPDATE agent_registry SET model_policy_json = ? WHERE agent_id = 'idea' AND version = 1",
+                (json.dumps(["deepseek-v4-flash"]),),
+            )
+        try:
+            denied = self.client.post(
+                "/api/assistant/chat",
+                headers=self.headers,
+                json={"agent_id": "idea", "model_key": "gpt", "message": "blocked model"},
+            )
+            self.assertEqual(denied.status_code, 400)
+            self.assertIn("Registry", denied.json()["detail"])
+
+            endpoint = next(route.endpoint for route in self.client.app.routes if getattr(route, "path", None) == "/api/assistant/chat")
+            policy = endpoint.__globals__["_agent_policy"]("idea_assistant")
+            self.assertEqual(policy["models"], ["gpt", "deepseek-v4-flash"])
+            self.assertNotEqual(policy["agent_id"], "idea")
+
+            execution_context = self.main.ExecutionContext(
+                self.main.RequestContext("registry-dispatch", Principal("principal-owner", "account-owner", "owner", "test-token"), "registry-device", "space-project-world"),
+                "idea",
+                True,
+                "registry-conversation",
+            )
+            rejected = asyncio.run(self.main._dispatch_to_agent("not-delegated", "test", execution_context))
+            self.assertFalse(rejected["success"])
+            self.assertIn("不允许委派", rejected["output"])
+        finally:
+            with self.main.platform_store._connect() as connection:
+                connection.execute(
+                    "UPDATE agent_registry SET model_policy_json = ? WHERE agent_id = 'idea' AND version = 1",
+                    (original,),
+                )
+
+    def test_streaming_chat_persists_safe_run_steps(self):
+        endpoint = next(route.endpoint for route in self.client.app.routes if getattr(route, "path", None) == "/api/assistant/chat/stream")
+        active_runners = endpoint.__globals__["agent_runners"]
+        original_stream = active_runners["idea"].run_stream
+
+        async def fake_stream(user_message, history=None, llm_model_config=None, execution_context=None):
+            yield {"type": "text", "content": "Streaming "}
+            yield {"type": "tool_call", "name": "read_file"}
+            yield {"type": "tool_result", "name": "read_file", "success": True, "decision": "allow", "reason": None, "output": "private content"}
+            yield {"type": "text", "content": "reply."}
+            yield {"type": "done", "iterations": 2, "tool_calls": [{"name": "read_file", "success": True}]}
+
+        active_runners["idea"].run_stream = fake_stream
+        try:
+            response = self.client.post("/api/assistant/chat/stream", headers=self.headers, json={"agent_id": "idea", "message": "stream this"})
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.headers["content-type"].split(";")[0], "text/event-stream")
+            self.assertIn("event: model.text.delta", response.text)
+            self.assertIn("event: run.completed", response.text)
+            completed = next(line[6:] for line in response.text.splitlines() if line.startswith("data: ") and "\"reply\"" in line)
+            completion = json.loads(completed)
+            self.assertTrue(completion["conversation_id"])
+            self.assertEqual(completion["agent_id"], "idea")
+            self.assertEqual(completion["model_key"], "gpt")
+            run_id = completion["run_id"]
+            detail = self.client.get(f"/api/runs/{run_id}", headers=self.headers).json()
+            self.assertEqual(detail["status"], "completed")
+            self.assertEqual([event["type"] for event in detail["events"]], ["run.started", "tool.started", "tool.completed", "tools.completed", "run.completed"])
+            self.assertNotIn("private content", json.dumps(detail, ensure_ascii=False))
+        finally:
+            active_runners["idea"].run_stream = original_stream
+
+    def test_chat_creates_completed_run_and_runtime_endpoints(self):
+        chat_endpoint = next(route.endpoint for route in self.client.app.routes if getattr(route, "path", None) == "/api/assistant/chat")
+        active_runners = chat_endpoint.__globals__["agent_runners"]
+        original_run = active_runners["idea"].run
+
+        received = {}
+
+        async def fake_run(user_message, history=None, stream=False, llm_model_config=None, execution_context=None):
+            received["prompt_version"] = execution_context.prompt_version
+            received["prompt_text"] = execution_context.prompt_text
+            return {"reply": "Runtime handled.", "tool_calls_log": [{"name": "read_file", "success": True}], "iterations": 2}
+
+        active_runners["idea"].run = fake_run
+        try:
+            response = self.client.post("/api/assistant/chat", headers=self.headers, json={"agent_id": "idea", "message": "track this"})
+            self.assertEqual(response.status_code, 200)
+            run_id = response.json()["run_id"]
+            detail = self.client.get(f"/api/runs/{run_id}", headers=self.headers)
+            self.assertEqual(detail.status_code, 200)
+            self.assertEqual(detail.json()["status"], "completed")
+            self.assertEqual(detail.json()["tool_calls"], [{"name": "read_file", "success": True}])
+            self.assertEqual([event["type"] for event in detail.json()["events"]], ["run.started", "tools.completed", "run.completed"])
+            runs = self.client.get("/api/runs", headers=self.headers).json()["runs"]
+            self.assertTrue(any(run["id"] == run_id for run in runs))
+            runtime = self.client.get("/api/runtime/snapshot", headers=self.headers).json()
+            self.assertEqual(runtime["task_counts"]["active"], 0)
+            self.assertTrue(any(run["id"] == run_id for run in runtime["recent_runs"]))
+        finally:
+            active_runners["idea"].run = original_run
+
+    def test_chat_failure_marks_run_failed(self):
+        chat_endpoint = next(route.endpoint for route in self.client.app.routes if getattr(route, "path", None) == "/api/assistant/chat")
+        active_runners = chat_endpoint.__globals__["agent_runners"]
+        original_run = active_runners["idea"].run
+
+        async def failing_run(user_message, history=None, stream=False, llm_model_config=None, execution_context=None):
+            raise RuntimeError("provider detail should not be persisted")
+
+        active_runners["idea"].run = failing_run
+        try:
+            with self.assertRaises(RuntimeError):
+                self.client.post("/api/assistant/chat", headers=self.headers, json={"agent_id": "idea", "message": "fail this"})
+            runs = self.client.get("/api/runs", headers=self.headers).json()["runs"]
+            failed = next(run for run in runs if run["status"] == "failed")
+            self.assertEqual(failed["error"], "RuntimeError")
         finally:
             active_runners["idea"].run = original_run
 

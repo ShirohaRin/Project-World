@@ -19,7 +19,7 @@ from urllib.parse import urlparse
 
 import httpx
 
-from tool_runtime.permissions import ExecutionContext, PolicyDecision, ToolPolicy, ToolPolicyResult
+from tool_runtime.permissions import ExecutionContext, PolicyDecision, ToolPolicy, ToolPolicyResult, ToolRisk, policy_allows_tool
 from tool_runtime.sandbox import SandboxEnforcement, SandboxManager, SandboxMode, restricted_exec_argv
 
 try:
@@ -171,7 +171,8 @@ class ToolRegistry:
         return [
             tool["schema"]
             for name, tool in self._tools.items()
-            if self.policy.decide(name, execution_context).decision in (PolicyDecision.ALLOW, PolicyDecision.REQUIRES_APPROVAL)
+            if (execution_context is None or execution_context.tool_capabilities is None or policy_allows_tool(execution_context.tool_capabilities, name))
+            and self.policy.decide(name, execution_context).decision in (PolicyDecision.ALLOW, PolicyDecision.REQUIRES_APPROVAL)
         ]
 
     def get_tool(self, name: str) -> Optional[Callable]:
@@ -190,6 +191,10 @@ class ToolRegistry:
         self._tools[name] = {"function": function, "schema": schema}
 
     async def execute(self, name: str, args: dict, execution_context: Optional[ExecutionContext] = None) -> ToolResult:
+        if execution_context is not None and execution_context.tool_capabilities is not None and not policy_allows_tool(execution_context.tool_capabilities, name):
+            denied = ToolPolicyResult(PolicyDecision.DENY, "agent_policy_tool_denied", self.policy.TOOL_RISKS.get(name, ToolRisk.DESTRUCTIVE))
+            self._audit(name, denied, execution_context)
+            return ToolResult(False, self._denial_message(name, denied.reason_code), name, {"decision": denied.decision.value, "reason": denied.reason_code})
         decision = self.policy.decide(name, execution_context)
         if decision.decision != PolicyDecision.ALLOW:
             grant = self._find_grant(name, execution_context)

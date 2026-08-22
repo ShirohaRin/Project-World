@@ -175,8 +175,9 @@ class KeyLevel:
     INGEST   = "ingest"
 
 COLLECTION_ACCESS = {
-    # 用户 private 检索只允许使用用户专属 Agent Token，禁止静态 Key 跨用户搜索。
-    KeyLevel.ADMIN:    {"public", "novel", "data"},
+    # Owner / 完整权限 IDEA（ADMIN Key）可查询整个 RAG 库，包括 private。
+    # 用户 private 检索仍只允许用户专属 Agent Token，禁止普通静态 Key 跨用户搜索。
+    KeyLevel.ADMIN:    {"public", "private", "novel", "data"},
     KeyLevel.RESEARCH: {"public", "data"},
     KeyLevel.LANGBOT:  {"public", "novel"},
     KeyLevel.PUBLIC:   {"public"},
