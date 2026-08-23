@@ -63,3 +63,11 @@ paper-watcher/*.sqlite3
 **/*.key
 **/*.p12
 **/*.pfx
+
+# 上游项目 N.E.K.O（独立仓库，未纳入本仓库）
+/N.E.K.O/
+# IDEA 客户端打包暂存目录（任务结束应清理，不入库）
+Project-IDEA/IDEA Assistant.staging/
+# 客户端内嵌 RAG 运行时产物（2.5GB+，部署时由 fetch_wheels.py 等脚本重建，不入库）
+Project-IDEA/IDEA Assistant/resources/neko/
+Project-IDEA/IDEA Assistant SRH/resources/neko/
