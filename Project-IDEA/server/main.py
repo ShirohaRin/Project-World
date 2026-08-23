@@ -31,8 +31,8 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 import yaml
 
-from llm.client import LLMClient, selected_model_config
-from tools.registry import ToolRegistry
+from llm.client import LLMClient, estimate_tokens, selected_model_config
+from tools.registry import ToolRegistry, load_ssh_hosts_from_env
 from agent_runner import AgentRunner
 from jobs import JobScheduler
 from memory.store import MemoryStore
@@ -263,8 +263,9 @@ llm_client = LLMClient()
 # 每个运行器必须拥有自己的工具注册表。L1 注册表绝不注册调度工具，
 # 避免下级智能体绕过 IDEA 继续递归调度。
 approved_workspaces = existing_workspace_paths()
-idea_tool_registry = ToolRegistry(workspace=str(PROJECT_ROOT), allowed_dirs=[str(path) for path in approved_workspaces], audit_store=platform_store)
-l1_tool_registry = ToolRegistry(workspace=str(PROJECT_ROOT), allowed_dirs=[str(path) for path in approved_workspaces], audit_store=platform_store)
+_configured_ssh_hosts = lambda: (config.get("ssh", {}).get("hosts") or []) or load_ssh_hosts_from_env()
+idea_tool_registry = ToolRegistry(workspace=str(PROJECT_ROOT), allowed_dirs=[str(path) for path in approved_workspaces], audit_store=platform_store, ssh_hosts=_configured_ssh_hosts())
+l1_tool_registry = ToolRegistry(workspace=str(PROJECT_ROOT), allowed_dirs=[str(path) for path in approved_workspaces], audit_store=platform_store, ssh_hosts=_configured_ssh_hosts())
 
 # ---------------------------------------------------------------------------
 # 注册调度工具 — 让 IDEA 可以通过工具调用来分派子智能体
@@ -384,6 +385,7 @@ AGENTS = {
 # 因此直接按窗口大小查询，避免多拉 MAX_HISTORY 再截断。
 MAX_HISTORY = 10
 MAX_MESSAGE_LENGTH = 20_000
+MAX_CONTEXT_BLOCKS_TOKENS = 1_000_000
 MAX_MEMORY_LENGTH = 10_000
 VALID_MODEL_KEYS = {"gpt", "deepseek-v4-flash"}
 VALID_ID = re.compile(r"^[A-Za-z0-9_-]{1,100}$")
@@ -1224,6 +1226,28 @@ async def revert_file_change(change_id: str, request: Request):
 # ===================================================================
 # 核心 API：独立智能体会话（非流式）
 # ===================================================================
+def _context_blocks_message(value) -> str:
+    if value is None:
+        return ""
+    if not isinstance(value, list):
+        raise HTTPException(status_code=400, detail="context_blocks 必须是数组")
+    blocks = []
+    total_tokens = 0
+    for block in value:
+        if not isinstance(block, dict):
+            raise HTTPException(status_code=400, detail="context_blocks 包含无效块")
+        path = block.get("path")
+        name = block.get("name")
+        content = block.get("content")
+        if not isinstance(path, str) or not isinstance(name, str) or not isinstance(content, str):
+            raise HTTPException(status_code=400, detail="context_blocks 包含无效块")
+        total_tokens += estimate_tokens(content)
+        if total_tokens > MAX_CONTEXT_BLOCKS_TOKENS:
+            raise HTTPException(status_code=413, detail=f"context_blocks 不能超过 {MAX_CONTEXT_BLOCKS_TOKENS} 个估算 token")
+        blocks.append(f"文件：{name}\n路径：{path}\n内容：\n{content}")
+    return "\n\n".join(blocks)
+
+
 @app.post("/api/assistant/chat")
 async def chat_with_assistant(request: Request):
     context = require_context(request)
@@ -1254,6 +1278,9 @@ async def chat_with_assistant(request: Request):
 
     # IDEA 可获知其他会话的最近摘要；L1 的上下文严格隔离。
     runner_message = message
+    context_blocks_message = _context_blocks_message(body.get("context_blocks"))
+    if context_blocks_message:
+        runner_message = f"以下是客户端仅供本次请求使用的文件上下文：\n{context_blocks_message}\n\n当前用户请求：\n{runner_message}"
     if agent_id == "idea":
         global_context = _global_context(context, conversation_id)
         if global_context:
@@ -1305,7 +1332,8 @@ async def chat_with_assistant(request: Request):
         "tool_calls": [{"name": tc["name"], "success": tc["success"]} for tc in tool_calls_log],
         "iterations": iterations,
         "conversation_id": conversation_id,
-    "model_key": model_key,
+        "model_key": model_key,
+        "usage": result.get("usage", {}),
     }
 
 # ===================================================================

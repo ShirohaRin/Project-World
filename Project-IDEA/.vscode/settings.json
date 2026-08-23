@@ -1,0 +1,23 @@
+{
+  "files.exclude": {
+    "IDEA Assistant/**": true,
+    "IDEA Assistant SRH/**": true,
+    "release/**": true,
+    "setup/**": true,
+    "IDEA Assistant Code/.build/**": true
+  },
+  "files.watcherExclude": {
+    "**/IDEA Assistant/**": true,
+    "**/IDEA Assistant SRH/**": true,
+    "**/release/**": true,
+    "**/setup/**": true,
+    "**/IDEA Assistant Code/.build/**": true
+  },
+  "search.exclude": {
+    "**/IDEA Assistant/**": true,
+    "**/IDEA Assistant SRH/**": true,
+    "**/release/**": true,
+    "**/setup/**": true,
+    "**/IDEA Assistant Code/.build/**": true
+  }
+}

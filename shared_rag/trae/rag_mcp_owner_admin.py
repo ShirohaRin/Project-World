@@ -129,7 +129,7 @@ async def main() -> None:
     }
     properties = {"project_id": {"type": "string"}, "collection": {"type": "string", "enum": sorted(COLLECTIONS)}, "document_path": {"type": "string"}, "content": {"type": "string"}, "local_path": {"type": "string"}, "query": {"type": "string"}, "top_k": {"type": "integer", "minimum": 1, "maximum": 10, "default": 5}}
 
-    async def list_tools(_, __) -> types.ListToolsResult:
+    async def list_tools(*_args: Any) -> types.ListToolsResult:
         return types.ListToolsResult(
             tools=[
                 types.Tool(
@@ -148,9 +148,15 @@ async def main() -> None:
             ]
         )
 
-    async def call_tool(_, params: types.CallToolRequestParams) -> types.CallToolResult:
-        name = params.name
-        arguments = params.arguments or {}
+    async def call_tool(*args: Any) -> types.CallToolResult:
+        if len(args) == 1 and isinstance(args[0], types.CallToolRequestParams):
+            name = args[0].name
+            arguments = args[0].arguments or {}
+        elif len(args) >= 2:
+            name = args[-2]
+            arguments = args[-1] or {}
+        else:
+            raise ValueError("MCP 工具调用参数无效。")
         functions = {"list_project_documents": list_project_documents, "read_project_document": read_project_document, "update_project_document": update_project_document, "upload_project_document": upload_project_document, "delete_project_document": delete_project_document, "rebuild_project_index": rebuild_project_index, "search_project_knowledge": search_project_knowledge}
         if name not in functions:
             raise ValueError(f"未知工具：{name}")

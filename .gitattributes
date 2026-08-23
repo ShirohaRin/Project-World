@@ -1,0 +1,6 @@
+# Distributable client artifacts
+Project-IDEA/IDEA[[:space:]]Assistant/** filter=lfs diff=lfs merge=lfs -text
+Project-IDEA/IDEA[[:space:]]Assistant[[:space:]]SRH/** filter=lfs diff=lfs merge=lfs -text
+Project-IDEA/IDEA[[:space:]]Assistant[[:space:]]Android/app/build/outputs/apk/**/*.apk filter=lfs diff=lfs merge=lfs -text
+Project-IDEA/release/**/*.exe filter=lfs diff=lfs merge=lfs -text
+Project-IDEA/setup/**/*.exe filter=lfs diff=lfs merge=lfs -text

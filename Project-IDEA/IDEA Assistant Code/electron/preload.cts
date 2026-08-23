@@ -20,7 +20,7 @@ contextBridge.exposeInMainWorld('ideaDesktop', {
   testService: () => ipcRenderer.invoke('service:health'),
   checkForUpdates: (): Promise<UpdateStatus> => ipcRenderer.invoke('updates:check'),
   installUpdate: (): Promise<UpdateStatus> => ipcRenderer.invoke('updates:install'),
-  sendChat: (request: { agentId: string; message: string; conversationId?: string; useMemory?: boolean; modelKey?: 'gpt' | 'deepseek-v4-flash' }) => ipcRenderer.invoke('service:chat', request),
+  sendChat: (request: { agentId: string; message: string; contextBlocks?: Array<{ path: string; name: string; content: string }>; conversationId?: string; useMemory?: boolean; modelKey?: 'gpt' | 'deepseek-v4-flash' }) => ipcRenderer.invoke('service:chat', request),
   listConversations: () => ipcRenderer.invoke('service:conversations'),
   getConversation: (conversationId: string) => ipcRenderer.invoke('service:conversation', conversationId),
   deleteConversation: (conversationId: string): Promise<void> => ipcRenderer.invoke('service:delete-conversation', conversationId),
@@ -47,6 +47,7 @@ contextBridge.exposeInMainWorld('ideaDesktop', {
     listAuditEvents: () => ipcRenderer.invoke('owner:audit'),
     listMemories: () => ipcRenderer.invoke('service:memories'),
     createMemory: (memory: { scope: 'personal' | 'shared' | 'owner'; category: string; content: string }) => ipcRenderer.invoke('service:create-memory', memory),
+    updateMemory: (memory: { id: string; revision: number; category: string; content: string }) => ipcRenderer.invoke('service:update-memory', memory),
     deleteMemory: (memory: { id: string; revision: number }) => ipcRenderer.invoke('service:delete-memory', memory),
   } : {}),
   onExecutionOutput: (listener: (event: ExecutionEvent) => void) => {

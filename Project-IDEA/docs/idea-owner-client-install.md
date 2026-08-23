@@ -5,7 +5,7 @@
 当前 Windows x64 安装器位于：
 
 ```text
-Project-IDEA/release/IDEA-Owner/IDEA-0.1.0-x64.exe
+Project-IDEA/setup/SRHsetup.exe
 ```
 
 该安装器对应 Owner 私有版，应用名为 `IDEA`，不是普通的 `IDEA Assistant`。

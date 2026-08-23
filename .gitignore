@@ -15,6 +15,8 @@
 **/dist/
 **/dist-electron/
 **/release/
+!Project-IDEA/release/
+!Project-IDEA/release/**
 PROJECT_MEMORY.md
 IDEA/KEY.md
 IDEA/preconfigured-accounts.json
@@ -28,11 +30,25 @@ shared_rag/KEY.md
 **/logs/
 **/electron-dist-*/
 **/.trae-html-share-packages/
-Project-IDEA/IDEA Assistant/
-Project-IDEA/IDEA Assistant SRH/
 Project-IDEA/server/backups/
 Project-IDEA/server/static/
-Project-IDEA/setup/
+# Build caches are regenerated locally; distributable client artifacts are tracked.
+Project-IDEA/.build-IDEA-Assistant/
+Project-IDEA/IDEA Assistant Code/.build/
+Project-IDEA/desktop/
+Project-IDEA/IDEA Assistant Android/.android-toolchain/
+Project-IDEA/IDEA Assistant Android/.gradle/
+Project-IDEA/IDEA Assistant Android/.kotlin/
+Project-IDEA/IDEA Assistant Android/app/build/intermediates/
+Project-IDEA/IDEA Assistant Android/app/build/generated/
+Project-IDEA/IDEA Assistant Android/app/build/kotlin/
+Project-IDEA/IDEA Assistant Android/app/build/tmp/
+Project-IDEA/IDEA Assistant Android/app/build/reports/
+Project-IDEA/IDEA Assistant Android/local.properties
+Project-IDEA/release/**/win-unpacked*/
+Project-IDEA/release/**/builder-*.yml
+Project-IDEA/setup/win-unpacked/
+Project-IDEA/setup/builder-*.yml
 **/.idea-assistant/
 ShirohaV1.1/node_modules/
 ShirohaV1.1/dist/

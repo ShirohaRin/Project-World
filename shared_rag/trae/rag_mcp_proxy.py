@@ -8,7 +8,7 @@ TRAE 本地 MCP 代理 —— 连接服务器上的 RAG 知识库
 
 配置方式（在 TRAE 的 MCP 设置中）：
   命令：python
-  参数：C:\path\to\rag_mcp_proxy.py
+  参数：C:\\path\\to\\rag_mcp_proxy.py
   环境变量：
     RAG_SERVER_URL=http://你的服务器IP:8080
     RAG_AGENT_TOKEN=个人检索 Token           （可检索 public、data 与自己的 Private 库）
@@ -177,65 +177,58 @@ async def main():
     log.info("  个人 Agent Token： %s", "✓" if AGENT_TOKEN else "✗（知识库不可用）")
     log.info("=" * 50)
 
-    # 尝试新版 SDK，不行就用旧版
-    try:
-        from mcp.server import Server
-        from mcp.server.stdio import stdio_server
+    from mcp import types
+    from mcp.server import Server
+    from mcp.server.stdio import stdio_server
 
-        server = Server("rag-knowledge-proxy")
+    server = Server("rag-knowledge-proxy")
+    tools = {
+        "search_public_knowledge": (
+            "检索公开知识库。用于查询已发表论文、写作素材、风格指南和角色设定等公开文档。",
+            search_public,
+        ),
+        "search_data_knowledge": (
+            "检索当前用户可访问的研究数据知识库。",
+            search_data,
+        ),
+    }
+    if CAN_SEARCH:
+        tools["search_my_private_knowledge"] = (
+            "检索当前个人 Agent 专属的私有知识库。",
+            search_my_private,
+        )
 
-        @server.tool()
-        async def search_public_knowledge(query: str, top_k: int = 5) -> str:
-            """检索公开知识库。
-            当需要查询已发表的论文、写作素材、风格指南、角色设定等公开文档时使用此工具。
-            参数：
-              query: 要检索的问题或关键词
-              top_k: 返回结果数量（1-10，默认5）"""
-            return search_public(query, top_k)
+    schema = {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string"},
+            "top_k": {"type": "integer", "minimum": 1, "maximum": 10, "default": 5},
+        },
+        "required": ["query"],
+    }
 
-        @server.tool()
-        async def search_data_knowledge(query: str, top_k: int = 5) -> str:
-            """检索当前用户可访问的研究数据知识库。"""
-            return search_data(query, top_k)
+    @server.list_tools()
+    async def list_tools() -> list[types.Tool]:
+        return [
+            types.Tool(name=name, description=description, inputSchema=schema)
+            for name, (description, _) in tools.items()
+        ]
 
-        if CAN_SEARCH:
-            @server.tool()
-            async def search_my_private_knowledge(query: str, top_k: int = 5) -> str:
-                """检索当前个人 Agent 专属的私有知识库。
-                当需要查询未发表的科研数据、内部规范、实验记录等私有文档时使用此工具。
-                参数：
-                  query: 要检索的问题或关键词
-                  top_k: 返回结果数量（1-10，默认5）"""
-                return search_my_private(query, top_k)
+    @server.call_tool()
+    async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
+        if name not in tools:
+            raise ValueError(f"未知工具：{name}")
+        query = arguments.get("query")
+        if not isinstance(query, str) or not query.strip():
+            raise ValueError("query 必须是非空字符串。")
+        top_k = arguments.get("top_k", 5)
+        if not isinstance(top_k, int):
+            raise ValueError("top_k 必须是整数。")
+        result = await asyncio.to_thread(tools[name][1], query.strip(), top_k)
+        return [types.TextContent(type="text", text=result)]
 
-        async with stdio_server() as (read_stream, write_stream):
-            await server.run(read_stream, write_stream, server.create_initialization_options())
-
-    except ImportError:
-        # 旧版 mcp SDK
-        from mcp import Server
-        from mcp.server.stdio import stdio_server_connection
-
-        server = Server("rag-knowledge-proxy")
-
-        @server.tool()
-        async def search_public_knowledge(query: str, top_k: int = 5) -> str:
-            """检索公开知识库。当需要查询已发表的论文、写作素材、风格指南等公开文档时使用。"""
-            return search_public(query, top_k)
-
-        @server.tool()
-        async def search_data_knowledge(query: str, top_k: int = 5) -> str:
-            """检索当前用户可访问的研究数据知识库。"""
-            return search_data(query, top_k)
-
-        if CAN_SEARCH:
-            @server.tool()
-            async def search_my_private_knowledge(query: str, top_k: int = 5) -> str:
-                """检索当前个人 Agent 专属的私有知识库。"""
-                return search_my_private(query, top_k)
-
-        async with stdio_server_connection() as (read_stream, write_stream):
-            await server.run(read_stream, write_stream)
+    async with stdio_server() as (read_stream, write_stream):
+        await server.run(read_stream, write_stream, server.create_initialization_options())
 
     log.info("MCP 代理已退出")
 

@@ -3,6 +3,7 @@ node_modules
 dist
 dist-electron
 release
+.build
 
 # Local logs and tooling state
 logs
