@@ -19,6 +19,11 @@ memory:
   # backend: "chromadb"
   # chroma_path: "./memory/chroma_db"
 
+neko:
+  enabled: false
+  plugin_server_url: ""
+  request_timeout_seconds: 15
+
 logging:
   level: "INFO"             # DEBUG / INFO / WARNING / ERROR
   max_log_size_mb: 50
@@ -50,4 +55,9 @@ agents:
 #    {"host":"10.0.0.5","user":"root","password_env":"IDEA_SSH_PASSWORD_BACKUP"}]
 # 认证方式：key_path（优先）或 password_env 指向的环境变量密码。未配置则 ssh_run 不可用。
 ssh:
-  hosts: []
+  hosts:
+    - host: "113.249.105.33"
+      alias: "home-server"
+      port: 22
+      user: "root"
+      key_path: "C:\\Users\\pansh\\.ssh\\id_ed25519_113_249_105_33"

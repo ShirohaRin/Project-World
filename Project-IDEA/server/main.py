@@ -13,6 +13,7 @@ IDEA 是系统的主 Agent，拥有最高权限。
 访问: http://localhost:8900
 """
 
+import hashlib
 import hmac
 import json
 import logging
@@ -28,7 +29,7 @@ from typing import Optional
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 import yaml
 
 from llm.client import LLMClient, estimate_tokens, selected_model_config
@@ -38,6 +39,7 @@ from jobs import JobScheduler
 from memory.store import MemoryStore
 from platform_auth import PlatformStore, RequestContext, configured_token, extract_bearer, require_context
 from tool_runtime.permissions import ExecutionContext
+from neko_compat import NekoCompatClient, NekoCompatError
 import memory_mcp
 import owner_agent_mcp
 
@@ -75,6 +77,12 @@ def load_config():
 
 config = load_config()
 auth_token = configured_token(config)
+neko_config = config.get("neko", {})
+neko_client = NekoCompatClient(
+    os.environ.get("IDEA_NEKO_PLUGIN_SERVER_URL", neko_config.get("plugin_server_url", "")),
+    os.environ.get("IDEA_NEKO_SERVICE_TOKEN", ""),
+    float(neko_config.get("request_timeout_seconds", 15)),
+)
 
 # ---------------------------------------------------------------------------
 # 日志
@@ -248,6 +256,23 @@ AGENT_PRODUCER_SYSTEM_PROMPT = """你是 IDEA-AgentProducer，智能体生产专
 ## 语气
 创造性、注重细节。像一位工匠对待自己的作品。"""
 
+IDEA_ASSISTANT_SYSTEM_PROMPT = """你是 IDEA Assistant，面向 Project World 平台普通使用者的服务智能体。你可以协助处理项目、研究、写作和已授权的工具任务。你不拥有或模拟 IDEA（伊迪亚）的私人身份，不访问 Owner 私人记忆、设备、跨设备上下文或私人项目资料。对未获授权的数据、设备和高风险操作，应明确说明限制。"""
+
+PROMPT_CATALOG = {
+    "idea.v1": IDEA_SYSTEM_PROMPT,
+    "pwa.v1": PWA_SYSTEM_PROMPT,
+    "researcher.v1": RESEARCHER_SYSTEM_PROMPT,
+    "agent_producer.v1": AGENT_PRODUCER_SYSTEM_PROMPT,
+    "idea_assistant.v1": IDEA_ASSISTANT_SYSTEM_PROMPT,
+}
+def _prompt_metadata(agent_id: str) -> dict:
+    version = _agent_policy(agent_id)["prompt_version"]
+    prompt = PROMPT_CATALOG.get(version)
+    if prompt is None:
+        raise HTTPException(status_code=503, detail="Agent Registry 的提示词版本不可用")
+    return {"prompt_version": version, "prompt_hash": hashlib.sha256(prompt.encode("utf-8")).hexdigest(), "prompt": prompt}
+
+
 # ---------------------------------------------------------------------------
 # 初始化核心组件
 # ---------------------------------------------------------------------------
@@ -276,9 +301,10 @@ async def _dispatch_to_agent(agent: str, task: str, execution_context: Execution
     调度工具的实现：将任务分派给下级智能体。
     这个函数会被注册为 ToolRegistry 中的 dispatch_to_agent 工具。
     """
-    valid_agents = ["pwa", "researcher", "agent_producer"]
+    idea_policy = _agent_policy("idea")
+    valid_agents = [candidate for candidate in idea_policy["delegates"] if candidate in agent_runners]
     if agent not in valid_agents:
-        return {"success": False, "output": f"未知智能体: {agent}。可选: {', '.join(valid_agents)}"}
+        return {"success": False, "output": "当前 IDEA Registry 策略不允许委派给该智能体"}
 
     agent_names = {
         "pwa": "PWA（项目管理）",
@@ -289,8 +315,19 @@ async def _dispatch_to_agent(agent: str, task: str, execution_context: Execution
     logger.info(f"Dispatching to {agent}: {task[:100]}")
 
     try:
+        child_policy = _agent_policy(agent)
+        child_prompt_meta = _prompt_metadata(agent)
         runner = agent_runners[agent]
-        result = await runner.run(user_message=task, execution_context=execution_context.for_child_agent(agent))
+        result = await runner.run(
+            user_message=task,
+            execution_context=execution_context.for_child_agent(
+                agent,
+                frozenset(child_policy["tools"]),
+                child_policy["version"],
+                child_prompt_meta["prompt_version"],
+                child_prompt_meta["prompt"],
+            ),
+        )
         return {
             "success": True,
             "output": result.get("reply", ""),
@@ -368,7 +405,7 @@ agent_runners = {
     "idea_assistant": AgentRunner(
         llm=llm_client,
         tools=l1_tool_registry,
-        system_prompt="""你是 IDEA Assistant，面向 Project World 平台普通使用者的服务智能体。你可以协助处理项目、研究、写作和已授权的工具任务。你不拥有或模拟 IDEA（伊迪亚）的私人身份，不访问 Owner 私人记忆、设备、跨设备上下文或私人项目资料。对未获授权的数据、设备和高风险操作，应明确说明限制。""",
+        system_prompt=IDEA_ASSISTANT_SYSTEM_PROMPT,
         model=config.get("agents", {}).get("assistant", {}).get("model", config.get("agents", {}).get("pwa", {}).get("model", "default")),
     ),
 }
@@ -397,6 +434,21 @@ def _validate_agent_id(agent_id: object) -> str:
     if not isinstance(agent_id, str) or agent_id not in agent_runners:
         raise HTTPException(status_code=400, detail="agent_id 无效")
     return agent_id
+
+
+def _agent_policy(agent_id: str) -> dict:
+    policy = next((item for item in platform_store.list_agent_registry() if item["agent_id"] == agent_id), None)
+    if not policy:
+        raise HTTPException(status_code=403, detail="Agent 当前未在 Registry 中启用")
+    return policy
+
+
+def _agent_model(agent_id: str) -> dict:
+    policy = _agent_policy(agent_id)
+    model_key = next((item for item in policy["models"] if item in VALID_MODEL_KEYS), None)
+    if model_key is None:
+        raise HTTPException(status_code=503, detail="当前 Agent Registry 没有可用模型")
+    return {"model_key": model_key, "config": selected_model_config(model_key)}
 
 
 def _routed_agent(context: RequestContext, requested_agent_id: object) -> str:
@@ -444,8 +496,9 @@ def _memory_scope(context: RequestContext, scope: object) -> tuple[str, str]:
     return scope, _memory_namespaces(context)[scope]
 
 
-def _memory_context(context: RequestContext, query: str) -> str:
-    namespaces = list(_memory_namespaces(context).values())
+def _memory_context(context: RequestContext, query: str, allowed_scopes: Optional[list[str]] = None) -> str:
+    available = _memory_namespaces(context)
+    namespaces = [namespace for scope, namespace in available.items() if allowed_scopes is None or scope in allowed_scopes]
     memories = platform_store.list_memories(
         context.principal.account_id,
         context.space_id,
@@ -512,6 +565,9 @@ owner_agent_mcp.configure(
     _global_context,
     _memory_namespaces,
     _record_daily_activity,
+    _agent_model,
+    _agent_policy,
+    _prompt_metadata,
 )
 
 # 后台定时作业调度器（Owner 编排的自动化；高危工具仍走审批/授权链）
@@ -595,7 +651,7 @@ async def platform_request_context(request: Request, call_next):
         context = RequestContext(
             request_id=request_id,
             principal=principal,
-            device_id=principal.device_id,
+            device_id=principal.device_id or device_id,
             space_id=space_id,
         )
         request.state.context = context
@@ -1086,12 +1142,24 @@ async def rag_authorize(request: Request):
     context = require_context(request)
     body = await request.json()
     project_id, permission = body.get("project_id", ""), body.get("permission", "")
-    if not VALID_ID.fullmatch(project_id) or permission not in RAG_PERMISSIONS:
+    if permission not in RAG_PERMISSIONS:
+        raise HTTPException(status_code=400, detail="授权请求无效")
+    is_owner = platform_store.route_for_principal(context.principal) == "owner_idea"
+    if is_owner:
+        # Owner 与完整权限 IDEA 不受项目 id 制约：可省略 project_id 直接授权整个 RAG 库。
+        effective_project = project_id or "all"
+        if project_id and not VALID_ID.fullmatch(project_id):
+            raise HTTPException(status_code=400, detail="project_id 格式无效")
+        if project_id and not platform_store.get_project(project_id):
+            raise HTTPException(status_code=404, detail="项目不存在")
+        platform_store.write_audit("rag.authorized", context, action="authorize", resource_type="project", resource_id=effective_project, decision="allowed", metadata={"permission": permission, "full_access": not project_id})
+        return {"authorized": True, "project_id": effective_project, "permission": permission, "full_access": not project_id}
+    # 普通用户与 IDEA Assistant：必须指定项目，且具备该项目成员权限。
+    if not VALID_ID.fullmatch(project_id):
         raise HTTPException(status_code=400, detail="授权请求无效")
     if not platform_store.get_project(project_id):
         raise HTTPException(status_code=404, detail="项目不存在")
-    allowed = platform_store.route_for_principal(context.principal) == "owner_idea" or platform_store.project_permission_allowed(project_id, context.principal.principal_id, permission)
-    if not allowed:
+    if not platform_store.project_permission_allowed(project_id, context.principal.principal_id, permission):
         raise HTTPException(status_code=403, detail="无权执行该项目操作")
     platform_store.write_audit("rag.authorized", context, action="authorize", resource_type="project", resource_id=project_id, decision="allowed", metadata={"permission": permission})
     return {"authorized": True, "project_id": project_id, "permission": permission}
@@ -1248,14 +1316,30 @@ def _context_blocks_message(value) -> str:
     return "\n\n".join(blocks)
 
 
+def _runtime_snapshot_payload(agent_id: str, model_key: str, history: list[dict], context_blocks: object, memory_context: str, prompt_meta: dict) -> dict:
+    blocks = context_blocks if isinstance(context_blocks, list) else []
+    return {
+        "agent_id": agent_id,
+        "model_key": model_key,
+        "prompt_version": prompt_meta["prompt_version"],
+        "prompt_hash": prompt_meta["prompt_hash"],
+        "history_message_count": len(history),
+        "context_block_count": len(blocks),
+        "context_block_tokens": sum(estimate_tokens(block.get("content", "")) for block in blocks if isinstance(block, dict) and isinstance(block.get("content"), str)),
+        "memory_count": memory_context.count("\n") + 1 if memory_context else 0,
+        "memory_tokens": estimate_tokens(memory_context) if memory_context else 0,
+    }
+
+
 @app.post("/api/assistant/chat")
 async def chat_with_assistant(request: Request):
     context = require_context(request)
     body = await request.json()
     agent_id = _routed_agent(context, body.get("agent_id"))
-    model_key = body.get("model_key", "gpt")
-    if model_key not in VALID_MODEL_KEYS:
-        raise HTTPException(status_code=400, detail="model_key 无效")
+    policy = _agent_policy(agent_id)
+    model_key = body.get("model_key") or next((item for item in policy["models"] if item in VALID_MODEL_KEYS), None)
+    if model_key not in VALID_MODEL_KEYS or model_key not in policy["models"]:
+        raise HTTPException(status_code=400, detail="当前 Agent Registry 策略不允许该模型")
     model_config = selected_model_config(model_key)
     message = body.get("message", "")
     if not isinstance(message, str):
@@ -1285,22 +1369,53 @@ async def chat_with_assistant(request: Request):
         global_context = _global_context(context, conversation_id)
         if global_context:
             runner_message = f"以下是其他会话的最近摘要，仅作必要上下文：\n{global_context}\n\n当前用户请求：\n{message}"
-    memory_context = _memory_context(context, message)
+    policy = _agent_policy(agent_id)
+    memory_context = _memory_context(context, message, policy["memory_scopes"])
     if memory_context:
         runner_message = f"以下是用户明确保存的长期记忆，仅作必要上下文：\n{memory_context}\n\n当前用户请求：\n{runner_message}"
 
+    prompt_meta = _prompt_metadata(agent_id)
     execution_context = ExecutionContext(
         request_context=context,
         agent_id=agent_id,
         is_owner=platform_store.route_for_principal(context.principal) == "owner_idea",
         conversation_id=conversation_id,
+        tool_capabilities=frozenset(policy["tools"]),
+        registry_version=policy["version"],
+        prompt_version=prompt_meta["prompt_version"],
+        prompt_text=prompt_meta["prompt"],
     )
-    result = await agent_runners[agent_id].run(
-        user_message=runner_message,
-        history=history[-10:],
-        llm_model_config=model_config,
-        execution_context=execution_context,
+    snapshot = platform_store.create_runtime_snapshot(
+        context.principal.account_id,
+        context.space_id,
+        conversation_id,
+        _runtime_snapshot_payload(agent_id, model_key, history, body.get("context_blocks"), memory_context, prompt_meta),
     )
+    run = platform_store.create_agent_run(
+        context.principal.account_id,
+        context.space_id,
+        conversation_id,
+        agent_id,
+        snapshot["id"],
+        model_key,
+        prompt_version=prompt_meta["prompt_version"],
+        prompt_hash=prompt_meta["prompt_hash"],
+    )
+    try:
+        result = await agent_runners[agent_id].run(
+            user_message=runner_message,
+            history=history[-10:],
+            llm_model_config=model_config,
+            execution_context=execution_context,
+        )
+    except Exception as error:
+        platform_store.fail_agent_run(
+            context.principal.account_id,
+            context.space_id,
+            run["id"],
+            type(error).__name__,
+        )
+        raise
 
     reply = result.get("reply", "抱歉，我暂时无法处理这个请求。")
     tool_calls_log = result.get("tool_calls_log", [])
@@ -1324,6 +1439,14 @@ async def chat_with_assistant(request: Request):
         reply,
         {"dispatched_to": dispatched_to, "tool_calls": [tc["name"] for tc in tool_calls_log], "model_key": model_key},
     )
+    platform_store.complete_agent_run(
+        context.principal.account_id,
+        context.space_id,
+        run["id"],
+        reply,
+        iterations,
+        tool_calls_log,
+    )
 
     return {
         "reply": reply,
@@ -1334,6 +1457,468 @@ async def chat_with_assistant(request: Request):
         "conversation_id": conversation_id,
         "model_key": model_key,
         "usage": result.get("usage", {}),
+        "run_id": run["id"],
+    }
+
+
+@app.post("/api/assistant/chat/stream")
+async def stream_assistant_chat(request: Request):
+    context = require_context(request)
+    body = await request.json()
+    agent_id = _routed_agent(context, body.get("agent_id"))
+    policy = _agent_policy(agent_id)
+    model_key = body.get("model_key") or next((item for item in policy["models"] if item in VALID_MODEL_KEYS), None)
+    if model_key not in VALID_MODEL_KEYS or model_key not in policy["models"]:
+        raise HTTPException(status_code=400, detail="当前 Agent Registry 策略不允许该模型")
+    message = body.get("message", "")
+    if not isinstance(message, str) or not (message := message.strip()):
+        raise HTTPException(status_code=400, detail="消息不能为空")
+    if len(message) > MAX_MESSAGE_LENGTH:
+        raise HTTPException(status_code=413, detail=f"message 不能超过 {MAX_MESSAGE_LENGTH} 个字符")
+    raw_conversation_id = body.get("conversation_id")
+    conversation_id = _create_conversation(
+        context,
+        agent_id,
+        _validate_conversation_id(raw_conversation_id) if raw_conversation_id else None,
+    )
+    platform_store.append_message(context.principal.account_id, context.space_id, conversation_id, "user", message)
+    history = platform_store.list_messages(context.principal.account_id, context.space_id, conversation_id, limit=MAX_HISTORY)
+    runner_message = message
+    context_blocks_message = _context_blocks_message(body.get("context_blocks"))
+    if context_blocks_message:
+        runner_message = f"以下是客户端仅供本次请求使用的文件上下文：\n{context_blocks_message}\n\n当前用户请求：\n{runner_message}"
+    if agent_id == "idea":
+        global_context = _global_context(context, conversation_id)
+        if global_context:
+            runner_message = f"以下是其他会话的最近摘要，仅作必要上下文：\n{global_context}\n\n当前用户请求：\n{message}"
+    policy = _agent_policy(agent_id)
+    saved_memory = _memory_context(context, message, policy["memory_scopes"])
+    if saved_memory:
+        runner_message = f"以下是用户明确保存的长期记忆，仅作必要上下文：\n{saved_memory}\n\n当前用户请求：\n{runner_message}"
+    prompt_meta = _prompt_metadata(agent_id)
+    execution_context = ExecutionContext(
+        request_context=context,
+        agent_id=agent_id,
+        is_owner=platform_store.route_for_principal(context.principal) == "owner_idea",
+        conversation_id=conversation_id,
+        tool_capabilities=frozenset(policy["tools"]),
+        registry_version=policy["version"],
+        prompt_version=prompt_meta["prompt_version"],
+        prompt_text=prompt_meta["prompt"],
+    )
+    snapshot = platform_store.create_runtime_snapshot(
+        context.principal.account_id,
+        context.space_id,
+        conversation_id,
+        _runtime_snapshot_payload(agent_id, model_key, history, body.get("context_blocks"), saved_memory, prompt_meta),
+    )
+    run = platform_store.create_agent_run(
+        context.principal.account_id, context.space_id, conversation_id, agent_id, snapshot["id"], model_key,
+        prompt_version=prompt_meta["prompt_version"], prompt_hash=prompt_meta["prompt_hash"],
+    )
+
+    def sse(event_type: str, payload: dict) -> str:
+        return f"event: {event_type}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+    async def event_stream():
+        reply_parts: list[str] = []
+        try:
+            yield sse("run.started", {"run_id": run["id"], "conversation_id": conversation_id, "agent_id": agent_id})
+            async for event in agent_runners[agent_id].run_stream(
+                user_message=runner_message,
+                history=history[-10:],
+                llm_model_config=selected_model_config(model_key),
+                execution_context=execution_context,
+            ):
+                event_type = event.get("type")
+                if event_type == "text":
+                    content = str(event.get("content", ""))
+                    reply_parts.append(content)
+                    yield sse("model.text.delta", {"run_id": run["id"], "content": content})
+                elif event_type == "tool_call":
+                    name = str(event.get("name", ""))[:120]
+                    platform_store.append_agent_run_event(context.principal.account_id, context.space_id, run["id"], "tool.started", f"工具 {name} 开始执行")
+                    yield sse("tool.started", {"run_id": run["id"], "name": name})
+                elif event_type == "tool_result":
+                    name, success = str(event.get("name", ""))[:120], bool(event.get("success", False))
+                    platform_store.append_agent_run_event(context.principal.account_id, context.space_id, run["id"], "tool.completed", f"工具 {name} 执行{'成功' if success else '未成功'}")
+                    yield sse("tool.completed", {"run_id": run["id"], "name": name, "success": success, "decision": event.get("decision"), "reason": event.get("reason")})
+                elif event_type == "done":
+                    reply = "".join(reply_parts) or "抱歉，我暂时无法处理这个请求。"
+                    tool_calls = event.get("tool_calls", [])
+                    _record_daily_activity(context, tool_calls)
+                    platform_store.append_message(context.principal.account_id, context.space_id, conversation_id, "assistant", reply, {"tool_calls": [item.get("name", "") for item in tool_calls], "model_key": model_key})
+                    platform_store.complete_agent_run(context.principal.account_id, context.space_id, run["id"], reply, event.get("iterations", 1), tool_calls)
+                    yield sse("run.completed", {"run_id": run["id"], "conversation_id": conversation_id, "agent_id": agent_id, "model_key": model_key, "reply": reply, "iterations": event.get("iterations", 1), "tool_calls": [{"name": item.get("name", ""), "success": bool(item.get("success", False))} for item in tool_calls]})
+        except Exception as error:
+            platform_store.fail_agent_run(context.principal.account_id, context.space_id, run["id"], type(error).__name__)
+            yield sse("run.failed", {"run_id": run["id"], "error": type(error).__name__})
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+@app.get("/api/agents")
+async def list_agent_registry(request: Request):
+    require_context(request)
+    agents = platform_store.list_agent_registry()
+    return {"count": len(agents), "agents": agents}
+
+
+@app.get("/api/neko/health")
+async def neko_health(request: Request):
+    context = require_context(request)
+    return await neko_client.health(context.request_id)
+
+
+@app.get("/api/neko/server/info")
+async def neko_server_info(request: Request):
+    context = require_context(request)
+    try:
+        return await neko_client.server_info(context.request_id)
+    except NekoCompatError as error:
+        raise HTTPException(status_code=error.status_code, detail=error.detail)
+
+
+@app.get("/api/neko/plugins")
+async def neko_plugins(request: Request):
+    context = require_context(request)
+    try:
+        return await neko_client.plugins(context.request_id)
+    except NekoCompatError as error:
+        raise HTTPException(status_code=error.status_code, detail=error.detail)
+
+
+@app.get("/api/neko/runtimes/{runtime_id}/capabilities")
+async def neko_runtime_capabilities(runtime_id: str, request: Request):
+    if not VALID_ID.fullmatch(runtime_id):
+        raise HTTPException(status_code=400, detail="runtime_id 格式无效")
+    context = require_context(request)
+    runtime = next(
+        (item for item in platform_store.list_device_runtimes(context.principal.account_id, context.space_id) if item["id"] == runtime_id),
+        None,
+    )
+    if not runtime:
+        raise HTTPException(status_code=404, detail="Runtime 不存在")
+    if runtime["device_id"] != context.device_id and context.principal.role != "owner":
+        raise HTTPException(status_code=403, detail="当前身份无权访问该 Runtime")
+    return {"runtime_id": runtime_id, "status": runtime["status"], "capabilities": runtime["capabilities"]}
+
+
+@app.post("/api/neko/runs")
+async def neko_create_run(request: Request):
+    context = require_context(request)
+    body = await request.json()
+    runtime_id = body.get("runtime_id")
+    plugin_id = body.get("plugin_id")
+    entry_id = body.get("entry_id")
+    args = body.get("args", {})
+    if not isinstance(runtime_id, str) or not VALID_ID.fullmatch(runtime_id):
+        raise HTTPException(status_code=400, detail="runtime_id 格式无效")
+    if not isinstance(plugin_id, str) or not plugin_id or len(plugin_id) > 160:
+        raise HTTPException(status_code=400, detail="plugin_id 无效")
+    if not isinstance(entry_id, str) or not entry_id or len(entry_id) > 160:
+        raise HTTPException(status_code=400, detail="entry_id 无效")
+    if not isinstance(args, dict) or len(json.dumps(args, ensure_ascii=False)) > 100_000:
+        raise HTTPException(status_code=400, detail="插件参数无效或过大")
+    runtime = next(
+        (item for item in platform_store.list_device_runtimes(context.principal.account_id, context.space_id) if item["id"] == runtime_id),
+        None,
+    )
+    if not runtime:
+        raise HTTPException(status_code=404, detail="Runtime 不存在")
+    if runtime["device_id"] != context.device_id and context.principal.role != "owner":
+        raise HTTPException(status_code=403, detail="当前身份无权使用该 Runtime")
+    if not runtime["capabilities"].get("plugins"):
+        raise HTTPException(status_code=400, detail="Runtime 不支持 N.E.K.O 插件")
+    idempotency_key = body.get("idempotency_key")
+    if idempotency_key is not None and (not isinstance(idempotency_key, str) or len(idempotency_key) > 160):
+        raise HTTPException(status_code=400, detail="idempotency_key 无效")
+    neko_payload = {
+        "plugin_id": plugin_id,
+        "entry_id": entry_id,
+        "args": args,
+        "task_id": body.get("task_id"),
+        "trace_id": context.request_id,
+        "idempotency_key": idempotency_key,
+    }
+    try:
+        result = await neko_client.create_run(neko_payload, context.request_id, idempotency_key)
+    except NekoCompatError as error:
+        raise HTTPException(status_code=error.status_code, detail=error.detail)
+    platform_store.write_audit(
+        "neko.run.created",
+        context,
+        action="create",
+        resource_type="neko_run",
+        resource_id=str(result.get("run_id", ""))[:160],
+        decision="allowed",
+        metadata={"runtime_id": runtime_id, "plugin_id": plugin_id, "entry_id": entry_id},
+    )
+    return {"runtime_id": runtime_id, "task_id": body.get("task_id"), "conversation_id": body.get("conversation_id"), "plugin_id": plugin_id, "entry_id": entry_id, "neko": result}
+
+
+@app.get("/api/neko/runs/{run_id}")
+async def neko_get_run(run_id: str, request: Request):
+    if not VALID_ID.fullmatch(run_id):
+        raise HTTPException(status_code=400, detail="run_id 格式无效")
+    context = require_context(request)
+    try:
+        return await neko_client.get_run(run_id, context.request_id)
+    except NekoCompatError as error:
+        raise HTTPException(status_code=error.status_code, detail=error.detail)
+
+
+@app.post("/api/neko/runs/{run_id}/cancel")
+async def neko_cancel_run(run_id: str, request: Request):
+    if not VALID_ID.fullmatch(run_id):
+        raise HTTPException(status_code=400, detail="run_id 格式无效")
+    context = require_context(request)
+    body = await request.json()
+    reason = body.get("reason") if isinstance(body, dict) else None
+    if reason is not None and (not isinstance(reason, str) or len(reason) > 500):
+        raise HTTPException(status_code=400, detail="取消原因无效")
+    try:
+        result = await neko_client.cancel_run(run_id, reason, context.request_id)
+    except NekoCompatError as error:
+        raise HTTPException(status_code=error.status_code, detail=error.detail)
+    platform_store.write_audit("neko.run.cancelled", context, action="cancel", resource_type="neko_run", resource_id=run_id, decision="allowed", metadata={"reason": reason or ""})
+    return result
+
+
+@app.get("/api/neko/runs/{run_id}/export")
+async def neko_export_run(run_id: str, request: Request, after: Optional[str] = None, limit: int = 200):
+    if not VALID_ID.fullmatch(run_id):
+        raise HTTPException(status_code=400, detail="run_id 格式无效")
+    context = require_context(request)
+    try:
+        return await neko_client.export_run(run_id, after, limit, context.request_id)
+    except NekoCompatError as error:
+        raise HTTPException(status_code=error.status_code, detail=error.detail)
+
+
+@app.post("/api/runtimes/register")
+async def register_device_runtime(request: Request):
+    context = require_context(request)
+    body = await request.json()
+    runtime_kind = body.get("runtime_kind")
+    capabilities = body.get("capabilities")
+    if runtime_kind not in {"desktop", "owner_desktop"}:
+        raise HTTPException(status_code=400, detail="runtime_kind 无效")
+    if not isinstance(capabilities, dict):
+        raise HTTPException(status_code=400, detail="capabilities 无效")
+    if not context.device_id or not VALID_ID.fullmatch(context.device_id):
+        raise HTTPException(status_code=400, detail="设备标识无效")
+    runtime = platform_store.register_device_runtime(
+        context.principal.account_id,
+        context.space_id,
+        context.device_id,
+        runtime_kind,
+        capabilities,
+    )
+    return runtime
+
+
+@app.post("/api/runtimes/heartbeat")
+async def heartbeat_device_runtime(request: Request):
+    context = require_context(request)
+    body = await request.json()
+    runtime_kind = body.get("runtime_kind")
+    if runtime_kind not in {"desktop", "owner_desktop"}:
+        raise HTTPException(status_code=400, detail="runtime_kind 无效")
+    if not context.device_id or not VALID_ID.fullmatch(context.device_id):
+        raise HTTPException(status_code=400, detail="设备标识无效")
+    runtime = platform_store.heartbeat_device_runtime(
+        context.principal.account_id,
+        context.space_id,
+        context.device_id,
+        runtime_kind,
+    )
+    if not runtime:
+        raise HTTPException(status_code=404, detail="Runtime 尚未注册")
+    return runtime
+
+
+@app.get("/api/runtimes")
+async def list_device_runtimes(request: Request):
+    context = require_context(request)
+    runtimes = platform_store.list_device_runtimes(
+        context.principal.account_id,
+        context.space_id,
+    )
+    return {"count": len(runtimes), "runtimes": runtimes}
+
+
+def _handoff_execution_manifest(value) -> Optional[dict]:
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) != {"kind", "relative_path", "mode"}:
+        raise HTTPException(status_code=400, detail="执行清单格式无效")
+    if value.get("kind") != "run_file" or value.get("mode") not in {"run", "debug"}:
+        raise HTTPException(status_code=400, detail="执行清单动作不受支持")
+    relative_path = value.get("relative_path")
+    if not isinstance(relative_path, str) or not relative_path or len(relative_path) > 240:
+        raise HTTPException(status_code=400, detail="执行文件路径无效")
+    normalized = relative_path.replace("\\", "/")
+    if normalized.startswith("/") or ":" in normalized or any(part in {"", ".", ".."} for part in normalized.split("/")):
+        raise HTTPException(status_code=400, detail="执行文件必须是工作区内的相对路径")
+    return {"kind": "run_file", "relative_path": normalized, "mode": value["mode"]}
+
+
+@app.get("/api/handoffs")
+async def list_task_handoffs(request: Request, limit: int = 50):
+    context = require_context(request)
+    handoffs = platform_store.list_task_handoffs(
+        context.principal.account_id,
+        context.space_id,
+        max(1, min(limit, 100)),
+    )
+    return {"count": len(handoffs), "handoffs": handoffs}
+
+
+@app.post("/api/handoffs")
+async def create_task_handoff(request: Request):
+    context = require_context(request)
+    body = await request.json()
+    conversation_id = body.get("conversation_id")
+    snapshot_id = body.get("snapshot_id")
+    agent_id = body.get("agent_id")
+    direction = body.get("direction")
+    if not all(isinstance(value, str) and VALID_ID.fullmatch(value) for value in (conversation_id, snapshot_id, agent_id)):
+        raise HTTPException(status_code=400, detail="handoff 标识无效")
+    if direction not in {"local_to_cloud", "cloud_to_local"}:
+        raise HTTPException(status_code=400, detail="handoff direction 无效")
+    execution_manifest = _handoff_execution_manifest(body.get("execution_manifest"))
+    approval_id = body.get("approval_id")
+    if execution_manifest and direction == "cloud_to_local":
+        if not isinstance(approval_id, str) or not VALID_ID.fullmatch(approval_id):
+            raise HTTPException(status_code=400, detail="可执行交接必须绑定审批")
+    try:
+        return platform_store.create_task_handoff(
+            context.principal.account_id, context.space_id, conversation_id, agent_id,
+            snapshot_id, direction, body.get("task_id"), body.get("source_runtime_id"),
+            body.get("target_runtime_id"), execution_manifest,
+            approval_id,
+        )
+    except (LookupError, ValueError) as error:
+        raise HTTPException(status_code=400, detail=str(error))
+
+
+@app.get("/api/handoffs/pending")
+async def list_pending_handoffs_for_runtime(request: Request, runtime_id: str, limit: int = 20):
+    if not VALID_ID.fullmatch(runtime_id):
+        raise HTTPException(status_code=400, detail="runtime_id 格式无效")
+    context = require_context(request)
+    runtime = next(
+        (item for item in platform_store.list_device_runtimes(context.principal.account_id, context.space_id) if item["id"] == runtime_id),
+        None,
+    )
+    if not runtime:
+        raise HTTPException(status_code=404, detail="Runtime 不存在")
+    if context.device_id != runtime["device_id"]:
+        raise HTTPException(status_code=403, detail="当前设备无权领取该 Runtime 交接")
+    if runtime["status"] != "online":
+        return {"count": 0, "handoffs": []}
+    handoffs = platform_store.list_pending_handoffs_for_runtime(
+        context.principal.account_id, context.space_id, runtime_id, max(1, min(limit, 100)),
+    )
+    return {"count": len(handoffs), "handoffs": handoffs}
+
+
+@app.get("/api/handoffs/active")
+async def list_active_handoffs_for_runtime(request: Request, runtime_id: str, limit: int = 20):
+    if not VALID_ID.fullmatch(runtime_id):
+        raise HTTPException(status_code=400, detail="runtime_id 格式无效")
+    context = require_context(request)
+    runtime = next(
+        (item for item in platform_store.list_device_runtimes(context.principal.account_id, context.space_id) if item["id"] == runtime_id),
+        None,
+    )
+    if not runtime:
+        raise HTTPException(status_code=404, detail="Runtime 不存在")
+    if context.device_id != runtime["device_id"]:
+        raise HTTPException(status_code=403, detail="当前设备无权读取该 Runtime 交接")
+    handoffs = platform_store.list_active_handoffs_for_runtime(
+        context.principal.account_id, context.space_id, runtime_id, max(1, min(limit, 100)),
+    )
+    return {"count": len(handoffs), "handoffs": handoffs}
+
+
+@app.get("/api/handoffs/{handoff_id}")
+async def get_task_handoff(handoff_id: str, request: Request):
+    if not VALID_ID.fullmatch(handoff_id):
+        raise HTTPException(status_code=400, detail="handoff_id 格式无效")
+    context = require_context(request)
+    handoff = platform_store.get_task_handoff(context.principal.account_id, context.space_id, handoff_id)
+    if not handoff:
+        raise HTTPException(status_code=404, detail="handoff 不存在")
+    return handoff
+
+
+@app.get("/api/handoffs/{handoff_id}/execution")
+async def get_task_handoff_execution(handoff_id: str, request: Request, runtime_id: str):
+    if not VALID_ID.fullmatch(handoff_id) or not VALID_ID.fullmatch(runtime_id):
+        raise HTTPException(status_code=400, detail="交接或 Runtime 标识无效")
+    context = require_context(request)
+    execution = platform_store.get_task_handoff_execution(
+        context.principal.account_id, context.space_id, handoff_id, runtime_id, context.device_id,
+    )
+    if not execution:
+        raise HTTPException(status_code=404, detail="交接执行清单不可用")
+    return execution
+
+
+@app.post("/api/handoffs/{handoff_id}/{status}")
+async def transition_task_handoff(handoff_id: str, status: str, request: Request):
+    if not VALID_ID.fullmatch(handoff_id):
+        raise HTTPException(status_code=400, detail="handoff_id 格式无效")
+    context = require_context(request)
+    body = await request.json()
+    runtime_id = body.get("runtime_id")
+    if runtime_id is not None and (not isinstance(runtime_id, str) or not VALID_ID.fullmatch(runtime_id)):
+        raise HTTPException(status_code=400, detail="runtime_id 格式无效")
+    if status in {"accepted", "running", "completed", "failed", "cancelled"} and runtime_id is None:
+        raise HTTPException(status_code=400, detail="状态转换必须指定 Runtime")
+    try:
+        handoff = platform_store.transition_task_handoff(
+            context.principal.account_id, context.space_id, handoff_id, status,
+            runtime_id, context.device_id, str(body.get("error", "")),
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+    if not handoff:
+        raise HTTPException(status_code=409, detail="handoff 状态无法转换")
+    return handoff
+
+
+@app.get("/api/runtime/snapshot")
+async def get_runtime_snapshot(request: Request):
+    context = require_context(request)
+    return platform_store.runtime_snapshot(context.principal.account_id, context.space_id)
+
+
+@app.get("/api/runs")
+async def list_agent_runs(request: Request, limit: int = 20):
+    context = require_context(request)
+    limit = max(1, min(limit, 100))
+    runs = platform_store.list_agent_runs(context.principal.account_id, context.space_id, limit)
+    return {"count": len(runs), "runs": runs}
+
+
+@app.get("/api/runs/{run_id}")
+async def get_agent_run(run_id: str, request: Request):
+    if not VALID_ID.fullmatch(run_id):
+        raise HTTPException(status_code=400, detail="run_id 格式无效")
+    context = require_context(request)
+    run = platform_store.get_agent_run(context.principal.account_id, context.space_id, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="运行记录不存在")
+    return {
+        **run,
+        "events": platform_store.list_agent_run_events(
+            context.principal.account_id,
+            context.space_id,
+            run_id,
+        ),
     }
 
 # ===================================================================

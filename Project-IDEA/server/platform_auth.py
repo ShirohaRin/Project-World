@@ -37,6 +37,11 @@ class RequestContext:
     space_id: Optional[str] = None
 
 
+RUNTIME_OFFLINE_TIMEOUT_SECONDS = 90
+HANDOFF_PENDING_TIMEOUT_SECONDS = 15 * 60
+HANDOFF_ACCEPTED_TIMEOUT_SECONDS = 5 * 60
+
+
 class PlatformStore:
     def __init__(self, db_path: str):
         self.db_path = db_path
@@ -259,6 +264,97 @@ class PlatformStore:
                     updated_at REAL NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_tasks_scope ON tasks(account_id, space_id, updated_at DESC);
+                CREATE TABLE IF NOT EXISTS agent_registry (
+                    agent_id TEXT NOT NULL,
+                    version INTEGER NOT NULL,
+                    display_name TEXT NOT NULL,
+                    model_policy_json TEXT NOT NULL,
+                    tool_policy_json TEXT NOT NULL,
+                    memory_scopes_json TEXT NOT NULL,
+                    delegation_policy_json TEXT NOT NULL,
+                    prompt_version TEXT NOT NULL DEFAULT 'idea.v1',
+                    status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'disabled')),
+                    created_at REAL NOT NULL,
+                    PRIMARY KEY(agent_id, version)
+                );
+                CREATE TABLE IF NOT EXISTS device_runtimes (
+                    runtime_id TEXT PRIMARY KEY,
+                    account_id TEXT NOT NULL,
+                    space_id TEXT NOT NULL,
+                    device_id TEXT NOT NULL,
+                    runtime_kind TEXT NOT NULL CHECK(runtime_kind IN ('desktop', 'owner_desktop', 'cloud')),
+                    capabilities_json TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK(status IN ('online', 'offline')),
+                    registered_at REAL NOT NULL,
+                    last_seen_at REAL NOT NULL,
+                    UNIQUE(account_id, space_id, device_id, runtime_kind)
+                );
+                CREATE INDEX IF NOT EXISTS idx_device_runtimes_scope ON device_runtimes(account_id, space_id, last_seen_at DESC);
+                CREATE TABLE IF NOT EXISTS task_handoffs (
+                    handoff_id TEXT PRIMARY KEY,
+                    account_id TEXT NOT NULL,
+                    space_id TEXT NOT NULL,
+                    task_id TEXT,
+                    conversation_id TEXT NOT NULL,
+                    agent_id TEXT NOT NULL,
+                    snapshot_id TEXT NOT NULL,
+                    source_runtime_id TEXT,
+                    target_runtime_id TEXT,
+                    direction TEXT NOT NULL CHECK(direction IN ('local_to_cloud', 'cloud_to_local')),
+                    status TEXT NOT NULL CHECK(status IN ('pending', 'accepted', 'running', 'completed', 'failed', 'cancelled')),
+                    created_at REAL NOT NULL,
+                    accepted_at REAL,
+                    started_at REAL,
+                    finished_at REAL,
+                    error_message TEXT,
+                    execution_manifest_json TEXT,
+                    manifest_hash TEXT,
+                    accepted_by_device_id TEXT,
+                    approval_id TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_task_handoffs_scope ON task_handoffs(account_id, space_id, created_at DESC);
+                CREATE TABLE IF NOT EXISTS runtime_snapshots (
+                    snapshot_id TEXT PRIMARY KEY,
+                    account_id TEXT NOT NULL,
+                    space_id TEXT NOT NULL,
+                    conversation_id TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    created_at REAL NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_runtime_snapshots_scope ON runtime_snapshots(account_id, space_id, created_at DESC);
+                CREATE TABLE IF NOT EXISTS agent_runs (
+                    run_id TEXT PRIMARY KEY,
+                    account_id TEXT NOT NULL,
+                    space_id TEXT NOT NULL,
+                    conversation_id TEXT NOT NULL,
+                    task_id TEXT,
+                    agent_id TEXT NOT NULL,
+                    snapshot_id TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK(status IN ('running', 'completed', 'failed')),
+                    model_key TEXT NOT NULL,
+                    prompt_version TEXT,
+                    prompt_hash TEXT,
+                    started_at REAL NOT NULL,
+                    finished_at REAL,
+                    iterations INTEGER,
+                    tool_calls_json TEXT NOT NULL DEFAULT '[]',
+                    summary TEXT,
+                    error_message TEXT,
+                    FOREIGN KEY(snapshot_id) REFERENCES runtime_snapshots(snapshot_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_agent_runs_scope ON agent_runs(account_id, space_id, started_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_agent_runs_conversation ON agent_runs(conversation_id, started_at DESC);
+                CREATE TABLE IF NOT EXISTS run_events (
+                    event_id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL,
+                    account_id TEXT NOT NULL,
+                    space_id TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    detail TEXT NOT NULL DEFAULT '',
+                    created_at REAL NOT NULL,
+                    FOREIGN KEY(run_id) REFERENCES agent_runs(run_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_run_events_run ON run_events(run_id, created_at);
                 CREATE TABLE IF NOT EXISTS sync_events (
                     event_id INTEGER PRIMARY KEY AUTOINCREMENT,
                     account_id TEXT NOT NULL,
@@ -410,6 +506,23 @@ class PlatformStore:
                 connection.execute("ALTER TABLE mcp_device_credentials ADD COLUMN credential_kind TEXT NOT NULL DEFAULT 'mcp'")
             if "encrypted_token" not in credential_columns:
                 connection.execute("ALTER TABLE mcp_device_credentials ADD COLUMN encrypted_token TEXT")
+            handoff_columns = {row["name"] for row in connection.execute("PRAGMA table_info(task_handoffs)").fetchall()}
+            if "execution_manifest_json" not in handoff_columns:
+                connection.execute("ALTER TABLE task_handoffs ADD COLUMN execution_manifest_json TEXT")
+            if "manifest_hash" not in handoff_columns:
+                connection.execute("ALTER TABLE task_handoffs ADD COLUMN manifest_hash TEXT")
+            if "accepted_by_device_id" not in handoff_columns:
+                connection.execute("ALTER TABLE task_handoffs ADD COLUMN accepted_by_device_id TEXT")
+            if "approval_id" not in handoff_columns:
+                connection.execute("ALTER TABLE task_handoffs ADD COLUMN approval_id TEXT")
+            agent_registry_columns = {row["name"] for row in connection.execute("PRAGMA table_info(agent_registry)").fetchall()}
+            if "prompt_version" not in agent_registry_columns:
+                connection.execute("ALTER TABLE agent_registry ADD COLUMN prompt_version TEXT NOT NULL DEFAULT 'idea.v1'")
+            agent_run_columns = {row["name"] for row in connection.execute("PRAGMA table_info(agent_runs)").fetchall()}
+            if "prompt_version" not in agent_run_columns:
+                connection.execute("ALTER TABLE agent_runs ADD COLUMN prompt_version TEXT")
+            if "prompt_hash" not in agent_run_columns:
+                connection.execute("ALTER TABLE agent_runs ADD COLUMN prompt_hash TEXT")
             linked_devices = connection.execute("SELECT l.owner_principal_id, s.account_id, s.device_id FROM owner_account_links l JOIN account_sessions s ON s.account_id = l.account_id WHERE l.owner_principal_id = 'owner-shiroha-nao' AND l.status = 'active' AND s.device_id IS NOT NULL").fetchall()
             for device in linked_devices:
                 exists = connection.execute("SELECT 1 FROM owner_devices WHERE owner_principal_id = ? AND account_id = ? AND device_id = ?", (device["owner_principal_id"], device["account_id"], device["device_id"])).fetchone()
@@ -422,7 +535,23 @@ class PlatformStore:
             now = time.time()
             connection.execute("INSERT INTO account_profiles(account_id, work_role, updated_at) SELECT a.account_id, CASE WHEN a.account_id = 'account-owner' OR EXISTS(SELECT 1 FROM owner_account_links l WHERE l.owner_principal_id = 'owner-shiroha-nao' AND l.account_id = a.account_id AND l.status = 'active') THEN 'owner' ELSE 'user' END, ? FROM accounts a WHERE NOT EXISTS(SELECT 1 FROM account_profiles p WHERE p.account_id = a.account_id)", (now,))
             connection.execute("UPDATE account_profiles SET work_role = 'owner', updated_at = ? WHERE account_id = 'account-owner' OR EXISTS(SELECT 1 FROM owner_account_links l WHERE l.owner_principal_id = 'owner-shiroha-nao' AND l.account_id = account_profiles.account_id AND l.status = 'active')", (now,))
+            self._seed_agent_registry(connection, now)
             self._migrate_messages_to_events(connection)
+
+    @staticmethod
+    def _seed_agent_registry(connection, now: float) -> None:
+        agents = [
+            ("idea", "IDEA", ["gpt", "deepseek-v4-flash"], ["file.read", "file.write", "command", "network", "delegate"], ["personal", "shared", "owner"], ["pwa", "researcher", "agent_producer"], "idea.v1"),
+            ("pwa", "PWA", ["gpt", "deepseek-v4-flash"], ["file.read", "file.write", "command", "network"], ["personal", "shared"], [], "pwa.v1"),
+            ("researcher", "Researcher", ["gpt", "deepseek-v4-flash"], ["file.read", "file.write", "command", "network"], ["personal", "shared"], [], "researcher.v1"),
+            ("agent_producer", "AgentProducer", ["gpt", "deepseek-v4-flash"], ["file.read", "file.write", "command"], ["personal", "shared"], [], "agent_producer.v1"),
+            ("idea_assistant", "IDEA Assistant", ["gpt", "deepseek-v4-flash"], ["file.read"], ["personal", "shared", "project"], [], "idea_assistant.v1"),
+        ]
+        for agent_id, display_name, models, tools, memory_scopes, delegates, prompt_version in agents:
+            connection.execute(
+                "INSERT INTO agent_registry(agent_id, version, display_name, model_policy_json, tool_policy_json, memory_scopes_json, delegation_policy_json, prompt_version, created_at) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(agent_id, version) DO UPDATE SET prompt_version = excluded.prompt_version",
+                (agent_id, display_name, json.dumps(models), json.dumps(tools), json.dumps(memory_scopes), json.dumps(delegates), prompt_version, now),
+            )
 
     @staticmethod
     def _append_session_event(connection, conversation_id: str, event_type: str, payload: dict, created_at: Optional[float] = None) -> None:
@@ -989,6 +1118,324 @@ class PlatformStore:
         with self._connect() as connection:
             rows = connection.execute("SELECT * FROM tasks WHERE account_id = ? AND space_id = ? AND status != 'deleted' ORDER BY created_at DESC", (account_id, space_id)).fetchall()
             return [{"id": row["task_id"], **{key: row[key] for key in row.keys() if key != "task_id"}} for row in rows]
+
+    def list_agent_registry(self) -> list[dict]:
+        with self._connect() as connection:
+            rows = connection.execute("SELECT * FROM agent_registry WHERE status = 'active' ORDER BY agent_id, version DESC").fetchall()
+        latest: dict[str, dict] = {}
+        for row in rows:
+            if row["agent_id"] in latest:
+                continue
+            latest[row["agent_id"]] = {
+                "agent_id": row["agent_id"], "version": row["version"], "display_name": row["display_name"],
+                "models": json.loads(row["model_policy_json"]), "tools": json.loads(row["tool_policy_json"]),
+                "memory_scopes": json.loads(row["memory_scopes_json"]), "delegates": json.loads(row["delegation_policy_json"]), "prompt_version": row["prompt_version"],
+            }
+        return list(latest.values())
+
+    def register_device_runtime(self, account_id: str, space_id: str, device_id: str, runtime_kind: str, capabilities: dict) -> dict:
+        if runtime_kind not in {"desktop", "owner_desktop", "cloud"}:
+            raise ValueError("runtime_kind 无效")
+        now = time.time()
+        safe_capabilities = {
+            "workspace": bool(capabilities.get("workspace", False)),
+            "terminal": bool(capabilities.get("terminal", False)),
+            "local_models": bool(capabilities.get("local_models", False)),
+            "gpu": bool(capabilities.get("gpu", False)),
+            "browser": bool(capabilities.get("browser", False)),
+            "computer": bool(capabilities.get("computer", False)),
+            "mcp": bool(capabilities.get("mcp", False)),
+            "plugins": bool(capabilities.get("plugins", False)),
+        }
+        with self._connect() as connection:
+            existing = connection.execute("SELECT runtime_id FROM device_runtimes WHERE account_id = ? AND space_id = ? AND device_id = ? AND runtime_kind = ?", (account_id, space_id, device_id, runtime_kind)).fetchone()
+            runtime_id = existing["runtime_id"] if existing else uuid.uuid4().hex
+            connection.execute(
+                "INSERT INTO device_runtimes(runtime_id, account_id, space_id, device_id, runtime_kind, capabilities_json, status, registered_at, last_seen_at) VALUES (?, ?, ?, ?, ?, ?, 'online', ?, ?) ON CONFLICT(account_id, space_id, device_id, runtime_kind) DO UPDATE SET capabilities_json = excluded.capabilities_json, status = 'online', last_seen_at = excluded.last_seen_at",
+                (runtime_id, account_id, space_id, device_id, runtime_kind, json.dumps(safe_capabilities), now, now),
+            )
+            self._append_sync_event(connection, account_id, space_id, "runtime", runtime_id, "runtime.registered", {"runtime_id": runtime_id, "kind": runtime_kind, "status": "online"})
+        return {"id": runtime_id, "device_id": device_id, "kind": runtime_kind, "capabilities": safe_capabilities, "status": "online", "last_seen_at": now}
+
+    def heartbeat_device_runtime(self, account_id: str, space_id: str, device_id: str, runtime_kind: str) -> Optional[dict]:
+        if runtime_kind not in {"desktop", "owner_desktop", "cloud"}:
+            raise ValueError("runtime_kind 无效")
+        now = time.time()
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT runtime_id, capabilities_json, registered_at FROM device_runtimes WHERE account_id = ? AND space_id = ? AND device_id = ? AND runtime_kind = ?",
+                (account_id, space_id, device_id, runtime_kind),
+            ).fetchone()
+            if not row:
+                return None
+            connection.execute(
+                "UPDATE device_runtimes SET status = 'online', last_seen_at = ? WHERE runtime_id = ?",
+                (now, row["runtime_id"]),
+            )
+        return {
+            "id": row["runtime_id"],
+            "device_id": device_id,
+            "kind": runtime_kind,
+            "capabilities": json.loads(row["capabilities_json"]),
+            "status": "online",
+            "registered_at": row["registered_at"],
+            "last_seen_at": now,
+        }
+
+    def list_device_runtimes(self, account_id: str, space_id: str) -> list[dict]:
+        offline_before = time.time() - RUNTIME_OFFLINE_TIMEOUT_SECONDS
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE device_runtimes SET status = 'offline' WHERE account_id = ? AND space_id = ? AND status = 'online' AND last_seen_at < ?",
+                (account_id, space_id, offline_before),
+            )
+            rows = connection.execute("SELECT * FROM device_runtimes WHERE account_id = ? AND space_id = ? ORDER BY last_seen_at DESC", (account_id, space_id)).fetchall()
+        return [{"id": row["runtime_id"], "device_id": row["device_id"], "kind": row["runtime_kind"], "capabilities": json.loads(row["capabilities_json"]), "status": row["status"], "registered_at": row["registered_at"], "last_seen_at": row["last_seen_at"]} for row in rows]
+
+    def create_task_handoff(self, account_id: str, space_id: str, conversation_id: str, agent_id: str, snapshot_id: str, direction: str, task_id: Optional[str] = None, source_runtime_id: Optional[str] = None, target_runtime_id: Optional[str] = None, execution_manifest: Optional[dict] = None, approval_id: Optional[str] = None) -> dict:
+        if direction not in {"local_to_cloud", "cloud_to_local"}:
+            raise ValueError("handoff direction 无效")
+        if direction == "cloud_to_local" and not target_runtime_id:
+            raise ValueError("cloud_to_local 必须指定目标 Runtime")
+        manifest_json = json.dumps(execution_manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")) if execution_manifest else None
+        manifest_hash = hashlib.sha256(manifest_json.encode("utf-8")).hexdigest() if manifest_json else None
+        handoff_id, now = uuid.uuid4().hex, time.time()
+        with self._connect() as connection:
+            snapshot = connection.execute("SELECT 1 FROM runtime_snapshots WHERE snapshot_id = ? AND account_id = ? AND space_id = ? AND conversation_id = ?", (snapshot_id, account_id, space_id, conversation_id)).fetchone()
+            if not snapshot:
+                raise LookupError("Runtime Snapshot 不存在")
+            for runtime_id in (source_runtime_id, target_runtime_id):
+                if runtime_id and not connection.execute("SELECT 1 FROM device_runtimes WHERE runtime_id = ? AND account_id = ? AND space_id = ?", (runtime_id, account_id, space_id)).fetchone():
+                    raise LookupError("Runtime 不存在")
+            if approval_id:
+                approval = connection.execute("SELECT 1 FROM tool_approvals WHERE approval_id = ? AND account_id = ? AND space_id = ? AND tool_name = 'handoff.run_file' AND fingerprint = ? AND status = 'approved' AND expires_at > ?", (approval_id, account_id, space_id, manifest_hash, now)).fetchone()
+                if not approval:
+                    raise ValueError("交接执行审批不可用")
+            connection.execute("INSERT INTO task_handoffs(handoff_id, account_id, space_id, task_id, conversation_id, agent_id, snapshot_id, source_runtime_id, target_runtime_id, direction, status, created_at, execution_manifest_json, manifest_hash, approval_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)", (handoff_id, account_id, space_id, task_id, conversation_id, agent_id, snapshot_id, source_runtime_id, target_runtime_id, direction, now, manifest_json, manifest_hash, approval_id))
+            self._append_sync_event(connection, account_id, space_id, "task_handoff", handoff_id, "handoff.created", {"handoff_id": handoff_id, "status": "pending", "direction": direction, "conversation_id": conversation_id})
+        return self.get_task_handoff(account_id, space_id, handoff_id)  # type: ignore[return-value]
+
+    def transition_task_handoff(self, account_id: str, space_id: str, handoff_id: str, status: str, runtime_id: Optional[str] = None, device_id: Optional[str] = None, error_message: str = "") -> Optional[dict]:
+        transitions = {"accepted": {"pending"}, "running": {"accepted"}, "completed": {"running"}, "failed": {"accepted", "running"}, "cancelled": {"pending", "accepted", "running"}}
+        if status not in transitions:
+            raise ValueError("handoff status 无效")
+        now = time.time()
+        with self._connect() as connection:
+            row = connection.execute("SELECT * FROM task_handoffs WHERE handoff_id = ? AND account_id = ? AND space_id = ?", (handoff_id, account_id, space_id)).fetchone()
+            if not row or row["status"] not in transitions[status]:
+                return None
+            if row["direction"] == "cloud_to_local":
+                if not runtime_id or runtime_id != row["target_runtime_id"] or not device_id:
+                    raise ValueError("本地交接必须由目标 Runtime 领取")
+                if row["accepted_by_device_id"] and row["accepted_by_device_id"] != device_id:
+                    raise ValueError("交接已由其他设备领取")
+            elif runtime_id and runtime_id != row["target_runtime_id"]:
+                raise ValueError("Runtime 无权接管此交接")
+            fields, values = ["status = ?"], [status]
+            if status == "accepted":
+                fields.extend(["accepted_at = ?", "accepted_by_device_id = ?"])
+                values.extend([now, device_id])
+            if status == "running": fields.append("started_at = ?"); values.append(now)
+            if status in {"completed", "failed", "cancelled"}: fields.append("finished_at = ?"); values.append(now)
+            if status == "failed": fields.append("error_message = ?"); values.append(error_message.replace("\n", " ")[:500])
+            values.extend([handoff_id, account_id, space_id, row["status"]])
+            changed = connection.execute(f"UPDATE task_handoffs SET {', '.join(fields)} WHERE handoff_id = ? AND account_id = ? AND space_id = ? AND status = ?", values).rowcount
+            if not changed:
+                return None
+            self._append_sync_event(connection, account_id, space_id, "task_handoff", handoff_id, f"handoff.{status}", {"handoff_id": handoff_id, "status": status, "finished_at": now if status in {"completed", "failed", "cancelled"} else None})
+        return self.get_task_handoff(account_id, space_id, handoff_id)
+
+    def get_task_handoff(self, account_id: str, space_id: str, handoff_id: str) -> Optional[dict]:
+        with self._connect() as connection:
+            row = connection.execute("SELECT * FROM task_handoffs WHERE handoff_id = ? AND account_id = ? AND space_id = ?", (handoff_id, account_id, space_id)).fetchone()
+        return self._task_handoff_record(row) if row else None
+
+    def list_task_handoffs(self, account_id: str, space_id: str, limit: int = 50) -> list[dict]:
+        with self._connect() as connection:
+            rows = connection.execute("SELECT * FROM task_handoffs WHERE account_id = ? AND space_id = ? ORDER BY created_at DESC LIMIT ?", (account_id, space_id, limit)).fetchall()
+        return [self._task_handoff_record(row) for row in rows]
+
+    def expire_stale_task_handoffs(self, account_id: str, space_id: str, now: Optional[float] = None) -> int:
+        now = now or time.time()
+        cancelled = 0
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT handoff_id, status FROM task_handoffs WHERE account_id = ? AND space_id = ? AND ((status = 'pending' AND created_at < ?) OR (status = 'accepted' AND accepted_at < ?))",
+                (account_id, space_id, now - HANDOFF_PENDING_TIMEOUT_SECONDS, now - HANDOFF_ACCEPTED_TIMEOUT_SECONDS),
+            ).fetchall()
+            for row in rows:
+                reason = "handoff_expired_pending" if row["status"] == "pending" else "handoff_expired_accepted"
+                changed = connection.execute(
+                    "UPDATE task_handoffs SET status = 'cancelled', finished_at = ?, error_message = ? WHERE handoff_id = ? AND account_id = ? AND space_id = ? AND status = ?",
+                    (now, reason, row["handoff_id"], account_id, space_id, row["status"]),
+                ).rowcount
+                if changed:
+                    cancelled += 1
+                    self._append_sync_event(connection, account_id, space_id, "task_handoff", row["handoff_id"], "handoff.cancelled", {"handoff_id": row["handoff_id"], "status": "cancelled", "reason": reason, "finished_at": now})
+        return cancelled
+
+    def list_pending_handoffs_for_runtime(self, account_id: str, space_id: str, runtime_id: str, limit: int = 20) -> list[dict]:
+        self.expire_stale_task_handoffs(account_id, space_id)
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM task_handoffs WHERE account_id = ? AND space_id = ? "
+                "AND target_runtime_id = ? AND direction = 'cloud_to_local' AND status = 'pending' "
+                "ORDER BY created_at ASC LIMIT ?",
+                (account_id, space_id, runtime_id, limit),
+            ).fetchall()
+        return [self._task_handoff_record(row) for row in rows]
+
+    def list_active_handoffs_for_runtime(self, account_id: str, space_id: str, runtime_id: str, limit: int = 20) -> list[dict]:
+        self.expire_stale_task_handoffs(account_id, space_id)
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM task_handoffs WHERE account_id = ? AND space_id = ? "
+                "AND target_runtime_id = ? AND direction = 'cloud_to_local' "
+                "AND status IN ('accepted', 'running') ORDER BY created_at ASC LIMIT ?",
+                (account_id, space_id, runtime_id, limit),
+            ).fetchall()
+        return [self._task_handoff_record(row) for row in rows]
+
+    def get_task_handoff_execution(self, account_id: str, space_id: str, handoff_id: str, runtime_id: str, device_id: str) -> Optional[dict]:
+        with self._connect() as connection:
+            row = connection.execute("SELECT h.*, r.device_id FROM task_handoffs h JOIN device_runtimes r ON r.runtime_id = h.target_runtime_id WHERE h.handoff_id = ? AND h.account_id = ? AND h.space_id = ? AND h.target_runtime_id = ?", (handoff_id, account_id, space_id, runtime_id)).fetchone()
+        if not row or row["direction"] != "cloud_to_local" or row["device_id"] != device_id or row["status"] not in {"pending", "accepted"}:
+            return None
+        if row["approval_id"]:
+            with self._connect() as connection:
+                approved = connection.execute("SELECT 1 FROM tool_approvals WHERE approval_id = ? AND account_id = ? AND space_id = ? AND status = 'approved' AND expires_at > ?", (row["approval_id"], account_id, space_id, time.time())).fetchone()
+            if not approved:
+                return None
+        if not row["execution_manifest_json"] or not row["manifest_hash"]:
+            return None
+        return {"handoff_id": row["handoff_id"], "manifest": json.loads(row["execution_manifest_json"]), "manifest_hash": row["manifest_hash"]}
+
+    @staticmethod
+    def _task_handoff_record(row) -> dict:
+        return {"id": row["handoff_id"], "task_id": row["task_id"], "conversation_id": row["conversation_id"], "agent_id": row["agent_id"], "snapshot_id": row["snapshot_id"], "source_runtime_id": row["source_runtime_id"], "target_runtime_id": row["target_runtime_id"], "direction": row["direction"], "status": row["status"], "created_at": row["created_at"], "accepted_at": row["accepted_at"], "started_at": row["started_at"], "finished_at": row["finished_at"], "error": row["error_message"], "has_execution_manifest": bool(row["execution_manifest_json"]), "manifest_hash": row["manifest_hash"], "approval_id": row["approval_id"]}
+
+    def create_runtime_snapshot(self, account_id: str, space_id: str, conversation_id: str, payload: dict) -> dict:
+        """Persist a display-safe execution envelope, never request content or secrets."""
+        now = time.time()
+        snapshot_id = uuid.uuid4().hex
+        safe_payload = {
+            "agent_id": str(payload.get("agent_id", ""))[:80],
+            "model_key": str(payload.get("model_key", ""))[:80],
+            "prompt_version": str(payload.get("prompt_version", ""))[:80],
+            "prompt_hash": str(payload.get("prompt_hash", ""))[:128],
+            "history_message_count": max(0, int(payload.get("history_message_count", 0))),
+            "context_block_count": max(0, int(payload.get("context_block_count", 0))),
+            "context_block_tokens": max(0, int(payload.get("context_block_tokens", 0))),
+            "memory_count": max(0, int(payload.get("memory_count", 0))),
+            "memory_tokens": max(0, int(payload.get("memory_tokens", 0))),
+        }
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT INTO runtime_snapshots(snapshot_id, account_id, space_id, conversation_id, payload_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (snapshot_id, account_id, space_id, conversation_id, json.dumps(safe_payload, ensure_ascii=False), now),
+            )
+        return {"id": snapshot_id, "conversation_id": conversation_id, "payload": safe_payload, "created_at": now}
+
+    def create_agent_run(self, account_id: str, space_id: str, conversation_id: str, agent_id: str, snapshot_id: str, model_key: str, task_id: Optional[str] = None, prompt_version: str = "", prompt_hash: str = "") -> dict:
+        run_id, now = uuid.uuid4().hex, time.time()
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT INTO agent_runs(run_id, account_id, space_id, conversation_id, task_id, agent_id, snapshot_id, status, model_key, prompt_version, prompt_hash, started_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?)",
+                (run_id, account_id, space_id, conversation_id, task_id, agent_id, snapshot_id, model_key, prompt_version[:80], prompt_hash[:128], now),
+            )
+            self._append_run_event(connection, account_id, space_id, run_id, "run.started", "Agent Run 已创建", now)
+            self._append_sync_event(connection, account_id, space_id, "agent_run", run_id, "agent_run.created", {"run_id": run_id, "conversation_id": conversation_id, "agent_id": agent_id, "status": "running", "created_at": now})
+            self._append_sync_event(connection, account_id, space_id, "runtime", space_id, "runtime.updated", {"run_id": run_id, "status": "running", "created_at": now})
+        return self.get_agent_run(account_id, space_id, run_id)  # type: ignore[return-value]
+
+    def complete_agent_run(self, account_id: str, space_id: str, run_id: str, summary: str, iterations: int, tool_calls: list[dict]) -> Optional[dict]:
+        now = time.time()
+        safe_tool_calls = [{"name": str(item.get("name", ""))[:120], "success": bool(item.get("success", False))} for item in tool_calls]
+        with self._connect() as connection:
+            changed = connection.execute(
+                "UPDATE agent_runs SET status = 'completed', finished_at = ?, iterations = ?, tool_calls_json = ?, summary = ? WHERE run_id = ? AND account_id = ? AND space_id = ? AND status = 'running'",
+                (now, max(1, int(iterations)), json.dumps(safe_tool_calls, ensure_ascii=False), summary[:1000], run_id, account_id, space_id),
+            ).rowcount
+            if not changed:
+                return None
+            row = connection.execute("SELECT * FROM agent_runs WHERE run_id = ?", (run_id,)).fetchone()
+            self._append_run_event(connection, account_id, space_id, run_id, "tools.completed", f"已完成 {len(safe_tool_calls)} 次工具调用", now)
+            self._append_run_event(connection, account_id, space_id, run_id, "run.completed", "回复已写入会话", now)
+            payload = {"run_id": run_id, "conversation_id": row["conversation_id"], "agent_id": row["agent_id"], "status": "completed", "finished_at": now, "summary": summary[:300]}
+            self._append_sync_event(connection, account_id, space_id, "agent_run", run_id, "agent_run.completed", payload)
+            self._append_sync_event(connection, account_id, space_id, "runtime", space_id, "runtime.updated", {"run_id": run_id, "status": "completed", "finished_at": now})
+        return self.get_agent_run(account_id, space_id, run_id)
+
+    def fail_agent_run(self, account_id: str, space_id: str, run_id: str, error_message: str) -> Optional[dict]:
+        now = time.time()
+        safe_error = error_message.replace("\n", " ")[:500]
+        with self._connect() as connection:
+            changed = connection.execute(
+                "UPDATE agent_runs SET status = 'failed', finished_at = ?, error_message = ? WHERE run_id = ? AND account_id = ? AND space_id = ? AND status = 'running'",
+                (now, safe_error, run_id, account_id, space_id),
+            ).rowcount
+            if not changed:
+                return None
+            row = connection.execute("SELECT * FROM agent_runs WHERE run_id = ?", (run_id,)).fetchone()
+            self._append_run_event(connection, account_id, space_id, run_id, "run.failed", safe_error, now)
+            payload = {"run_id": run_id, "conversation_id": row["conversation_id"], "agent_id": row["agent_id"], "status": "failed", "finished_at": now, "error": safe_error}
+            self._append_sync_event(connection, account_id, space_id, "agent_run", run_id, "agent_run.failed", payload)
+            self._append_sync_event(connection, account_id, space_id, "runtime", space_id, "runtime.updated", {"run_id": run_id, "status": "failed", "finished_at": now})
+        return self.get_agent_run(account_id, space_id, run_id)
+
+    def get_agent_run(self, account_id: str, space_id: str, run_id: str) -> Optional[dict]:
+        with self._connect() as connection:
+            row = connection.execute("SELECT * FROM agent_runs WHERE run_id = ? AND account_id = ? AND space_id = ?", (run_id, account_id, space_id)).fetchone()
+        return self._agent_run_record(row) if row else None
+
+    def append_agent_run_event(self, account_id: str, space_id: str, run_id: str, event_type: str, detail: str) -> Optional[dict]:
+        now = time.time()
+        with self._connect() as connection:
+            run = connection.execute(
+                "SELECT 1 FROM agent_runs WHERE run_id = ? AND account_id = ? AND space_id = ?",
+                (run_id, account_id, space_id),
+            ).fetchone()
+            if not run:
+                return None
+            self._append_run_event(connection, account_id, space_id, run_id, event_type, detail, now)
+        return {"run_id": run_id, "type": event_type, "detail": detail[:300], "created_at": now}
+
+    def list_agent_run_events(self, account_id: str, space_id: str, run_id: str) -> list[dict]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT event_id, event_type, detail, created_at FROM run_events WHERE run_id = ? AND account_id = ? AND space_id = ? ORDER BY created_at, rowid",
+                (run_id, account_id, space_id),
+            ).fetchall()
+        return [{"id": row["event_id"], "type": row["event_type"], "detail": row["detail"], "created_at": row["created_at"]} for row in rows]
+
+    def list_agent_runs(self, account_id: str, space_id: str, limit: int = 20) -> list[dict]:
+        with self._connect() as connection:
+            rows = connection.execute("SELECT * FROM agent_runs WHERE account_id = ? AND space_id = ? ORDER BY started_at DESC LIMIT ?", (account_id, space_id, limit)).fetchall()
+        return [self._agent_run_record(row) for row in rows]
+
+    def runtime_snapshot(self, account_id: str, space_id: str, limit: int = 20) -> dict:
+        runs = self.list_agent_runs(account_id, space_id, limit)
+        active_runs = [run for run in runs if run["status"] == "running"]
+        pending_tasks = len([task for task in self.list_tasks(account_id, space_id) if task["status"] == "pending"])
+        pending_approvals = len(self.list_tool_approvals(account_id, space_id, status="pending", limit=500))
+        return {"observed_at": time.time(), "cloud": {"status": "online", "detail": "IDEA service"}, "device_runtimes": self.list_device_runtimes(account_id, space_id), "active_runs": active_runs, "recent_runs": runs, "task_counts": {"active": len(active_runs), "pending": pending_tasks}, "pending_approvals": pending_approvals}
+
+    @staticmethod
+    def _append_run_event(connection, account_id: str, space_id: str, run_id: str, event_type: str, detail: str, created_at: float) -> None:
+        connection.execute(
+            "INSERT INTO run_events(event_id, run_id, account_id, space_id, event_type, detail, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (uuid.uuid4().hex, run_id, account_id, space_id, event_type, detail[:300], created_at),
+        )
+
+    @staticmethod
+    def _agent_run_record(row) -> dict:
+        return {
+            "id": row["run_id"], "conversation_id": row["conversation_id"], "task_id": row["task_id"],
+            "agent_id": row["agent_id"], "snapshot_id": row["snapshot_id"], "status": row["status"],
+            "model_key": row["model_key"], "prompt_version": row["prompt_version"], "prompt_hash": row["prompt_hash"], "started_at": row["started_at"], "finished_at": row["finished_at"],
+            "iterations": row["iterations"], "tool_calls": json.loads(row["tool_calls_json"]),
+            "summary": row["summary"], "error": row["error_message"],
+        }
 
     def create_scheduled_job(self, account_id: str, space_id: str, agent_id: str, tool_name: str, args: dict, interval_seconds: float) -> dict:
         if interval_seconds < 30:

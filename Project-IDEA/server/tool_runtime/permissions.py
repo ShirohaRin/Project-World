@@ -22,12 +22,29 @@ class PolicyDecision(str, Enum):
     REQUIRES_APPROVAL = "requires_approval"
 
 
+CAPABILITY_TOOLS = {
+    "file.read": {"read_file", "list_dir", "search_content"},
+    "file.write": {"write_file", "edit_file", "restore_file", "delete_file"},
+    "command": {"run_command", "ssh_run", "ssh_get", "ssh_put"},
+    "network": {"web_search", "web_fetch"},
+    "delegate": {"dispatch_to_agent"},
+}
+
+
+def policy_allows_tool(capabilities: frozenset[str], tool_name: str) -> bool:
+    return any(tool_name in CAPABILITY_TOOLS.get(capability, set()) for capability in capabilities)
+
+
 @dataclass(frozen=True)
 class ExecutionContext:
     request_context: Any
     agent_id: str
     is_owner: bool = False
     conversation_id: Optional[str] = None
+    tool_capabilities: Optional[frozenset[str]] = None
+    registry_version: int = 0
+    prompt_version: str = ""
+    prompt_text: Optional[str] = None
 
     @property
     def principal(self) -> Any:
@@ -53,8 +70,24 @@ class ExecutionContext:
     def request_id(self) -> str:
         return self.request_context.request_id
 
-    def for_child_agent(self, agent_id: str) -> "ExecutionContext":
-        return ExecutionContext(self.request_context, agent_id, self.is_owner, self.conversation_id)
+    def for_child_agent(
+        self,
+        agent_id: str,
+        tool_capabilities: frozenset[str],
+        registry_version: int,
+        prompt_version: str,
+        prompt_text: Optional[str],
+    ) -> "ExecutionContext":
+        return ExecutionContext(
+            self.request_context,
+            agent_id,
+            self.is_owner,
+            self.conversation_id,
+            tool_capabilities,
+            registry_version,
+            prompt_version,
+            prompt_text,
+        )
 
 
 @dataclass(frozen=True)

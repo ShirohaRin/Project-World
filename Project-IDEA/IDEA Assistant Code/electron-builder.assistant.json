@@ -1,10 +1,12 @@
 {
   "appId": "cn.programidea.assistant",
   "productName": "IDEA Assistant",
-  "directories": { "output": "../release/IDEA-Assistant" },
+  "directories": { "output": "../build-output/IDEA-Assistant-v3" },
   "artifactName": "IDEA-Assistant-${version}-${arch}.${ext}",
   "files": ["dist/**/*", "dist-electron/**/*"],
-  "extraResources": [{ "from": "dist-electron/client-flavor.json", "to": "dist-electron/client-flavor.json" }],
+  "extraResources": [
+    { "from": "dist-electron/client-flavor.json", "to": "dist-electron/client-flavor.json" }
+  ],
   "win": { "target": [{ "target": "nsis", "arch": ["x64"] }, { "target": "dir", "arch": ["x64"] }] },
   "nsis": { "perMachine": false, "oneClick": false, "allowToChangeInstallationDirectory": true },
   "linux": { "target": [{ "target": "dir", "arch": ["x64"] }], "category": "Development" }

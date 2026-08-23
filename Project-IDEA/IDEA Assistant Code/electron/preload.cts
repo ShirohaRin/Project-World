@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer } from 'electron'
 
 type ExecutionEvent = { sessionId: string; stream: 'system' | 'stdout' | 'stderr'; content: string; terminal?: boolean }
 type UpdateStatus = { state: 'checked' | 'current' | 'available' | 'downloading' | 'downloaded' | 'error'; update?: { version: string; releaseNotes: string; publishedAt: string }; message?: string }
+type ChatStreamEvent = { type: 'run.started' | 'model.text.delta' | 'tool.started' | 'tool.completed' | 'run.completed' | 'run.failed'; payload: Record<string, unknown> }
 // sandbox 模式下 preload 无 process.env 访问权，以 additionalArguments 传入的 argv 为准。
 const isOwnerClient = typeof process.env?.IDEA_CLIENT_FLAVOR === 'string' ? process.env.IDEA_CLIENT_FLAVOR === 'owner' : process.argv.includes('--idea-owner-client')
 
@@ -18,15 +19,30 @@ contextBridge.exposeInMainWorld('ideaDesktop', {
   passwordLogin: (email: string, password: string): Promise<{ route: string; principal: { account_id: string; role: string } }> => ipcRenderer.invoke('service:password-login', email, password),
   logout: (): Promise<void> => ipcRenderer.invoke('service:logout'),
   testService: () => ipcRenderer.invoke('service:health'),
+  getNekoRuntime: () => ipcRenderer.invoke('neko:runtime'),
+  getRagRuntime: () => ipcRenderer.invoke('rag:runtime'),
+  getRagStats: () => ipcRenderer.invoke('rag:stats'),
+  getRagDocuments: () => ipcRenderer.invoke('rag:documents'),
+  ragSearch: (collection: string, query: string, topK?: number) => ipcRenderer.invoke('rag:search', collection, query, topK),
+  ragIngest: (collection: string) => ipcRenderer.invoke('rag:ingest', collection),
+  ragRebuild: (collection?: string) => ipcRenderer.invoke('rag:rebuild', collection ?? 'all'),
   checkForUpdates: (): Promise<UpdateStatus> => ipcRenderer.invoke('updates:check'),
   installUpdate: (): Promise<UpdateStatus> => ipcRenderer.invoke('updates:install'),
   sendChat: (request: { agentId: string; message: string; contextBlocks?: Array<{ path: string; name: string; content: string }>; conversationId?: string; useMemory?: boolean; modelKey?: 'gpt' | 'deepseek-v4-flash' }) => ipcRenderer.invoke('service:chat', request),
+  sendChatStream: (request: { agentId: string; message: string; contextBlocks?: Array<{ path: string; name: string; content: string }>; conversationId?: string; useMemory?: boolean; modelKey?: 'gpt' | 'deepseek-v4-flash' }) => ipcRenderer.invoke('service:chat-stream', request),
   listConversations: () => ipcRenderer.invoke('service:conversations'),
   getConversation: (conversationId: string) => ipcRenderer.invoke('service:conversation', conversationId),
   deleteConversation: (conversationId: string): Promise<void> => ipcRenderer.invoke('service:delete-conversation', conversationId),
   listTasks: () => ipcRenderer.invoke('service:tasks'),
   deleteTask: (taskId: string): Promise<void> => ipcRenderer.invoke('service:delete-task', taskId),
   getSyncEvents: (after: number) => ipcRenderer.invoke('service:sync-events', after),
+  getRuntimeSnapshot: () => ipcRenderer.invoke('service:runtime-snapshot'),
+  registerRuntime: () => ipcRenderer.invoke('service:register-runtime'),
+  heartbeatRuntime: () => ipcRenderer.invoke('service:heartbeat-runtime'),
+  listPendingHandoffs: () => ipcRenderer.invoke('service:pending-handoffs'),
+  executeHandoff: (handoffId: string, workspace: string) => ipcRenderer.invoke('service:execute-handoff', handoffId, workspace),
+  listRuns: () => ipcRenderer.invoke('service:runs'),
+  getRunDetail: (runId: string) => ipcRenderer.invoke('service:run-detail', runId),
   ...(isOwnerClient ? {
     listOwnerDevices: () => ipcRenderer.invoke('owner:devices'),
     approveOwnerDevice: (ownerDeviceId: string) => ipcRenderer.invoke('owner:approve-device', ownerDeviceId),
@@ -50,6 +66,11 @@ contextBridge.exposeInMainWorld('ideaDesktop', {
     updateMemory: (memory: { id: string; revision: number; category: string; content: string }) => ipcRenderer.invoke('service:update-memory', memory),
     deleteMemory: (memory: { id: string; revision: number }) => ipcRenderer.invoke('service:delete-memory', memory),
   } : {}),
+  onChatStreamEvent: (listener: (event: ChatStreamEvent) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, streamEvent: ChatStreamEvent) => listener(streamEvent)
+    ipcRenderer.on('service:chat-event', handler)
+    return () => ipcRenderer.removeListener('service:chat-event', handler)
+  },
   onExecutionOutput: (listener: (event: ExecutionEvent) => void) => {
     const handler = (_event: Electron.IpcRendererEvent, output: ExecutionEvent) => listener(output)
     ipcRenderer.on('execution:output', handler)
