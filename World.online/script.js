@@ -61,7 +61,7 @@ if (polyCanvas && hero) {
   const rotateRigid = ([x, y, z], rx, ry, rz) => { const cx=Math.cos(rx), sx=Math.sin(rx), cy=Math.cos(ry), sy=Math.sin(ry), cz=Math.cos(rz), sz=Math.sin(rz); const y1=y*cx-z*sx, z1=y*sx+z*cx; const x2=x*cy+z1*sy, z2=-x*sy+z1*cy; return [x2*cz-y1*sz, x2*sz+y1*cz, z2]; };
   let canvasWidth = 0, canvasHeight = 0;
   function resizeCanvas(){ const ratio=devicePixelRatio||1; const box=hero.getBoundingClientRect(); const width=Math.round(box.width*ratio), height=Math.round(box.height*ratio); if(width===canvasWidth && height===canvasHeight) return; canvasWidth=width; canvasHeight=height; polyCanvas.width=width; polyCanvas.height=height; polyCanvas.style.width=box.width + 'px'; polyCanvas.style.height=box.height + 'px'; context.setTransform(ratio,0,0,ratio,0,0); }
-  function render(now){ const box=hero.getBoundingClientRect(); context.clearRect(0,0,box.width,box.height); for(let i=objects.length-1;i>=0;i--){ const object=objects[i]; if(object.ambient){ const progress=(now-object.born)/object.duration; if(progress>=1){ objects.splice(i,1); addAmbientPolyhedron(i); continue; } object.x=object.start[0]+(object.target[0]-object.start[0])*progress; object.y=object.start[1]+(object.target[1]-object.start[1])*progress; } } objects.forEach((object,index)=>{ const direction=object.direction ?? 1, a=now*object.speed*direction+index, b=now*object.speed*.73*direction+index*.8, c=now*object.speed*.49*direction; const visibility=object.cycle ? .68 + .32 * ((Math.sin(now/object.cycle*Math.PI*2+object.phase)+1)/2) : .82; const points=object.points.map(point=>{ const [x,y,z]=rotateRigid(point,a,b,c); const depth=4.5+z; return {x:box.width*object.x+x*object.size*4/depth,y:box.height*object.y+y*object.size*4/depth,z}; }); context.lineWidth=1.15; object.edges.forEach(([from,to])=>{const first=points[from],second=points[to],alpha=(.32+((first.z+second.z+2)/4)*.48)*object.opacity*visibility;context.strokeStyle=`rgba(${object.color.join(',')},${alpha})`;context.shadowColor=`rgba(${object.color.join(',')},.9)`;context.shadowBlur=10;context.beginPath();context.moveTo(first.x,first.y);context.lineTo(second.x,second.y);context.stroke();}); points.forEach(point=>{context.fillStyle=`rgba(${object.color.join(',')},${.35+(point.z+1)/4})`;context.beginPath();context.arc(point.x,point.y,1.05,0,Math.PI*2);context.fill();}); });requestAnimationFrame(render); }
+  function render(now){ const box=hero.getBoundingClientRect(); context.clearRect(0,0,box.width,box.height); for(let i=objects.length-1;i>=0;i--){ const object=objects[i]; if(object.ambient){ const progress=(now-object.born)/object.duration; if(progress>=1){ objects.splice(i,1); addAmbientPolyhedron(i); continue; } object.x=object.start[0]+(object.target[0]-object.start[0])*progress; object.y=object.start[1]+(object.target[1]-object.start[1])*progress; } } objects.forEach((object,index)=>{ const direction=object.direction ?? 1, a=now*object.speed*direction+index, b=now*object.speed*.73*direction+index*.8, c=now*object.speed*.49*direction; const visibility=object.cycle ? .68 + .32 * ((Math.sin(now/object.cycle*Math.PI*2+object.phase)+1)/2) : .82; const points=object.points.map(point=>{ const [x,y,z]=rotateRigid(point,a,b,c); const depth=4.5+z; return {x:box.width*object.x+x*object.size*4/depth,y:box.height*object.y+y*object.size*4/depth,z}; }); context.lineWidth=1.15; object.edges.forEach(([from,to])=>{const first=points[from],second=points[to],alpha=(.32+((first.z+second.z+2)/4)*.48)*object.opacity*visibility;context.strokeStyle=`rgba(${object.color.join(',')},${alpha})`;context.shadowColor=`rgba(${object.color.join(',')},.9)`;context.shadowBlur=10;context.beginPath();context.moveTo(first.x,first.y);context.lineTo(second.x,second.y);context.stroke();}); points.forEach(point=>{context.fillStyle=`rgba(${object.color.join(',')},${.35+(point.z+1)/4})`;context.beginPath();context.arc(point.x,point.y,1.05,0,Math.PI*2);context.fill();}); }); burstCanvasObjects=burstCanvasObjects.filter(object=>{ const delta=Math.min(34,Math.max(8,now-(object.lastNow??now))); object.lastNow=now; const age=now-object.born; const currentSpeed=Math.max(object.minSpeed,object.speed-object.deceleration*age-object.jerk*age*age); object.vx=object.directionX*currentSpeed; object.vy=object.directionY*currentSpeed; object.x+=object.vx*delta; object.y+=object.vy*delta; object.rotation=(object.rotation+object.rotationSpeed*delta)%(Math.PI*2); const points=object.points.map(point=>{ const [x,y,z]=rotateRigid(point,object.rotation,object.rotation*.73,object.rotation*.49); const depth=4.5+z; return {x:object.x+x*object.size*4/depth,y:object.y+y*object.size*4/depth,z}; }); const alpha=object.opacity*Math.min(1,age/180); context.lineWidth=1.15; object.edges.forEach(([from,to])=>{const first=points[from],second=points[to],edgeAlpha=(.32+((first.z+second.z+2)/4)*.48)*alpha;context.strokeStyle=`rgba(${object.color.join(',')},${edgeAlpha})`;context.shadowColor=`rgba(${object.color.join(',')},.9)`;context.shadowBlur=10;context.beginPath();context.moveTo(first.x,first.y);context.lineTo(second.x,second.y);context.stroke();}); points.forEach(point=>{context.fillStyle=`rgba(${object.color.join(',')},${.35+(point.z+1)/4})`;context.beginPath();context.arc(point.x,point.y,1.05,0,Math.PI*2);context.fill();}); const margin=object.size*3; return object.x>-margin&&object.x<box.width+margin&&object.y>-margin&&object.y<box.height+margin; }); context.shadowBlur=0;requestAnimationFrame(render); }
   resizeCanvas();addEventListener('resize',resizeCanvas);requestAnimationFrame(render);
 }
 const coreRectangle = document.querySelector('.geometry-diamond');
@@ -80,74 +80,48 @@ let burstBodies = [];
 let burstFrameActive = false;
 let burstLastTime = 0;
 let burstSpawned = false;
+let burstCanvasObjects = [];
 const randomBetween = (min, max) => min + Math.random() * (max - min);
+const burstShapeTemplates = [
+  { points: [[1,1,1],[-1,-1,1],[-1,1,-1],[1,-1,-1]], edges: [[0,1],[0,2],[0,3],[1,2],[1,3],[2,3]] },
+  { points: [[-1,-1,-1],[1,-1,-1],[1,1,-1],[-1,1,-1],[-1,-1,1],[1,-1,1],[1,1,1],[-1,1,1]], edges: [[0,1],[1,2],[2,3],[3,0],[4,5],[5,6],[6,7],[7,4],[0,4],[1,5],[2,6],[3,7]] },
+  { points: [[1,0,0],[.31,.95,0],[-.81,.59,0],[-.81,-.59,0],[.31,-.95,0]], edges: [[0,1],[1,2],[2,3],[3,4],[4,0]] },
+  { points: [[-1.2,-.45,-.3],[.8,-.9,.45],[1.35,.24,-.55],[.38,1.1,.85],[-.85,.72,.4],[-.38,-.12,1.35],[.15,.3,-1.25]], edges: [[0,1],[1,2],[2,3],[3,4],[4,0],[0,5],[1,5],[3,5],[4,5],[0,6],[2,6],[3,6],[4,6],[1,3]] }
+];
 const spawnBurst = now => {
-  if (!burstLayer) return;
-  const shouldStartFrame = !burstFrameActive;
-  burstFrameActive = true;
-  burstLastTime = now;
-  const count = 34 + Math.floor(Math.random() * 23);
+  const box = hero?.getBoundingClientRect();
+  const coreRect = corePoint?.getBoundingClientRect();
+  if (!box || !coreRect) return;
+  const originX = coreRect.left - box.left + coreRect.width / 2;
+  const originY = coreRect.top - box.top + coreRect.height / 2;
+  const count = 10 + Math.floor(Math.random() * 7);
   for (let index = 0; index < count; index++) {
-    const body = document.createElement('b');
-    const colorRoll = Math.random();
-    const color = colorRoll > .78
-      ? ['#ff9fbd', '#ffe1eb', 'rgba(255,82,138,.8)']
-      : colorRoll > .5
-        ? ['#b99bff', '#e1d7ff', 'rgba(139,105,255,.8)']
-        : ['#69dbff', '#d8f7ff', 'rgba(67,194,255,.82)'];
-    body.className = 'burst-geometry';
-    body.style.setProperty('--burst-size', `${randomBetween(11, 22).toFixed(1)}px`);
-    body.style.setProperty('--burst-line', color[0]);
-    body.style.setProperty('--burst-face', color[1]);
-    body.style.setProperty('--burst-glow', color[2]);
-    body.innerHTML = '<span></span><span></span><span></span>';
+    const template = burstShapeTemplates[Math.floor(Math.random() * burstShapeTemplates.length)];
     const angle = randomBetween(0, Math.PI * 2);
-    const speed = randomBetween(.22, .42);
-    burstLayer.append(body);
-    burstBodies.push({
-      element: body,
-      x: 0,
-      y: 0,
-      vx: Math.cos(angle) * speed,
-      vy: Math.sin(angle) * speed,
+    const speed = randomBetween(.16, .28);
+    const minSpeed = randomBetween(.075, .11);
+    const deceleration = randomBetween(.000035, .00007);
+    const jerk = randomBetween(.000000008, .000000018);
+    burstCanvasObjects.push({
+      points: template.points.map(point => point.slice()),
+      edges: template.edges,
+      x: originX,
+      y: originY,
+      directionX: Math.cos(angle),
+      directionY: Math.sin(angle),
       speed,
-      deceleration: randomBetween(.00005, .00011),
-      jerk: randomBetween(.000000016, .000000036),
+      minSpeed,
+      deceleration,
+      jerk,
+      size: randomBetween(7, 14),
       born: now,
-      rotation: randomBetween(0, 360),
-      rotationSpeed: randomBetween(-.22, .22)
+      rotation: randomBetween(0, Math.PI * 2),
+      rotationSpeed: randomBetween(-.00016, .00016),
+      color: Math.random() > .5 ? [82,202,255] : [168,130,255],
+      opacity: randomBetween(.52, .68),
+      burst: true
     });
   }
-  if (shouldStartFrame) requestAnimationFrame(updateBurstBodies);
-};
-const updateBurstBodies = now => {
-  if (!burstLayer) return;
-  const delta = burstLastTime ? Math.min(34, Math.max(8, now - burstLastTime)) : 16.67;
-  burstLastTime = now;
-  burstBodies = burstBodies.filter(body => {
-    const frameNow = Number.isFinite(now) ? now : performance.now();
-    const age = Math.max(0, frameNow - body.born);
-    const direction = Math.atan2(body.vy, body.vx);
-    const currentSpeed = Math.max(body.speed * .34, body.speed - body.deceleration * age - body.jerk * age * age);
-    body.vx = Math.cos(direction) * currentSpeed;
-    body.vy = Math.sin(direction) * currentSpeed;
-    body.x += body.vx * delta;
-    body.y += body.vy * delta;
-    body.rotation += body.rotationSpeed * delta;
-    body.element.style.opacity = Math.min(1, age / 180);
-    body.element.style.transform = `translate(calc(-50% + ${body.x.toFixed(1)}px),calc(-50% + ${body.y.toFixed(1)}px)) rotate(${body.rotation.toFixed(1)}deg)`;
-    const coreRect = corePoint?.getBoundingClientRect();
-    const originX = coreRect ? coreRect.left + coreRect.width / 2 : window.innerWidth / 2;
-    const originY = coreRect ? coreRect.top + coreRect.height / 2 : window.innerHeight / 2;
-    const pageX = originX + body.x;
-    const pageY = originY + body.y;
-    const margin = 80;
-    const alive = pageX > -margin && pageX < window.innerWidth + margin && pageY > -margin && pageY < window.innerHeight + margin;
-    if (!alive) body.element.remove();
-    return alive;
-  });
-  if (burstBodies.length) requestAnimationFrame(updateBurstBodies);
-  else burstFrameActive = false;
 };
 let coreRotationEnergy = 0;
 const coreShellPointStates = Array.from({ length: 28 }, (_, index) => ({
@@ -178,14 +152,23 @@ const coreSettleDuration = 1500;
 const ease = value => value * value * (3 - 2 * value);
 const between = (value, from, to) => Math.min(1, Math.max(0, (value - from) / (to - from)));
 const guideRadius = () => coreRingGuide ? coreRingGuide.getBoundingClientRect().width / 2 : 105;
-const updateCorePoint = (pulse = 0, instability = 0, now = 0) => {
+let coreVisualPulse = 0;
+let coreVisualInstability = 0;
+let coreVisualNow = 0;
+const updateCorePoint = (pulse = null, instability = null, now = null) => {
   if (!corePoint) return;
+  if (pulse !== null) coreVisualPulse = pulse;
+  if (instability !== null) coreVisualInstability = instability;
+  if (now !== null) coreVisualNow = now;
+  pulse = coreVisualPulse;
+  instability = coreVisualInstability;
+  now = coreVisualNow || performance.now();
   const innerBlast = coreInnerBlastProgress;
   const outerBlast = coreOuterBlastProgress;
   const recovery = coreNextBirthProgress;
   corePoint.style.setProperty('--core-brightness', '1');
   corePoint.style.setProperty('--core-glow', (1 + Math.max(pulse, 0) * .28 + innerBlast * .2 + outerBlast * .3).toFixed(3));
-  if (coreShell && (instability > 0 || now !== 0)) {
+  if (coreShell && (instability > 0 || corePulseStartedAt > 0 || coreRotationEnergy > 0)) {
     const points = Array.from({ length: 18 }, (_, index) => {
       const angle = index / 18 * Math.PI * 2;
       if (now - coreShapeTargetAt > 150) {
@@ -197,6 +180,8 @@ const updateCorePoint = (pulse = 0, instability = 0, now = 0) => {
       return `${(50 + Math.cos(angle) * radius).toFixed(2)}% ${(50 + Math.sin(angle) * radius).toFixed(2)}%`;
     });
     coreShell.style.clipPath = `polygon(${points.join(',')})`;
+  } else if (corePulseStartedAt > 0) {
+    coreShell.style.clipPath = 'polygon(50% 0%, 67% 5%, 88% 22%, 100% 50%, 88% 78%, 67% 95%, 50% 100%, 33% 95%, 12% 78%, 0% 50%, 12% 22%, 33% 5%)';
   }
   const blastGlow = ease(between(outerBlast, .04, .72));
   const glowDecay = 1 - ease(between(coreBlastDecayProgress, .18, 1));
@@ -243,7 +228,8 @@ const updateCorePoint = (pulse = 0, instability = 0, now = 0) => {
     const shellFade = ease(between(outerBlast, .08, .82));
     const shellRecovery = corePulseStartedAt && outerBlast > 0
       ? .38 + recovery * .62
-      : .62;
+      : 1;
+    coreShell.style.background = 'rgb(255,137,177)';
     coreShell.style.opacity = (shellRecovery * (1 - shellFade * .92)).toFixed(3);
     coreShell.style.transform = 'translate(-50%,-50%) scale(1)';
   }
@@ -359,7 +345,7 @@ if (corePoint) {
         coreBlastDecayProgress = ease(between(releaseAge, 1150, 5000));
         coreInnerBlastProgress = ease(between(releaseAge, 0, 430));
         corePromotionProgress = ease(between(releaseAge, 260, 1150));
-        coreNextBirthProgress = ease(between(releaseAge, 1150, 2150));
+        coreNextBirthProgress = ease(between(releaseAge, 1150, 2350));
         if (releaseAge < 34) coreWhiteCorePhase = 0;
         coreWhiteCorePhase = Math.max(coreWhiteCorePhase, coreNextBirthProgress);
         if (!burstSpawned) {
@@ -378,17 +364,18 @@ if (corePoint) {
       if (t < 1) requestAnimationFrame(tick);
       else {
         coreInnerBlastProgress = 0;
-        coreOuterBlastProgress = 0;
-        coreBlastDecayProgress = 0;
-        corePromotionProgress = 0;
-        coreNextBirthProgress = 0;
-        corePulseStartedAt = 0;
+      coreOuterBlastProgress = 0;
+      coreBlastDecayProgress = 0;
+      corePromotionProgress = 0;
+      coreNextBirthProgress = 0;
+      coreWhiteCorePhase = 0;
+      corePulseStartedAt = 0;
         coreRingOneAt = 0;
         coreRingTwoAt = 0;
         coreReleaseAt = 0;
         corePulseDuration = 0;
         burstSpawned = false;
-        updateCorePoint();
+        updateCorePoint(0, 0, performance.now());
         window.setTimeout(triggerCorePulse, 7000 + Math.random() * 6200);
       }
     };
