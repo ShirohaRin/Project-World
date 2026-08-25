@@ -123,14 +123,15 @@ def search_project_knowledge(project_id: str, collection: str, query: str, top_k
 
 
 async def main() -> None:
+    # (description, schema_required, function_param_order)
     specs = {
-        "list_project_documents": ("列出项目集合内文档（Owner 省略 project_id 时列出整个 RAG 库）。", ["collection"]),
-        "read_project_document": ("读取项目文档（Owner 省略 project_id 时从整个 RAG 库定位）。", ["collection", "document_path"]),
-        "update_project_document": ("更新项目 TXT 或 Markdown 文档（Owner 省略 project_id 时对整个 RAG 库定位）。", ["collection", "document_path", "content"]),
-        "upload_project_document": ("上传本机文档到项目集合（Owner 省略 project_id 时上传到整个 RAG 库）。", ["collection", "local_path"]),
-        "delete_project_document": ("删除项目文档（Owner 省略 project_id 时对整个 RAG 库定位）。", ["collection", "document_path"]),
-        "rebuild_project_index": ("重建项目集合索引（Owner 省略 project_id 时重建整个 RAG 库索引）。", ["collection"]),
-        "search_project_knowledge": ("检索项目集合知识（Owner 省略 project_id 时检索整个 RAG 库）。", ["collection", "query"]),
+        "list_project_documents": ("列出项目集合内文档（Owner 省略 project_id 时列出整个 RAG 库）。", ["collection"], ["project_id", "collection"]),
+        "read_project_document": ("读取项目文档（Owner 省略 project_id 时从整个 RAG 库定位）。", ["collection", "document_path"], ["project_id", "collection", "document_path"]),
+        "update_project_document": ("更新项目 TXT 或 Markdown 文档（Owner 省略 project_id 时对整个 RAG 库定位）。", ["collection", "document_path", "content"], ["project_id", "collection", "document_path", "content"]),
+        "upload_project_document": ("上传本机文档到项目集合（Owner 省略 project_id 时上传到整个 RAG 库）。", ["collection", "local_path"], ["project_id", "collection", "local_path"]),
+        "delete_project_document": ("删除项目文档（Owner 省略 project_id 时对整个 RAG 库定位）。", ["collection", "document_path"], ["project_id", "collection", "document_path"]),
+        "rebuild_project_index": ("重建项目集合索引（Owner 省略 project_id 时重建整个 RAG 库索引）。", ["collection"], ["project_id", "collection"]),
+        "search_project_knowledge": ("检索项目集合知识（Owner 省略 project_id 时检索整个 RAG 库）。", ["collection", "query"], ["project_id", "collection", "query", "top_k"]),
     }
     properties = {"project_id": {"type": "string", "description": "项目 id；Owner 可省略以查询整个 RAG 库"}, "collection": {"type": "string", "enum": sorted(COLLECTIONS)}, "document_path": {"type": "string"}, "content": {"type": "string"}, "local_path": {"type": "string"}, "query": {"type": "string"}, "top_k": {"type": "integer", "minimum": 1, "maximum": 10, "default": 5}}
 
@@ -149,7 +150,7 @@ async def main() -> None:
                         "required": required,
                     },
                 )
-                for name, (description, required) in specs.items()
+                for name, (description, required, _ordered) in specs.items()
             ]
         )
 
@@ -157,15 +158,18 @@ async def main() -> None:
         if len(args) == 1 and isinstance(args[0], types.CallToolRequestParams):
             name = args[0].name
             arguments = args[0].arguments or {}
-        elif len(args) >= 2:
-            name = args[-2]
-            arguments = args[-1] or {}
         else:
-            raise ValueError("MCP 工具调用参数无效。")
+            # 兼容新旧版 mcp SDK：回调参数顺序可能是 (name, arguments)、
+            # (request_context, name, arguments) 或 (name, request_context, arguments)，
+            # 因此按参数类型提取，避免把 ServerRequestContext 当作工具名。
+            name = next((item for item in args if isinstance(item, str)), None)
+            arguments = next((item for item in reversed(args) if isinstance(item, dict)), None)
+            if name is None or arguments is None:
+                raise ValueError("MCP 工具调用参数无效。")
         functions = {"list_project_documents": list_project_documents, "read_project_document": read_project_document, "update_project_document": update_project_document, "upload_project_document": upload_project_document, "delete_project_document": delete_project_document, "rebuild_project_index": rebuild_project_index, "search_project_knowledge": search_project_knowledge}
         if name not in functions:
             raise ValueError(f"未知工具：{name}")
-        ordered = specs[name][1] + (["top_k"] if name == "search_project_knowledge" else [])
+        ordered = specs[name][2]
         result = await asyncio.to_thread(functions[name], *(arguments.get(key, 5) if key == "top_k" else arguments.get(key) for key in ordered))
         return types.CallToolResult(content=[types.TextContent(type="text", text=result)])
 
