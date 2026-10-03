@@ -1,0 +1,54 @@
+{
+  "appId": "cn.programidea.assistant",
+  "productName": "IDEA Assistant",
+  "directories": {
+    "output": "C:\\Users\\pansh\\AppData\\Local\\Temp\\idea-assistant-assistant-ntKnwS\\package",
+    "app": "D:\\Project World\\Project-IDEA\\IDEA Assistant Code"
+  },
+  "artifactName": "IDEA-Assistant-${version}-${arch}.${ext}",
+  "files": [
+    {
+      "from": "dist-assistant",
+      "to": "dist",
+      "filter": [
+        "**/*"
+      ]
+    },
+    "dist-electron/**/*"
+  ],
+  "extraResources": [
+    {
+      "from": "D:\\Project World\\Project-IDEA\\IDEA Assistant Code\\dist-electron\\client-flavor.json",
+      "to": "dist-electron/client-flavor.json"
+    },
+    {
+      "from": "D:\\Project World\\Project-IDEA\\IDEA Assistant Code\\config\\official-models.json",
+      "to": "config/official-models.json"
+    },
+    {
+      "from": "D:\\Project World\\Project-IDEA\\IDEA Assistant\\resources\\rag\\runtime",
+      "to": "rag/runtime"
+    }
+  ],
+  "win": {
+    "target": [
+      {
+        "target": "dir",
+        "arch": [
+          "x64"
+        ]
+      }
+    ]
+  },
+  "linux": {
+    "target": [
+      {
+        "target": "dir",
+        "arch": [
+          "x64"
+        ]
+      }
+    ],
+    "category": "Development"
+  }
+}

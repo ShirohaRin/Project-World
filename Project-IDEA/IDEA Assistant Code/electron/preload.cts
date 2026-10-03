@@ -19,7 +19,19 @@ contextBridge.exposeInMainWorld('ideaDesktop', {
   passwordLogin: (email: string, password: string): Promise<{ route: string; principal: { account_id: string; role: string } }> => ipcRenderer.invoke('service:password-login', email, password),
   logout: (): Promise<void> => ipcRenderer.invoke('service:logout'),
   testService: () => ipcRenderer.invoke('service:health'),
-  getNekoRuntime: () => ipcRenderer.invoke('neko:runtime'),
+  openServiceTest: () => ipcRenderer.invoke('window:service-test'),
+  getLocalAgentStatus: () => ipcRenderer.invoke('local:agent-status'),
+  getLocalModelConfig: () => ipcRenderer.invoke('local:model-config'),
+  getLocalModels: () => ipcRenderer.invoke('local:models'),
+  getLocalExtensions: () => ipcRenderer.invoke('local:extensions'),
+  saveLocalExtensions: (input: { mcp: Array<{ name: string; url: string; enabled: boolean }>; rules: Array<{ name: string; content: string; enabled: boolean }> }) => ipcRenderer.invoke('local:save-extensions', input),
+  saveLocalModelConfig: (config: { id?: string; name?: string; displayName?: string; provider?: string; baseUrl: string; model: string; apiKey: string }) => ipcRenderer.invoke('local:save-model-config', config),
+  sendLocalChatStream: (request: { agentId: string; message: string; contextBlocks?: Array<{ path: string; name: string; content: string }>; conversationId?: string; useMemory?: boolean; modelKey?: string }) => ipcRenderer.invoke('local:chat-stream', request),
+  listLiterature: (limit?: number, offset?: number) => ipcRenderer.invoke('literature:list', limit, offset),
+  getLiteratureResearchDirection: () => ipcRenderer.invoke('literature:direction'),
+  saveLiteratureResearchDirection: (direction: string) => ipcRenderer.invoke('literature:save-direction', direction),
+  collectLiterature: () => ipcRenderer.invoke('literature:collect'),
+  downloadLiterature: (paperId: string) => ipcRenderer.invoke('literature:download', paperId),
   getRagRuntime: () => ipcRenderer.invoke('rag:runtime'),
   getRagStats: () => ipcRenderer.invoke('rag:stats'),
   getRagDocuments: () => ipcRenderer.invoke('rag:documents'),
@@ -43,6 +55,13 @@ contextBridge.exposeInMainWorld('ideaDesktop', {
   executeHandoff: (handoffId: string, workspace: string) => ipcRenderer.invoke('service:execute-handoff', handoffId, workspace),
   listRuns: () => ipcRenderer.invoke('service:runs'),
   getRunDetail: (runId: string) => ipcRenderer.invoke('service:run-detail', runId),
+  createComputeJob: (methodId: string, input: Record<string, string>) => ipcRenderer.invoke('compute:create', methodId, input),
+  getComputeJob: (jobId: string) => ipcRenderer.invoke('compute:get', jobId),
+  cancelComputeJob: (jobId: string) => ipcRenderer.invoke('compute:cancel', jobId),
+  listComputeJobEvents: (jobId: string) => ipcRenderer.invoke('compute:events', jobId),
+  getComputeJobResult: (jobId: string) => ipcRenderer.invoke('compute:result', jobId),
+  openComputeJobResult: (jobId: string, target: 'report' | 'output') => ipcRenderer.invoke('compute:open-result', jobId, target),
+  getQueuePresets: () => ipcRenderer.invoke('queue:presets'),
   ...(isOwnerClient ? {
     listOwnerDevices: () => ipcRenderer.invoke('owner:devices'),
     approveOwnerDevice: (ownerDeviceId: string) => ipcRenderer.invoke('owner:approve-device', ownerDeviceId),
@@ -70,6 +89,11 @@ contextBridge.exposeInMainWorld('ideaDesktop', {
     const handler = (_event: Electron.IpcRendererEvent, streamEvent: ChatStreamEvent) => listener(streamEvent)
     ipcRenderer.on('service:chat-event', handler)
     return () => ipcRenderer.removeListener('service:chat-event', handler)
+  },
+  onLocalChatStreamEvent: (listener: (event: ChatStreamEvent) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, streamEvent: ChatStreamEvent) => listener(streamEvent)
+    ipcRenderer.on('local:chat-event', handler)
+    return () => ipcRenderer.removeListener('local:chat-event', handler)
   },
   onExecutionOutput: (listener: (event: ExecutionEvent) => void) => {
     const handler = (_event: Electron.IpcRendererEvent, output: ExecutionEvent) => listener(output)

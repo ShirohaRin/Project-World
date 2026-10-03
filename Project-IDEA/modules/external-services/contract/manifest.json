@@ -1,0 +1,9 @@
+{
+  "id": "external-services",
+  "version": "0.1.0",
+  "kind": "integration-provider",
+  "description": "外部软件、MCP 和 HTTP 接口的统一集成边界。",
+  "providers": [
+    { "id": "qq", "kind": "notification", "transport": ["onebot-http", "mcp", "local-agent"], "credentialMode": "external-secret" }
+  ]
+}

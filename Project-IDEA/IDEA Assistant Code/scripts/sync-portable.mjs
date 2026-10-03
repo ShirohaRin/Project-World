@@ -9,7 +9,7 @@ const targets = {
 
 if (!(flavor in targets)) throw new Error('Expected assistant or owner flavor')
 
-const source = resolve('..', 'build-output', flavor === 'owner' ? 'IDEA-Assistant-SRH' : 'IDEA-Assistant', 'win-unpacked')
+const source = resolve('..', '.staging', flavor === 'owner' ? 'IDEA-Assistant-SRH' : 'IDEA-Assistant', 'win-unpacked')
 const destination = resolve('..', targets[flavor])
 const executableName = flavor === 'owner' ? 'IDEA.exe' : 'IDEA Assistant.exe'
 const stagingPath = `${destination}.staging`
@@ -20,6 +20,9 @@ function assertCompleteBuild(sourcePath, executableName) {
     join(sourcePath, executableName),
     join(sourcePath, 'resources', 'app.asar'),
     join(sourcePath, 'locales', 'en-US.pak'),
+    join(sourcePath, 'resources', 'rag', 'runtime', 'python', 'python.exe'),
+    join(sourcePath, 'resources', 'rag', 'runtime', 'rag_server', 'run_rag_server.py'),
+    join(sourcePath, 'resources', 'rag', 'runtime', 'rag_model', 'BAAI__bge-small-zh-v1.5'),
   ]
 
   const missingPath = requiredPaths.find((path) => !existsSync(path))

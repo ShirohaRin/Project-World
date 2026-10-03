@@ -1,0 +1,29 @@
+{
+  "semester": {"start_date": "2026-08-31", "end_date": "2027-01-03", "weeks": 18},
+  "courses": [
+    {"id":"mon-biochemistry-b02","name":"生物化学B_02","location":"泰达5-414(d)","weekday":0,"start_time":"08:20","end_time":"10:00","start_date":"2026-08-31","end_date":"2027-01-03","weeks":[1,2,3,4,5,6,7,8,9,10,11,12,13,14]},
+    {"id":"mon-physical-chemistry-b06","name":"物理化学B_06","location":"泰达5-309(d)","weekday":0,"start_time":"10:20","end_time":"12:00","start_date":"2026-08-31","end_date":"2027-01-03","weeks":[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16]},
+    {"id":"mon-biochem-lab-tech-b25","name":"生物化学实验技术B_25","location":"泰达生物化学实验室大楼111","weekday":0,"start_time":"13:30","end_time":"17:05","start_date":"2026-08-31","end_date":"2027-01-03","weeks":[2,4,8,10,12,14,16]},
+    {"id":"mon-immunology-01","name":"免疫学原理与技术_01","location":"泰达3-113(d)","weekday":0,"start_time":"18:30","end_time":"20:10","start_date":"2026-08-31","end_date":"2027-01-03","weeks":[3,4,5,6,7,8]},
+    {"id":"tue-biological-engineering-01","name":"生物工程概论_01","location":"泰达3-209(d)","weekday":1,"start_time":"08:20","end_time":"10:00","start_date":"2026-08-31","end_date":"2027-01-03","weeks":[1,2,3,4,5,6]},
+    {"id":"tue-probability-statistics-b15","name":"概率与统计B_15","location":"泰达9-13阶梯(d)","weekday":1,"start_time":"10:20","end_time":"12:00","start_date":"2026-08-31","end_date":"2027-01-03","weeks":[2,4,6,8,14,16]},
+    {"id":"tue-college-physics-c2-06","name":"大学物理C-2_06","location":"泰达3-111(d)","weekday":1,"start_time":"13:30","end_time":"15:10","start_date":"2026-08-31","end_date":"2027-01-03","weeks":[3,5,7,9,11,13,15]},
+    {"id":"tue-tennis-185","name":"体育3-网球_185","location":"泰达运动场泰达1","weekday":1,"start_time":"15:25","end_time":"17:05","start_date":"2026-08-31","end_date":"2027-01-03","weeks":[6,7,8,9,10,11,12,13,14,15,16,17]},
+    {"id":"tue-cell-engineering-02","name":"细胞工程_02","location":"泰达3-209(d)","weekday":1,"start_time":"18:30","end_time":"20:10","start_date":"2026-08-31","end_date":"2027-01-03","weeks":[13,14,15,16,17,18]},
+    {"id":"wed-marxism-26","name":"马克思主义基本原理_26","location":"泰达5-416(d)","weekday":2,"start_time":"08:20","end_time":"10:00","start_date":"2026-08-31","end_date":"2027-01-03","weeks":[9,10,11,12,13,14,15,16,17,18]},
+    {"id":"wed-pharmaceutical-chemistry-02","name":"药物化学_02","location":"泰达5-516(d)","weekday":2,"start_time":"10:20","end_time":"12:00","start_date":"2026-08-31","end_date":"2027-01-03","weeks":[1,2,3,4,5,6,7,8,9,10,11]},
+    {"id":"wed-pharmaceutical-chemistry-02-w12","name":"药物化学_02","location":"泰达5-418(d)","weekday":2,"start_time":"10:20","end_time":"12:00","start_date":"2026-08-31","end_date":"2027-01-03","weeks":[12]},
+    {"id":"wed-organic-chemistry-lab-c20","name":"有机化学实验C_20","location":"泰达有机化学实验室实验室1","weekday":2,"start_time":"13:30","end_time":"17:05","start_date":"2026-08-31","end_date":"2027-01-03","weeks":[2,3,4,5,6,7,8,9,10,11,14,15,16]},
+    {"id":"thu-physical-chemistry-b06","name":"物理化学B_06","location":"泰达5-209(d)","weekday":3,"start_time":"08:20","end_time":"10:00","start_date":"2026-08-31","end_date":"2027-01-03","weeks":[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16]},
+    {"id":"thu-college-physics-c2-06","name":"大学物理C-2_06","location":"泰达3-111(d)","weekday":3,"start_time":"10:20","end_time":"12:00","start_date":"2026-08-31","end_date":"2027-01-03","weeks":[3,4,5,6,7,8,9,10,11,12,13,14,15]},
+    {"id":"thu-pharmaceutical-chemistry-02","name":"药物化学_02","location":"泰达5-219(d)","weekday":3,"start_time":"13:30","end_time":"15:10","start_date":"2026-08-31","end_date":"2027-01-03","weeks":[1,2,3,4,5,6,7,8,9,10,11]},
+    {"id":"thu-situation-policy-3-53","name":"形势与政策-3_53","location":"泰达3-311(d)","weekday":3,"start_time":"15:25","end_time":"17:05","start_date":"2026-08-31","end_date":"2027-01-03","weeks":[11,12]},
+    {"id":"thu-immunology-01","name":"免疫学原理与技术_01","location":"泰达3-113(d)","weekday":3,"start_time":"18:30","end_time":"20:10","start_date":"2026-08-31","end_date":"2027-01-03","weeks":[3,4,5,6,7,8]},
+    {"id":"fri-biochemistry-b02","name":"生物化学B_02","location":"泰达5-414(d)","weekday":4,"start_time":"08:20","end_time":"10:00","start_date":"2026-08-31","end_date":"2027-01-03","weeks":[1,2,3,4,5,6,7,8,9,10,11,12,13,14]},
+    {"id":"fri-pharmaceutical-chemistry-02","name":"药物化学_02","location":"泰达3-309(d)","weekday":4,"start_time":"10:20","end_time":"12:00","start_date":"2026-08-31","end_date":"2027-01-03","weeks":[12]},
+    {"id":"fri-probability-statistics-b15","name":"概率与统计B_15","location":"泰达9-13阶梯(d)","weekday":4,"start_time":"10:20","end_time":"12:00","start_date":"2026-08-31","end_date":"2027-01-03","weeks":[2,3,4,5,6,7,8,13,14,15,16,17]},
+    {"id":"fri-biological-engineering-01","name":"生物工程概论_01","location":"泰达3-309(d)","weekday":4,"start_time":"13:30","end_time":"15:10","start_date":"2026-08-31","end_date":"2027-01-03","weeks":[1,2,3,4,5,6]},
+    {"id":"sat-marxism-26","name":"马克思主义基本原理_26","location":"泰达5-414(d)","weekday":5,"start_time":"13:30","end_time":"15:10","start_date":"2026-08-31","end_date":"2027-01-03","weeks":[9,10,11,12,13,14,15,16,17,18]},
+    {"id":"sat-organic-chemistry-lab-c20","name":"有机化学实验C_20","location":"泰达9-在线","weekday":5,"start_time":"18:30","end_time":"19:15","start_date":"2026-08-31","end_date":"2027-01-03","weeks":[3,4,5,6,7,8,9,10,11,14,15,16]}
+  ]
+}

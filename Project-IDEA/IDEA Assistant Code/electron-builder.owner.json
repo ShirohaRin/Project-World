@@ -1,13 +1,17 @@
 {
   "appId": "cn.programidea.owner",
   "productName": "IDEA",
-  "directories": { "output": "../build-output/IDEA-Assistant-SRH-v2" },
+  "directories": { "output": "../IDEA Assistant SRH" },
   "artifactName": "SRHsetup.${ext}",
   "files": ["dist/**/*", "dist-electron/**/*"],
   "extraResources": [
-    { "from": "dist-electron/client-flavor.json", "to": "dist-electron/client-flavor.json" }
+    { "from": "dist-electron/client-flavor.json", "to": "dist-electron/client-flavor.json" },
+    { "from": "config/official-models.json", "to": "config/official-models.json" },
+    { "from": "../modules/__init__.py", "to": "modules/__init__.py" },
+    { "from": "../modules/workflow", "to": "modules/workflow", "filter": ["**/*", "!**/tests/**", "!**/__pycache__/**", "!**/.pytest_cache/**"] },
+    { "from": "../modules/bio_analysis_function", "to": "modules/bio_analysis_function", "filter": ["**/*", "!**/tests/**", "!**/__pycache__/**", "!**/.pytest_cache/**", "!**/*.md"] },
+    { "from": "../IDEA Assistant/resources/rag/runtime", "to": "rag/runtime" }
   ],
-  "win": { "target": [{ "target": "nsis", "arch": ["x64"] }, { "target": "dir", "arch": ["x64"] }] },
-  "nsis": { "perMachine": false, "oneClick": false, "allowToChangeInstallationDirectory": true },
+  "win": { "target": [{ "target": "dir", "arch": ["x64"] }] },
   "linux": { "target": [{ "target": "dir", "arch": ["x64"] }], "category": "Development" }
 }

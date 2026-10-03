@@ -43,9 +43,26 @@ PROVIDERS = {
     },
 }
 
-MODEL_ENV_PREFIXES = {"gpt": "GPT", "deepseek-v4-flash": "DEEPSEEK"}
+MODEL_ENV_PREFIXES = {"gpt-5.6-terra": "GPT_TERRA", "gpt-5.6-sol": "GPT_SOL", "deepseek-v4-flash": "DEEPSEEK_FLASH", "deepseek-v4-pro": "DEEPSEEK_PRO"}
+OFFICIAL_MODEL_KEYS = frozenset(MODEL_ENV_PREFIXES)
 DEFAULT_CONTEXT_WINDOW_TOKENS = 1_000_000
 DEFAULT_MAX_OUTPUT_TOKENS = 16_384
+
+
+def _official_gateway_model_config(model_key: str) -> Optional[dict]:
+    gateway_url = os.getenv("OFFICIAL_GATEWAY_BASE_URL", "").strip().rstrip("/")
+    gateway_token = os.getenv("OFFICIAL_GATEWAY_TOKEN", "").strip()
+    prefix = MODEL_ENV_PREFIXES.get(model_key)
+    if not gateway_url or not gateway_token or not prefix:
+        return None
+    return {
+        "provider": "official_gateway",
+        "model": os.getenv(f"{prefix}_LLM_MODEL", "").strip() or model_key,
+        "base_url": gateway_url,
+        "api_key": gateway_token,
+        "context_window_tokens": _positive_int_env(f"{prefix}_CONTEXT_WINDOW_TOKENS", DEFAULT_CONTEXT_WINDOW_TOKENS),
+        "max_output_tokens": _positive_int_env(f"{prefix}_MAX_OUTPUT_TOKENS", DEFAULT_MAX_OUTPUT_TOKENS),
+    }
 
 
 def _positive_int_env(name: str, default: int) -> int:
@@ -70,7 +87,10 @@ def estimate_request_tokens(messages: list[dict], tools: Optional[list[dict]] = 
 
 
 def selected_model_config(model_key: str) -> Optional[dict]:
-    """Return the allowlisted model configuration from environment variables."""
+    """Return the allowlisted model configuration from the official gateway or environment."""
+    gateway_config = _official_gateway_model_config(model_key)
+    if gateway_config is not None:
+        return gateway_config
     prefix = MODEL_ENV_PREFIXES.get(model_key)
     if not prefix:
         return None

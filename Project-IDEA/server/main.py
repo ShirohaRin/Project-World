@@ -36,18 +36,21 @@ from llm.client import LLMClient, estimate_tokens, selected_model_config
 from tools.registry import ToolRegistry, load_ssh_hosts_from_env
 from agent_runner import AgentRunner
 from jobs import JobScheduler
-from memory.store import MemoryStore
-from platform_auth import PlatformStore, RequestContext, configured_token, extract_bearer, require_context
+from platform_auth import PlatformStore, Principal, RequestContext, configured_token, extract_bearer, require_context
 from tool_runtime.permissions import ExecutionContext
 from neko_compat import NekoCompatClient, NekoCompatError
+from modules.external_services.onebot_qq import OneBotQQProvider
+from modules.external_services.qq import QQMessage
+from modules.automation.course_command import query_course_command
+from modules.realtime_voice.server.ws import router as realtime_voice_router
 import memory_mcp
 import owner_agent_mcp
 
 # ---------------------------------------------------------------------------
 # 配置
 # ---------------------------------------------------------------------------
-BASE_DIR = Path(__file__).parent
-PROJECT_ROOT = BASE_DIR.parent
+BASE_DIR = Path(os.environ.get("IDEA_SERVER_ROOT", str(Path(__file__).parent))).resolve()
+PROJECT_ROOT = BASE_DIR
 SHARED_RAG_ROOT = Path(os.environ.get("IDEA_SHARED_RAG_ROOT", r"D:\shared_rag")).resolve()
 SHIROHA_ROOT = Path(os.environ.get("IDEA_SHIROHA_ROOT", r"D:\program\Personal website\ShirohaV1.1")).resolve()
 
@@ -276,10 +279,6 @@ def _prompt_metadata(agent_id: str) -> dict:
 # ---------------------------------------------------------------------------
 # 初始化核心组件
 # ---------------------------------------------------------------------------
-memory_store = MemoryStore(
-    backend=config.get("memory", {}).get("backend", "sqlite"),
-    db_path=config.get("memory", {}).get("db_path", str(BASE_DIR / "memory" / "idea_memory.db")),
-)
 platform_store = PlatformStore(os.environ.get("IDEA_PLATFORM_DB_PATH", str(BASE_DIR / "memory" / "platform.db")))
 platform_store.ensure_owner(auth_token)
 
@@ -384,6 +383,26 @@ async def dispatch_tool_func(agent: str, task: str, execution_context: Execution
 idea_tool_registry.register_tool("dispatch_to_agent", dispatch_tool_func, dispatch_schema)
 
 # ---------------------------------------------------------------------------
+# 注册自动化模块工具 — 云端 JobScheduler 可调度课程提醒与雨课堂监控
+# ---------------------------------------------------------------------------
+from automation_tools import register_automation_tools
+
+register_automation_tools(idea_tool_registry, config)
+
+# ---------------------------------------------------------------------------
+# 注册学术文献管理：每日自动采集 + 摘要 + 研究方向相关性评分 + 合规全文下载
+# ---------------------------------------------------------------------------
+from literature import LiteratureService, register_literature_tool
+
+literature_service = LiteratureService(
+    platform_store,
+    llm_client,
+    os.environ.get("IDEA_LITERATURE_FULLTEXT_ROOT")
+    or str((config.get("literature", {}) or {}).get("fulltext_root", str(BASE_DIR / "memory" / "literature"))),
+)
+register_literature_tool(idea_tool_registry, literature_service)
+
+# ---------------------------------------------------------------------------
 # 四个彼此独立的执行器：IDEA 拥有调度工具，其余 L1 只使用独立注册表。
 agent_runners = {
     "idea": AgentRunner(
@@ -424,7 +443,7 @@ MAX_HISTORY = 10
 MAX_MESSAGE_LENGTH = 20_000
 MAX_CONTEXT_BLOCKS_TOKENS = 1_000_000
 MAX_MEMORY_LENGTH = 10_000
-VALID_MODEL_KEYS = {"gpt", "deepseek-v4-flash"}
+VALID_MODEL_KEYS = {"gpt-5.6-terra", "gpt-5.6-sol", "deepseek-v4-flash", "deepseek-v4-pro"}
 VALID_ID = re.compile(r"^[A-Za-z0-9_-]{1,100}$")
 RAG_PERMISSIONS = {"documents.read", "documents.write", "documents.delete", "index.rebuild", "rag.search"}
 DAILY_SHORT_RETENTION_SECONDS = 7 * 86400
@@ -600,7 +619,7 @@ memory_mcp.configure(platform_store, _memory_namespaces)
 @app.middleware("http")
 async def platform_request_context(request: Request, call_next):
     request_id = request.headers.get("X-Request-ID", "").strip()[:100] or uuid.uuid4().hex
-    public_auth_paths = {"/api/auth/password/login", "/api/auth/email/send", "/api/auth/email/verify", "/api/auth/refresh"}
+    public_auth_paths = {"/api/auth/password/login", "/api/auth/email/send", "/api/auth/email/verify", "/api/auth/refresh", "/onebot/event"}
     requires_auth = (request.url.path.startswith("/api/") and request.url.path not in public_auth_paths) or request.url.path == "/mcp" or request.url.path.startswith("/mcp/")
     context = None
     mcp_context_token = None
@@ -707,10 +726,117 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-app.mount("/mcp/memory", memory_mcp.app)
-app.mount("/mcp/idea", owner_agent_mcp.app)
+
+
+def _replay_receive(payload: bytes):
+    delivered = False
+
+    async def receive():
+        nonlocal delivered
+        if delivered:
+            return {"type": "http.disconnect"}
+        delivered = True
+        return {"type": "http.request", "body": payload, "more_body": False}
+
+    return receive
+
+
+class _VendorNotificationFilter:
+    """忽略客户端厂商私有通知，避免 MCP SDK 校验失败后返回 400。
+
+    JSON-RPC 通知本就无需响应；客户端会发送自己的通知方法（例如 TRAE 的
+    notifications/trae/session_stop），直接交给 SDK 会被判为非法消息并以
+    400 拒绝，进而被客户端视为连接故障。这里在进入 SDK 前直接确认接收。
+    """
+
+    def __init__(self, app, prefixes: tuple[str, ...] = ("notifications/trae/",)) -> None:
+        self.app = app
+        self.prefixes = prefixes
+
+    def _is_vendor_notification(self, payload: bytes) -> bool:
+        try:
+            parsed = json.loads(payload)
+        except (ValueError, TypeError):
+            return False
+        if not isinstance(parsed, dict) or "id" in parsed:
+            return False
+        method = parsed.get("method")
+        return isinstance(method, str) and any(method.startswith(prefix) for prefix in self.prefixes)
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] != "http" or scope["method"] != "POST":
+            await self.app(scope, receive, send)
+            return
+        body = bytearray()
+        while True:
+            message = await receive()
+            if message["type"] != "http.request":
+                await self.app(scope, _replay_receive(bytes(body)), send)
+                return
+            body.extend(message.get("body", b""))
+            if not message.get("more_body", False):
+                break
+        payload = bytes(body)
+        if self._is_vendor_notification(payload):
+            await send({"type": "http.response.start", "status": 202, "headers": [(b"content-length", b"0")]})
+            await send({"type": "http.response.body", "body": b""})
+            return
+        await self.app(scope, _replay_receive(payload), send)
+
+
+app.mount("/mcp/memory", _VendorNotificationFilter(memory_mcp.app))
+app.mount("/mcp/idea", _VendorNotificationFilter(owner_agent_mcp.app))
+
+# 实时语音对话模块：仅当 config.yaml 的 voice.enabled 打开时挂载端点
+if (config.get("voice", {}) or {}).get("enabled", False):
+    app.include_router(realtime_voice_router)
 
 static_dir = BASE_DIR / "static"
+
+
+@app.post("/onebot/event")
+async def onebot_event(request: Request):
+    onebot_cfg = config.get("onebot", {}) or {}
+    secret = os.environ.get("IDEA_ONEBOT_SECRET", onebot_cfg.get("secret", ""))
+    supplied_values = [
+        request.headers.get("X-OneBot-Secret", "").strip(),
+    ]
+    authorization = request.headers.get("Authorization", "")
+    if authorization.lower().startswith("bearer "):
+        supplied_values.append(authorization[7:].strip())
+    if not secret or not any(
+        hmac.compare_digest(supplied, secret)
+        for supplied in supplied_values
+        if supplied
+    ):
+        raise HTTPException(status_code=401, detail="OneBot secret 无效")
+    body = await request.json()
+    if body.get("post_type") != "message" or str(body.get("user_id", "")) != "3080713452":
+        return {"status": "ignored"}
+    message = body.get("raw_message") or body.get("message")
+    if not isinstance(message, str) or not (message := message.strip()):
+        return {"status": "ignored"}
+    qq_cfg = config.get("automation", {}).get("qq", {}) or {}
+    endpoint = qq_cfg.get("endpoint", "")
+    if not endpoint:
+        raise HTTPException(status_code=503, detail="未配置 OneBot 回复端点")
+    schedule_path = qq_cfg.get(
+        "course_schedule_path",
+        config.get("automation", {}).get("course_schedule_path", ""),
+    )
+    reply = query_course_command(message, schedule_path)
+    await OneBotQQProvider(
+        endpoint,
+        qq_cfg.get("token", ""),
+    ).send_text(
+        QQMessage(
+            content=reply,
+            target_id=str(qq_cfg.get("target_id", "3080713452")),
+        )
+    )
+    return {"status": "ok"}
+
+
 if static_dir.exists():
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
@@ -848,6 +974,107 @@ async def delete_scheduled_job_route(job_id: str, request: Request):
     if not platform_store.delete_scheduled_job(context.principal.account_id, context.space_id, job_id):
         raise HTTPException(status_code=404, detail="作业不存在")
     return {"status": "deleted", "job_id": job_id}
+
+
+MAX_RESEARCH_DIRECTION_LENGTH = 2000
+
+
+async def _optional_json_body(request: Request) -> dict:
+    try:
+        body = await request.json()
+    except Exception:
+        return {}
+    return body if isinstance(body, dict) else {}
+
+
+@app.get("/api/platform/literature")
+async def list_literature_route(request: Request):
+    """分页返回当前账号/空间的文献列表（含摘要、评分与可下载状态）。"""
+    context = require_context(request)
+    try:
+        limit = int(request.query_params.get("limit", 50))
+        offset = int(request.query_params.get("offset", 0))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="limit 或 offset 无效")
+    result = literature_service.list(context.principal.account_id, context.space_id, limit, offset)
+    return {"items": result["items"], "total": result["total"]}
+
+
+@app.post("/api/platform/literature/collect")
+async def collect_literature_route(request: Request):
+    """立即执行一次索引收割：按学科与日期窗口取新论文（也可由每日定时作业触发）。"""
+    context = require_context(request)
+    body = await _optional_json_body(request)
+    try:
+        days = int(body.get("days", 1))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="days 无效")
+    try:
+        result = await literature_service.collect(context.principal.account_id, context.space_id, days=max(1, min(30, days)))
+    except Exception as error:
+        logger.warning("literature collect failed: %s", error)
+        raise HTTPException(status_code=502, detail=f"文献索引更新失败：{error}")
+    platform_store.write_audit(
+        "literature.index_updated", context, resource_type="literature", action="create",
+        decision="allowed", metadata={"count": result["count"], "skipped": result.get("skipped", 0)},
+    )
+    return {"count": result["count"], "skipped": result.get("skipped", 0), "sources": result.get("sources", {}), "reason": result.get("reason", "")}
+
+
+@app.get("/api/platform/literature/research-direction")
+async def get_literature_research_direction_route(request: Request):
+    context = require_context(request)
+    return {"content": literature_service.research_direction(context.principal.account_id, context.space_id)}
+
+
+@app.put("/api/platform/literature/research-direction")
+async def set_literature_research_direction_route(request: Request):
+    """保存检索方向；保存后按需建立每日 09:00 的索引更新作业。留空表示清除。"""
+    context = require_context(request)
+    body = await _optional_json_body(request)
+    content = str(body.get("content", "") or "").strip()
+    if len(content) > MAX_RESEARCH_DIRECTION_LENGTH:
+        raise HTTPException(status_code=400, detail="研究方向内容过长")
+    saved = literature_service.set_research_direction(context.principal.account_id, context.space_id, content)
+    platform_store.write_audit(
+        "literature.research_direction_updated", context, resource_type="literature", action="update",
+        decision="allowed", metadata={"configured": bool(saved)},
+    )
+    return {"content": saved or None}
+
+
+@app.get("/api/platform/literature/search")
+async def search_literature_route(request: Request):
+    """关键词全文检索（标题 / 摘要 / 作者 / 期刊），FTS5 + bm25 排序。"""
+    context = require_context(request)
+    query = str(request.query_params.get("q", "") or "").strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="缺少检索词 q")
+    try:
+        limit = int(request.query_params.get("limit", 20))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="limit 无效")
+    try:
+        result = literature_service.search(context.principal.account_id, context.space_id, query, limit)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+    return {"items": result["items"], "total": result["total"], "query": result["query"]}
+
+
+@app.get("/api/platform/literature/{literature_id}/download")
+async def download_literature_route(literature_id: str, request: Request):
+    """按需返回 PDF 全文：已下载过则直接给文件，否则从登记的开放获取链接取回。"""
+    context = require_context(request)
+    resolved = await literature_service.prepare_download(context.principal.account_id, context.space_id, literature_id)
+    if resolved is None:
+        raise HTTPException(status_code=404, detail="该文献没有可下载的开放获取 PDF")
+    path, filename = resolved
+    platform_store.write_audit(
+        "literature.downloaded", context, resource_type="literature", resource_id=literature_id,
+        action="read", decision="allowed",
+    )
+    media_type = "application/pdf" if path.suffix.lower() == ".pdf" else "application/octet-stream"
+    return FileResponse(str(path), media_type=media_type, filename=filename)
 
 
 @app.get("/api/platform/owner/devices")
@@ -1335,6 +1562,9 @@ def _runtime_snapshot_payload(agent_id: str, model_key: str, history: list[dict]
 async def chat_with_assistant(request: Request):
     context = require_context(request)
     body = await request.json()
+    use_memory = body.get("use_memory", True)
+    if not isinstance(use_memory, bool):
+        raise HTTPException(status_code=400, detail="use_memory 必须是布尔值")
     agent_id = _routed_agent(context, body.get("agent_id"))
     policy = _agent_policy(agent_id)
     model_key = body.get("model_key") or next((item for item in policy["models"] if item in VALID_MODEL_KEYS), None)
@@ -1370,7 +1600,7 @@ async def chat_with_assistant(request: Request):
         if global_context:
             runner_message = f"以下是其他会话的最近摘要，仅作必要上下文：\n{global_context}\n\n当前用户请求：\n{message}"
     policy = _agent_policy(agent_id)
-    memory_context = _memory_context(context, message, policy["memory_scopes"])
+    memory_context = _memory_context(context, message, policy["memory_scopes"]) if use_memory else ""
     if memory_context:
         runner_message = f"以下是用户明确保存的长期记忆，仅作必要上下文：\n{memory_context}\n\n当前用户请求：\n{runner_message}"
 
@@ -1465,6 +1695,9 @@ async def chat_with_assistant(request: Request):
 async def stream_assistant_chat(request: Request):
     context = require_context(request)
     body = await request.json()
+    use_memory = body.get("use_memory", True)
+    if not isinstance(use_memory, bool):
+        raise HTTPException(status_code=400, detail="use_memory 必须是布尔值")
     agent_id = _routed_agent(context, body.get("agent_id"))
     policy = _agent_policy(agent_id)
     model_key = body.get("model_key") or next((item for item in policy["models"] if item in VALID_MODEL_KEYS), None)
@@ -1492,7 +1725,7 @@ async def stream_assistant_chat(request: Request):
         if global_context:
             runner_message = f"以下是其他会话的最近摘要，仅作必要上下文：\n{global_context}\n\n当前用户请求：\n{message}"
     policy = _agent_policy(agent_id)
-    saved_memory = _memory_context(context, message, policy["memory_scopes"])
+    saved_memory = _memory_context(context, message, policy["memory_scopes"]) if use_memory else ""
     if saved_memory:
         runner_message = f"以下是用户明确保存的长期记忆，仅作必要上下文：\n{saved_memory}\n\n当前用户请求：\n{runner_message}"
     prompt_meta = _prompt_metadata(agent_id)

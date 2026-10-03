@@ -1,0 +1,7 @@
+{
+  "id": "automation",
+  "version": "0.1.0",
+  "kind": "workflow-provider",
+  "description": "定时任务和云端自动化工作流。",
+  "dependencies": ["browser", "external-services"]
+}

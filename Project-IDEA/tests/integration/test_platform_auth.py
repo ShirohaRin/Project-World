@@ -22,6 +22,7 @@ class PlatformApiTests(unittest.TestCase):
         os.environ["IDEA_PLATFORM_DB_PATH"] = str(Path(cls.temp_dir.name) / "platform.db")
         os.environ["IDEA_AUTH_DEVELOPMENT_MODE"] = "true"
         os.environ["IDEA_CREDENTIAL_RECOVERY_KEY"] = "zUThLxmtRLhE_sOOxR5pnH0FMU1fRm1E9QzkhBEnLOg="
+        os.environ["IDEA_LITERATURE_FULLTEXT_ROOT"] = str(Path(cls.temp_dir.name) / "literature")
         cls._previous_rag_service_token = os.environ.get("RAG_IDEA_SERVICE_TOKEN")
         os.environ["RAG_IDEA_SERVICE_TOKEN"] = "test-rag-service-token"
         sys.modules.pop("main", None)
@@ -41,12 +42,12 @@ class PlatformApiTests(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         cls.client.__exit__(None, None, None)
-        cls.main.memory_store.close()
         gc.collect()
         cls.temp_dir.cleanup()
         os.environ.pop("IDEA_AUTH_TOKEN", None)
         os.environ.pop("IDEA_PLATFORM_DB_PATH", None)
         os.environ.pop("IDEA_AUTH_DEVELOPMENT_MODE", None)
+        os.environ.pop("IDEA_LITERATURE_FULLTEXT_ROOT", None)
         if cls._previous_rag_service_token is None:
             os.environ.pop("RAG_IDEA_SERVICE_TOKEN", None)
         else:
@@ -161,7 +162,7 @@ class PlatformApiTests(unittest.TestCase):
         idea_headers = {"Authorization": f"Bearer {idea_credential.json()['token']}", "Content-Type": "application/json", "Accept": "application/json", "Host": "localhost:8000"}
         tools = self.client.post(endpoint, headers=idea_headers, json={"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
         self.assertEqual(tools.status_code, 200)
-        self.assertSetEqual({item["name"] for item in tools.json()["result"]["tools"]}, {"idea_chat", "idea_memory_save", "idea_memory_search", "idea_session_get", "idea_task_status", "idea_task_handoff_create"})
+        self.assertSetEqual({item["name"] for item in tools.json()["result"]["tools"]}, {"idea_chat", "idea_memory_save", "idea_memory_search", "idea_memory_list", "idea_memory_update", "idea_memory_delete", "idea_session_get", "idea_task_status", "idea_task_handoff_create"})
         self.assertEqual(self.client.post("/mcp/memory/mcp", headers=idea_headers, json={"jsonrpc": "2.0", "id": 3, "method": "tools/list", "params": {}}).status_code, 401)
 
         original_run = self.main.agent_runners["idea"].run
@@ -192,12 +193,56 @@ class PlatformApiTests(unittest.TestCase):
             self.assertEqual(searched.status_code, 200)
             results = json.loads(searched.json()["result"]["content"][0]["text"])
             self.assertIn(saved_memory["id"], {item["id"] for item in results["memories"]})
+
+            duplicated = self.client.post(endpoint, headers=idea_headers, json={"jsonrpc": "2.0", "id": 8, "method": "tools/call", "params": {"name": "idea_memory_save", "arguments": {"category": "continuity", "content": "Owner MCP memory write marker."}}})
+            self.assertEqual(duplicated.status_code, 200)
+            duplicate_payload = json.loads(duplicated.json()["result"]["content"][0]["text"])
+            self.assertTrue(duplicate_payload["deduplicated"])
+            self.assertEqual(duplicate_payload["id"], saved_memory["id"])
+
+            listed = self.client.post(endpoint, headers=idea_headers, json={"jsonrpc": "2.0", "id": 9, "method": "tools/call", "params": {"name": "idea_memory_list", "arguments": {"category": "continuity", "limit": 5}}})
+            self.assertEqual(listed.status_code, 200)
+            self.assertIn(saved_memory["id"], {item["id"] for item in json.loads(listed.json()["result"]["content"][0]["text"])["memories"]})
+
+            updated = self.client.post(endpoint, headers=idea_headers, json={"jsonrpc": "2.0", "id": 10, "method": "tools/call", "params": {"name": "idea_memory_update", "arguments": {"memory_id": saved_memory["id"], "content": "Owner MCP memory updated marker."}}})
+            self.assertEqual(updated.status_code, 200)
+            updated_payload = json.loads(updated.json()["result"]["content"][0]["text"])
+            self.assertEqual(updated_payload["revision"], 2)
+            self.assertIn("updated", updated_payload["content"])
+
+            removed = self.client.post(endpoint, headers=idea_headers, json={"jsonrpc": "2.0", "id": 11, "method": "tools/call", "params": {"name": "idea_memory_delete", "arguments": {"memory_id": saved_memory["id"]}}})
+            self.assertEqual(removed.status_code, 200)
+            self.assertEqual(json.loads(removed.json()["result"]["content"][0]["text"])["status"], "deleted")
+            self.assertNotIn(saved_memory["id"], {item["id"] for item in self.main.platform_store.list_memories("account-owner", "space-project-world", ["owner/owner-shiroha-nao"])})
         finally:
             self.main.agent_runners["idea"].run = original_run
 
         revoked = self.client.post(f"/api/platform/owner/mcp-credentials/{idea_credential.json()['credential_id']}/revoke", headers=self.headers)
         self.assertEqual(revoked.status_code, 200)
         self.assertEqual(self.client.post(endpoint, headers=idea_headers, json={"jsonrpc": "2.0", "id": 6, "method": "tools/list", "params": {}}).status_code, 401)
+
+    def test_vendor_notification_is_accepted_without_breaking_mcp(self):
+        credential = self.client.post(
+            "/api/platform/owner/mcp-credentials",
+            headers=self.headers,
+            json={"device_label": "vendor notification", "capability": "idea"},
+        ).json()
+        headers = {
+            "Authorization": f"Bearer {credential['token']}",
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+            "Host": "localhost:8000",
+        }
+        notified = self.client.post(
+            "/mcp/idea/mcp",
+            headers=headers,
+            json={"jsonrpc": "2.0", "method": "notifications/trae/session_stop", "params": {"chatSessionId": "vendor-session"}},
+        )
+        self.assertEqual(notified.status_code, 202)
+
+        tools = self.client.post("/mcp/idea/mcp", headers=headers, json={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}})
+        self.assertEqual(tools.status_code, 200)
+        self.assertTrue(tools.json()["result"]["tools"])
 
     def reset_email_cooldown(self, email: str):
         with self.main.platform_store._connect() as connection:
@@ -274,7 +319,6 @@ class PlatformApiTests(unittest.TestCase):
 
         isolated_client = TestClient(self.main.app)
         isolated_client.close()
-        self.main.memory_store.close()
         sys.modules.pop("main", None)
         reloaded_main = importlib.import_module("main")
         reloaded_client = TestClient(reloaded_main.app)
@@ -285,7 +329,6 @@ class PlatformApiTests(unittest.TestCase):
         tasks = reloaded_client.get("/api/tasks", headers=self.headers)
         self.assertTrue(any(item["id"] == task.json()["id"] for item in tasks.json()["tasks"]))
         reloaded_client.close()
-        reloaded_main.memory_store.close()
         sys.modules.pop("main", None)
         type(self).main = importlib.import_module("main")
 
@@ -478,7 +521,55 @@ class PlatformApiTests(unittest.TestCase):
         finally:
             active_runners["idea"].run = original_run
 
-    def test_agent_and_runtime_registry_endpoints_are_authenticated_and_safe(self):
+    def test_chat_use_memory_false_skips_memory_and_validates_type(self):
+        chat_endpoint = next(route.endpoint for route in self.client.app.routes if getattr(route, "path", None) == "/api/assistant/chat")
+        stream_endpoint = next(route.endpoint for route in self.client.app.routes if getattr(route, "path", None) == "/api/assistant/chat/stream")
+        active_runners = chat_endpoint.__globals__["agent_runners"]
+        original_run = active_runners["idea"].run
+        original_stream = active_runners["idea"].run_stream
+        original_memory = chat_endpoint.__globals__["_memory_context"]
+        received = {}
+
+        def forbidden_memory(*args, **kwargs):
+            raise AssertionError("use_memory=False 不应读取长期记忆")
+
+        async def fake_run(user_message, history=None, stream=False, llm_model_config=None, execution_context=None):
+            received["message"] = user_message
+            return {"reply": "Handled.", "tool_calls_log": [], "iterations": 1}
+
+        async def fake_stream(user_message, history=None, llm_model_config=None, execution_context=None):
+            received["stream_message"] = user_message
+            yield {"type": "text", "content": "ok"}
+            yield {"type": "done", "iterations": 1, "tool_calls": []}
+
+        active_runners["idea"].run = fake_run
+        active_runners["idea"].run_stream = fake_stream
+        chat_endpoint.__globals__["_memory_context"] = forbidden_memory
+        try:
+            for value in (None, "false", 0, 1, []):
+                self.assertEqual(self.client.post("/api/assistant/chat", headers=self.headers, json={"agent_id": "idea", "message": "invalid memory", "use_memory": value}).status_code, 400)
+            response = self.client.post("/api/assistant/chat", headers=self.headers, json={"agent_id": "idea", "message": "no memory", "use_memory": False})
+            self.assertEqual(response.status_code, 200)
+            self.assertNotIn("长期记忆", received["message"])
+            with self.main.platform_store._connect() as connection:
+                payload = json.loads(connection.execute("SELECT payload_json FROM runtime_snapshots ORDER BY created_at DESC LIMIT 1").fetchone()[0])
+            self.assertEqual(payload["memory_count"], 0)
+            self.assertEqual(payload["memory_tokens"], 0)
+
+            streamed = self.client.post("/api/assistant/chat/stream", headers=self.headers, json={"agent_id": "idea", "message": "stream no memory", "use_memory": False})
+            self.assertEqual(streamed.status_code, 200)
+            self.assertNotIn("长期记忆", received["stream_message"])
+            with self.main.platform_store._connect() as connection:
+                payload = json.loads(connection.execute("SELECT payload_json FROM runtime_snapshots ORDER BY created_at DESC LIMIT 1").fetchone()[0])
+            self.assertEqual(payload["memory_count"], 0)
+            self.assertEqual(payload["memory_tokens"], 0)
+            self.assertEqual(self.client.post("/api/assistant/chat/stream", headers=self.headers, json={"agent_id": "idea", "message": "invalid stream", "use_memory": "false"}).status_code, 400)
+        finally:
+            chat_endpoint.__globals__["_memory_context"] = original_memory
+            active_runners["idea"].run = original_run
+            active_runners["idea"].run_stream = original_stream
+
+
         self.assertEqual(self.client.get("/api/agents").status_code, 401)
         agents = self.client.get("/api/agents", headers=self.headers)
         self.assertEqual(agents.status_code, 200)
@@ -897,6 +988,122 @@ class PlatformApiTests(unittest.TestCase):
         scoped = self.client.post("/api/memories", headers=self.headers, json={"scope": "project", "category": "project", "content": "Project scope marker.", "confirmed": True})
         self.assertEqual(scoped.status_code, 200)
         self.assertEqual(scoped.json()["namespace"], "project/space-project-world")
+
+
+    def literature_service(self):
+        """取当前 app 实际使用的文献服务（模块重载测试会让 cls.main 指向新的模块对象）。"""
+        route = next(item for item in self.client.app.routes if getattr(item, "path", "") == "/api/platform/literature/collect")
+        return route.endpoint.__globals__["literature_service"]
+
+    def test_literature_endpoints_require_a_token(self):
+        self.assertEqual(self.client.get("/api/platform/literature").status_code, 401)
+        self.assertEqual(self.client.post("/api/platform/literature/collect").status_code, 401)
+
+    def test_literature_list_and_research_direction_roundtrip(self):
+        listed = self.client.get("/api/platform/literature", headers=self.headers)
+        self.assertEqual(listed.status_code, 200)
+        self.assertIsInstance(listed.json()["items"], list)
+        self.assertIsInstance(listed.json()["total"], int)
+
+        saved = self.client.put("/api/platform/literature/research-direction", headers=self.headers, json={"content": "神经影像 阿尔茨海默"})
+        self.assertEqual(saved.json()["content"], "神经影像 阿尔茨海默")
+        fetched = self.client.get("/api/platform/literature/research-direction", headers=self.headers)
+        self.assertEqual(fetched.json()["content"], "神经影像 阿尔茨海默")
+
+        oversized = self.client.put("/api/platform/literature/research-direction", headers=self.headers, json={"content": "方" * 2001})
+        self.assertEqual(oversized.status_code, 400)
+
+        cleared = self.client.put("/api/platform/literature/research-direction", headers=self.headers, json={"content": ""})
+        self.assertIsNone(cleared.json()["content"])
+
+    def test_literature_index_update_indexes_fields_and_skips_known(self):
+        service = self.literature_service()
+        channels = ("_harvest_openalex", "_harvest_europepmc", "_harvest_preprints", "_harvest_arxiv")
+        originals = {name: getattr(service, name) for name in channels}
+        searched = []
+        item = {
+            "source": "OPENALEX",
+            "external_id": "W4400000001",
+            "field": "人工智能",
+            "pmcid": "",
+            "doi": "10.1000/example",
+            "url": "https://doi.org/10.1000/example",
+            "pdf_url": "",
+            "title": "Deep learning for Alzheimer diagnosis",
+            "abstract": "We propose a model ...",
+            "authors": "Zhang San, Li Si",
+            "venue": "Nature Neuroscience",
+            "date": "2026-09-20",
+            "license": "cc-by",
+            "authority": 1.0,
+            "identifiers": ["openalex:w4400000001", "10.1000/example"],
+        }
+
+        async def fake_openalex(field, *args, **kwargs):
+            searched.append(field)
+            return [dict(item)]
+
+        async def fake_empty(*args, **kwargs):
+            return []
+
+        service._harvest_openalex = fake_openalex
+        service._harvest_europepmc = fake_empty
+        service._harvest_preprints = fake_empty
+        service._harvest_arxiv = fake_empty
+        try:
+            collected = self.client.post("/api/platform/literature/collect", headers=self.headers)
+            self.assertEqual(collected.status_code, 200)
+            self.assertEqual(collected.json()["count"], 1)
+            self.assertEqual(collected.json()["skipped"], 0)
+            self.assertTrue(searched)  # 按学科收割，不再依赖研究方向
+
+            items = self.client.get("/api/platform/literature", headers=self.headers).json()["items"]
+            stored = next(row for row in items if row["title"] == item["title"])
+            self.assertIsNone(stored["score"])  # 索引阶段不评分
+            self.assertEqual(stored["field"], "人工智能")
+            self.assertEqual(stored["url"], item["url"])
+            self.assertEqual(stored["abstract"], item["abstract"])
+            self.assertFalse(stored["downloadable"])
+
+            again = self.client.post("/api/platform/literature/collect", headers=self.headers)
+            self.assertEqual(again.json()["count"], 0)
+            self.assertEqual(again.json()["skipped"], 1)
+        finally:
+            for name, func in originals.items():
+                setattr(service, name, func)
+
+    def test_literature_direction_schedules_daily_job_once(self):
+        account_id = self.client.get("/api/platform/me", headers=self.headers).json()["account_id"]
+        self.client.put("/api/platform/literature/research-direction", headers=self.headers, json={"content": "神经影像"})
+        self.client.put("/api/platform/literature/research-direction", headers=self.headers, json={"content": "神经影像"})
+
+        jobs = [job for job in self.main.platform_store.list_scheduled_jobs(account_id, "space-project-world") if job["tool_name"] == "literature.daily_collect"]
+
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(jobs[0]["interval_seconds"], 86400.0)
+        self.client.put("/api/platform/literature/research-direction", headers=self.headers, json={"content": ""})
+
+    def test_literature_download_requires_stored_pdf(self):
+        self.assertEqual(self.client.get("/api/platform/literature/not-exist/download", headers=self.headers).status_code, 404)
+
+        target = Path(self.temp_dir.name) / "PMC1234567.pdf"
+        target.write_bytes(b"%PDF-1.7 test")
+        service = self.literature_service()
+        original = service.prepare_download
+
+        async def fake_prepare(account_id, space_id, literature_id):
+            return target, "PMC1234567.pdf"
+
+        service.prepare_download = fake_prepare
+        try:
+            response = self.client.get("/api/platform/literature/abc/download", headers=self.headers)
+        finally:
+            service.prepare_download = original
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, b"%PDF-1.7 test")
+        self.assertEqual(response.headers["content-type"], "application/pdf")
+        self.assertIn("PMC1234567.pdf", response.headers["content-disposition"])
 
 
 if __name__ == "__main__":

@@ -71,3 +71,13 @@ Project-IDEA/IDEA Assistant.staging/
 # 客户端内嵌 RAG 运行时产物（2.5GB+，部署时由 fetch_wheels.py 等脚本重建，不入库）
 Project-IDEA/IDEA Assistant/resources/neko/
 Project-IDEA/IDEA Assistant SRH/resources/neko/
+# 客户端内嵌 RAG 运行时（模型权重与 wheel 缓存，体积大且可重建，不入库）
+Project-IDEA/IDEA Assistant/resources/rag/
+Project-IDEA/IDEA Assistant SRH/resources/rag/
+# 前端构建产物（可重新构建，不入库）
+Project-IDEA/IDEA Assistant Code/dist-assistant/
+Project-IDEA/IDEA Assistant Code/dist-owner/
+# 雨课堂自动化工具的本地工作区（含浏览器缓存与虚拟环境，体积大，不入库）
+.pw-rainclass/
+# 竞赛与外部资料目录（非项目内容，不入库）
+/docs/

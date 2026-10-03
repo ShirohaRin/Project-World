@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>NMPA特医食品注册剂型统计</title>
+  <style>
+    :root {
+      --ink: #172033;
+      --muted: #68738a;
+      --surface: #ffffff;
+      --background: #f4f7fb;
+      --powder: #2563eb;
+      --liquid: #14b8a6;
+      --other: #f59e0b;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      padding: 32px 16px 48px;
+      font-family: "Microsoft YaHei", "Noto Sans SC", sans-serif;
+      color: var(--ink);
+      background: var(--background);
+    }
+
+    .page {
+      width: min(980px, 100%);
+      margin: 0 auto;
+    }
+
+    .card {
+      padding: 32px clamp(20px, 5vw, 56px);
+      background: var(--surface);
+      border: 1px solid #e8edf5;
+      border-radius: 20px;
+      box-shadow: 0 16px 40px rgba(31, 48, 80, 0.08);
+    }
+
+    h1, h2 { text-align: center; }
+
+    h1 {
+      margin: 0 0 8px;
+      font-size: clamp(23px, 3vw, 31px);
+      letter-spacing: 0.02em;
+    }
+
+    h2 {
+      margin: 0 0 22px;
+      font-size: 20px;
+    }
+
+    .subtitle {
+      margin: 0 0 26px;
+      color: var(--muted);
+      text-align: center;
+      font-size: 14px;
+    }
+
+    .chart-area {
+      display: grid;
+      grid-template-columns: minmax(300px, 1fr) minmax(220px, 0.8fr);
+      align-items: center;
+      gap: 24px;
+    }
+
+    svg { display: block; width: 100%; height: auto; }
+
+    .legend {
+      display: grid;
+      gap: 16px;
+    }
+
+    .legend-item {
+      display: grid;
+      grid-template-columns: 14px 1fr auto;
+      align-items: center;
+      gap: 10px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .legend-item strong { color: var(--ink); font-size: 16px; }
+    .swatch { width: 14px; height: 14px; border-radius: 4px; }
+    .powder { background: var(--powder); }
+    .liquid { background: var(--liquid); }
+    .other { background: var(--other); }
+
+    .divider {
+      height: 1px;
+      margin: 34px 0 30px;
+      background: #edf0f5;
+    }
+
+    .chart-3d-wrap {
+      max-width: 760px;
+      margin: 0 auto;
+    }
+
+    .chart-3d-wrap svg { overflow: visible; }
+    .slice-label { fill: white; font-size: 15px; font-weight: 700; text-anchor: middle; }
+    .small-label { font-size: 13px; }
+
+    .note {
+      margin: 28px 0 0;
+      padding-top: 16px;
+      border-top: 1px solid #edf0f5;
+      color: var(--muted);
+      font-size: 12px;
+      text-align: center;
+    }
+
+    @media (max-width: 680px) {
+      .chart-area { grid-template-columns: 1fr; }
+      .legend { max-width: 330px; margin: 0 auto; width: 100%; }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <section class="card">
+      <h1>NMPA特医食品注册剂型统计</h1>
+      <p class="subtitle">按剂型划分，环形面积占比与注册数量占比对应</p>
+
+      <div class="chart-area">
+        <svg viewBox="0 0 420 420" role="img" aria-labelledby="pie-title pie-desc">
+          <title id="pie-title">NMPA特医食品注册剂型2D饼图</title>
+          <desc id="pie-desc">粉剂占73%，液体乳剂占9%，其他剂型占18%。</desc>
+          <circle cx="210" cy="210" r="145" fill="none" stroke="#e9eef6" stroke-width="1" />
+          <path d="M210 210 L210 65 A145 145 0 1 1 79.46 273.06 Z" fill="var(--powder)" stroke="white" stroke-width="3" />
+          <path d="M210 210 L79.46 273.06 A145 145 0 0 1 128.63 93.18 Z" fill="var(--liquid)" stroke="white" stroke-width="3" />
+          <path d="M210 210 L128.63 93.18 A145 145 0 0 1 210 65 Z" fill="var(--other)" stroke="white" stroke-width="3" />
+          <text x="258" y="225" class="slice-label">粉剂 73%</text>
+          <text x="111" y="215" class="slice-label small-label">液体乳剂 9%</text>
+          <text x="185" y="106" class="slice-label small-label">其他 18%</text>
+        </svg>
+
+        <div class="legend" aria-label="图例">
+          <div class="legend-item"><span class="swatch powder"></span><span>粉剂</span><strong>73%</strong></div>
+          <div class="legend-item"><span class="swatch liquid"></span><span>液体乳剂</span><strong>9%</strong></div>
+          <div class="legend-item"><span class="swatch other"></span><span>其他剂型（膏、颗粒）</span><strong>18%</strong></div>
+        </div>
+      </div>
+
+      <div class="divider"></div>
+
+      <h2>3D饼图（备用）</h2>
+      <div class="chart-3d-wrap">
+        <svg viewBox="0 0 760 430" role="img" aria-labelledby="pie3d-title pie3d-desc">
+          <title id="pie3d-title">NMPA特医食品注册剂型3D饼图</title>
+          <desc id="pie3d-desc">三维效果展示：粉剂占73%，液体乳剂占9%，其他剂型占18%。</desc>
+          <defs>
+            <linearGradient id="powderSide" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#1749ad" /><stop offset="1" stop-color="#0f327a" /></linearGradient>
+            <linearGradient id="liquidSide" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#0d8d82" /><stop offset="1" stop-color="#09645f" /></linearGradient>
+            <linearGradient id="otherSide" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#c47700" /><stop offset="1" stop-color="#8b5200" /></linearGradient>
+          </defs>
+          <!-- 厚度侧面 -->
+          <path d="M130 225 A250 135 0 1 0 630 225 L630 275 A250 135 0 1 1 130 275 Z" fill="url(#powderSide)" />
+          <path d="M130 225 A250 135 0 0 0 156 294 L156 344 A250 135 0 0 1 130 225 Z" fill="url(#liquidSide)" />
+          <path d="M156 294 A250 135 0 0 0 280 350 L280 400 A250 135 0 0 1 156 294 Z" fill="url(#otherSide)" />
+          <!-- 顶面 -->
+          <path d="M380 225 L380 90 A250 135 0 1 1 156 294 Z" fill="var(--powder)" stroke="white" stroke-width="3" />
+          <path d="M380 225 L156 294 A250 135 0 0 1 241 113 Z" fill="var(--liquid)" stroke="white" stroke-width="3" />
+          <path d="M380 225 L241 113 A250 135 0 0 1 380 90 Z" fill="var(--other)" stroke="white" stroke-width="3" />
+          <text x="495" y="245" class="slice-label">粉剂 73%</text>
+          <text x="210" y="235" class="slice-label small-label">液体乳剂 9%</text>
+          <text x="326" y="132" class="slice-label small-label">其他 18%</text>
+        </svg>
+      </div>
+
+      <p class="note">数据来源：NMPA特医食品注册公式统计.md</p>
+    </section>
+  </main>
+</body>
+</html>

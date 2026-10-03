@@ -378,7 +378,9 @@ class PlatformStore:
                     created_at REAL NOT NULL,
                     updated_at REAL NOT NULL,
                     revision INTEGER NOT NULL DEFAULT 1,
-                    deleted_at REAL
+                    deleted_at REAL,
+                    idempotency_key TEXT,
+                    metadata_json TEXT NOT NULL DEFAULT '{}'
                 );
                 CREATE INDEX IF NOT EXISTS idx_memories_scope ON long_term_memories(account_id, space_id, namespace, status, updated_at DESC);
                 CREATE TABLE IF NOT EXISTS account_profiles (
@@ -479,15 +481,84 @@ class PlatformStore:
                     updated_at REAL NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_scheduled_jobs_due ON scheduled_jobs(status, next_run_at);
+                CREATE TABLE IF NOT EXISTS literature_items (
+                    literature_id TEXT PRIMARY KEY,
+                    account_id TEXT NOT NULL,
+                    space_id TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    external_id TEXT NOT NULL,
+                    pmcid TEXT,
+                    title TEXT NOT NULL DEFAULT '',
+                    abstract TEXT NOT NULL DEFAULT '',
+                    relevance_score REAL,
+                    scored_direction TEXT,
+                    doi TEXT,
+                    url TEXT,
+                    pdf_url TEXT,
+                    field TEXT,
+                    venue TEXT,
+                    authority REAL,
+                    authors TEXT NOT NULL DEFAULT '',
+                    journal TEXT NOT NULL DEFAULT '',
+                    publication_date TEXT NOT NULL DEFAULT '',
+                    license TEXT,
+                    fulltext_path TEXT,
+                    fulltext_bytes INTEGER,
+                    fulltext_status TEXT NOT NULL DEFAULT 'not_available',
+                    collected_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    UNIQUE(account_id, space_id, source, external_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_literature_scope ON literature_items(account_id, space_id, updated_at DESC);
+                CREATE TABLE IF NOT EXISTS research_directions (
+                    account_id TEXT NOT NULL,
+                    space_id TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    updated_at REAL NOT NULL,
+                    PRIMARY KEY(account_id, space_id)
+                );
                 """
             )
             columns = {row["name"] for row in connection.execute("PRAGMA table_info(accounts)").fetchall()}
             if "email" not in columns:
                 connection.execute("ALTER TABLE accounts ADD COLUMN email TEXT")
             connection.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_accounts_email ON accounts(email) WHERE email IS NOT NULL")
+            literature_columns = {row["name"] for row in connection.execute("PRAGMA table_info(literature_items)").fetchall()}
+            for column, ddl in (("scored_direction", "TEXT"), ("doi", "TEXT"), ("venue", "TEXT"), ("authority", "REAL"), ("url", "TEXT"), ("pdf_url", "TEXT"), ("field", "TEXT")):
+                if column not in literature_columns:
+                    connection.execute(f"ALTER TABLE literature_items ADD COLUMN {column} {ddl}")
+            connection.execute("CREATE INDEX IF NOT EXISTS idx_literature_field ON literature_items(account_id, space_id, field)")
+            connection.execute("CREATE INDEX IF NOT EXISTS idx_literature_date ON literature_items(account_id, space_id, publication_date)")
+            connection.execute("CREATE INDEX IF NOT EXISTS idx_literature_doi ON literature_items(doi)")
+            connection.execute(
+                "CREATE VIRTUAL TABLE IF NOT EXISTS literature_fts USING fts5("
+                "title, abstract, authors, venue, content='literature_items', content_rowid='rowid')"
+            )
+            connection.execute(
+                "CREATE TRIGGER IF NOT EXISTS literature_fts_insert AFTER INSERT ON literature_items BEGIN "
+                "INSERT INTO literature_fts(rowid, title, abstract, authors, venue) "
+                "VALUES (new.rowid, new.title, new.abstract, new.authors, new.journal); END"
+            )
+            connection.execute(
+                "CREATE TRIGGER IF NOT EXISTS literature_fts_delete AFTER DELETE ON literature_items BEGIN "
+                "INSERT INTO literature_fts(literature_fts, rowid, title, abstract, authors, venue) "
+                "VALUES ('delete', old.rowid, old.title, old.abstract, old.authors, old.journal); END"
+            )
+            connection.execute(
+                "CREATE TRIGGER IF NOT EXISTS literature_fts_update AFTER UPDATE ON literature_items BEGIN "
+                "INSERT INTO literature_fts(literature_fts, rowid, title, abstract, authors, venue) "
+                "VALUES ('delete', old.rowid, old.title, old.abstract, old.authors, old.journal); "
+                "INSERT INTO literature_fts(rowid, title, abstract, authors, venue) "
+                "VALUES (new.rowid, new.title, new.abstract, new.authors, new.journal); END"
+            )
             memory_columns = {row["name"] for row in connection.execute("PRAGMA table_info(long_term_memories)").fetchall()}
             if "revision" not in memory_columns:
                 connection.execute("ALTER TABLE long_term_memories ADD COLUMN revision INTEGER NOT NULL DEFAULT 1")
+            if "metadata_json" not in memory_columns:
+                connection.execute("ALTER TABLE long_term_memories ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}'")
+            if "idempotency_key" not in memory_columns:
+                connection.execute("ALTER TABLE long_term_memories ADD COLUMN idempotency_key TEXT")
+            connection.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_idempotency ON long_term_memories(idempotency_key) WHERE idempotency_key IS NOT NULL")
             connection.execute("UPDATE long_term_memories SET namespace = 'shared/' || space_id WHERE namespace = 'space/' || space_id")
             session_columns = {row["name"] for row in connection.execute("PRAGMA table_info(account_sessions)").fetchall()}
             if "owner_device_id" not in session_columns:
@@ -540,16 +611,17 @@ class PlatformStore:
 
     @staticmethod
     def _seed_agent_registry(connection, now: float) -> None:
+        official_models = ["gpt-5.6-terra", "gpt-5.6-sol", "deepseek-v4-flash", "deepseek-v4-pro"]
         agents = [
-            ("idea", "IDEA", ["gpt", "deepseek-v4-flash"], ["file.read", "file.write", "command", "network", "delegate"], ["personal", "shared", "owner"], ["pwa", "researcher", "agent_producer"], "idea.v1"),
-            ("pwa", "PWA", ["gpt", "deepseek-v4-flash"], ["file.read", "file.write", "command", "network"], ["personal", "shared"], [], "pwa.v1"),
-            ("researcher", "Researcher", ["gpt", "deepseek-v4-flash"], ["file.read", "file.write", "command", "network"], ["personal", "shared"], [], "researcher.v1"),
-            ("agent_producer", "AgentProducer", ["gpt", "deepseek-v4-flash"], ["file.read", "file.write", "command"], ["personal", "shared"], [], "agent_producer.v1"),
-            ("idea_assistant", "IDEA Assistant", ["gpt", "deepseek-v4-flash"], ["file.read"], ["personal", "shared", "project"], [], "idea_assistant.v1"),
+            ("idea", "IDEA", official_models, ["file.read", "file.write", "command", "network", "delegate"], ["personal", "shared", "owner"], ["pwa", "researcher", "agent_producer"], "idea.v1"),
+            ("pwa", "PWA", official_models, ["file.read", "file.write", "command", "network"], ["personal", "shared"], [], "pwa.v1"),
+            ("researcher", "Researcher", official_models, ["file.read", "file.write", "command", "network"], ["personal", "shared"], [], "researcher.v1"),
+            ("agent_producer", "AgentProducer", official_models, ["file.read", "file.write", "command"], ["personal", "shared"], [], "agent_producer.v1"),
+            ("idea_assistant", "IDEA Assistant", official_models, ["file.read"], ["personal", "shared", "project"], [], "idea_assistant.v1"),
         ]
         for agent_id, display_name, models, tools, memory_scopes, delegates, prompt_version in agents:
             connection.execute(
-                "INSERT INTO agent_registry(agent_id, version, display_name, model_policy_json, tool_policy_json, memory_scopes_json, delegation_policy_json, prompt_version, created_at) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(agent_id, version) DO UPDATE SET prompt_version = excluded.prompt_version",
+                "INSERT INTO agent_registry(agent_id, version, display_name, model_policy_json, tool_policy_json, memory_scopes_json, delegation_policy_json, prompt_version, created_at) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(agent_id, version) DO UPDATE SET model_policy_json = excluded.model_policy_json, prompt_version = excluded.prompt_version",
                 (agent_id, display_name, json.dumps(models), json.dumps(tools), json.dumps(memory_scopes), json.dumps(delegates), prompt_version, now),
             )
 
@@ -1437,17 +1509,26 @@ class PlatformStore:
             "summary": row["summary"], "error": row["error_message"],
         }
 
-    def create_scheduled_job(self, account_id: str, space_id: str, agent_id: str, tool_name: str, args: dict, interval_seconds: float) -> dict:
+    def create_scheduled_job(self, account_id: str, space_id: str, agent_id: str, tool_name: str, args: dict, interval_seconds: float, first_run_at: Optional[float] = None) -> dict:
         if interval_seconds < 30:
             raise ValueError("调度间隔不能小于 30 秒")
         job_id, now = uuid.uuid4().hex, time.time()
+        next_run_at = float(first_run_at) if first_run_at is not None else now + interval_seconds
         with self._connect() as connection:
             connection.execute(
                 "INSERT INTO scheduled_jobs(job_id, account_id, space_id, agent_id, tool_name, args_json, interval_seconds, next_run_at, status, created_at, updated_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)",
-                (job_id, account_id, space_id, agent_id, tool_name, json.dumps(args or {}, ensure_ascii=False), interval_seconds, now + interval_seconds, now, now),
+                (job_id, account_id, space_id, agent_id, tool_name, json.dumps(args or {}, ensure_ascii=False), interval_seconds, next_run_at, now, now),
             )
-        return {"id": job_id, "account_id": account_id, "space_id": space_id, "agent_id": agent_id, "tool_name": tool_name, "args": args or {}, "interval_seconds": interval_seconds, "status": "active", "next_run_at": now + interval_seconds}
+        return {"id": job_id, "account_id": account_id, "space_id": space_id, "agent_id": agent_id, "tool_name": tool_name, "args": args or {}, "interval_seconds": interval_seconds, "status": "active", "next_run_at": next_run_at}
+
+    def reschedule_scheduled_job(self, job_id: str, next_run_at: float) -> None:
+        """改写下次执行时间（用于把每日任务对齐到固定钟点）。"""
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE scheduled_jobs SET next_run_at = ?, updated_at = ? WHERE job_id = ?",
+                (float(next_run_at), time.time(), job_id),
+            )
 
     def list_scheduled_jobs(self, account_id: str, space_id: str) -> list[dict]:
         with self._connect() as connection:
@@ -1473,6 +1554,266 @@ class PlatformStore:
                 (last_status, last_output[:2000], next_run_at, time.time(), job_id),
             )
 
+    def find_scheduled_job(self, account_id: str, space_id: str, tool_name: str) -> Optional[dict]:
+        """按工具名查找未删除的作业（用于每日采集任务的幂等创建）。"""
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM scheduled_jobs WHERE account_id = ? AND space_id = ? AND tool_name = ? AND status != 'deleted' ORDER BY created_at LIMIT 1",
+                (account_id, space_id, tool_name),
+            ).fetchone()
+            return dict(row) if row else None
+
+    # ------------------------------------------------------------------
+    # 学术文献管理：文献条目、研究方向（严格按 account_id + space_id 隔离）
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _literature_row(row) -> dict:
+        """文献记录的统一输出结构（供 API 直接返回）。"""
+        return {
+            "literature_id": row["literature_id"],
+            "source": row["source"],
+            "external_id": row["external_id"],
+            "pmcid": row["pmcid"],
+            "doi": row["doi"],
+            "url": row["url"],
+            "pdf_url": row["pdf_url"],
+            "field": row["field"],
+            "title": row["title"],
+            "abstract": row["abstract"],
+            "authors": row["authors"],
+            "journal": row["journal"],
+            "venue": row["venue"],
+            "authority": row["authority"],
+            "date": row["publication_date"],
+            "publication_date": row["publication_date"],
+            "score": row["relevance_score"],
+            "relevance_score": row["relevance_score"],
+            "license": row["license"],
+            "fulltext_status": row["fulltext_status"],
+            "fulltext_bytes": row["fulltext_bytes"],
+            "downloadable": bool(row["fulltext_path"]) and row["fulltext_status"] == "downloaded",
+            "collected_at": row["collected_at"],
+            "updated_at": row["updated_at"],
+        }
+
+    def upsert_literature(
+        self,
+        account_id: str,
+        space_id: str,
+        source: str,
+        external_id: str,
+        pmcid: str,
+        title: str,
+        abstract: str,
+        relevance_score: Optional[float],
+        authors: str,
+        journal: str,
+        publication_date: str,
+        license_name: Optional[str],
+        fulltext_path: Optional[str],
+        fulltext_bytes: Optional[int],
+        fulltext_status: str,
+        scored_direction: str = "",
+        doi: str = "",
+        venue: str = "",
+        authority: Optional[float] = None,
+        url: str = "",
+        pdf_url: str = "",
+        field: str = "",
+    ) -> dict:
+        """按 (account, space, source, external_id) 幂等写入一条文献记录。"""
+        now = time.time()
+        with self._connect() as connection:
+            existing = connection.execute(
+                "SELECT literature_id, collected_at FROM literature_items WHERE account_id = ? AND space_id = ? AND source = ? AND external_id = ?",
+                (account_id, space_id, source, external_id),
+            ).fetchone()
+            if existing:
+                literature_id, collected_at = existing["literature_id"], existing["collected_at"]
+                connection.execute(
+                    "UPDATE literature_items SET pmcid = ?, title = ?, abstract = ?, relevance_score = ?, scored_direction = ?, "
+                    "doi = ?, url = ?, pdf_url = ?, field = ?, venue = ?, authority = ?, authors = ?, journal = ?, "
+                    "publication_date = ?, license = ?, fulltext_path = ?, fulltext_bytes = ?, fulltext_status = ?, updated_at = ? "
+                    "WHERE literature_id = ?",
+                    (pmcid or None, title, abstract, relevance_score, scored_direction, doi or None, url or None, pdf_url or None,
+                     field or None, venue or None, authority, authors, journal, publication_date, license_name,
+                     fulltext_path, fulltext_bytes, fulltext_status, now, literature_id),
+                )
+            else:
+                literature_id, collected_at = uuid.uuid4().hex, now
+                connection.execute(
+                    "INSERT INTO literature_items(literature_id, account_id, space_id, source, external_id, pmcid, title, abstract, "
+                    "relevance_score, scored_direction, doi, url, pdf_url, field, venue, authority, authors, journal, publication_date, license, fulltext_path, "
+                    "fulltext_bytes, fulltext_status, collected_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (literature_id, account_id, space_id, source, external_id, pmcid or None, title, abstract, relevance_score,
+                     scored_direction, doi or None, url or None, pdf_url or None, field or None, venue or None, authority,
+                     authors, journal, publication_date, license_name, fulltext_path, fulltext_bytes, fulltext_status, collected_at, now),
+                )
+        return {
+            "literature_id": literature_id, "source": source, "external_id": external_id, "pmcid": pmcid or None,
+            "doi": doi or None, "url": url or None, "pdf_url": pdf_url or None, "field": field or None, "venue": venue or None, "authority": authority,
+            "title": title, "abstract": abstract, "authors": authors, "journal": journal, "date": publication_date,
+            "publication_date": publication_date, "score": relevance_score, "relevance_score": relevance_score,
+            "license": license_name, "fulltext_status": fulltext_status, "fulltext_bytes": fulltext_bytes,
+            "downloadable": bool(fulltext_path) and fulltext_status == "downloaded", "collected_at": collected_at, "updated_at": now,
+        }
+
+    def list_literature(self, account_id: str, space_id: str, limit: int = 50, offset: int = 0) -> dict:
+        """按偏移分页列出文献；排序 = 相关性 0.7 + 来源权威度 0.3，再按发表日期降序。"""
+        limit = max(1, min(100, int(limit)))
+        offset = max(0, int(offset))
+        with self._connect() as connection:
+            total = connection.execute(
+                "SELECT COUNT(*) AS count FROM literature_items WHERE account_id = ? AND space_id = ?",
+                (account_id, space_id),
+            ).fetchone()["count"]
+            rows = connection.execute(
+                "SELECT * FROM literature_items WHERE account_id = ? AND space_id = ? "
+                "ORDER BY (COALESCE(relevance_score, -1) * 0.7 + COALESCE(authority, 0.5) * 0.3) DESC, "
+                "COALESCE(publication_date, '') DESC, updated_at DESC LIMIT ? OFFSET ?",
+                (account_id, space_id, limit, offset),
+            ).fetchall()
+        return {"items": [self._literature_row(row) for row in rows], "total": total, "limit": limit, "offset": offset}
+
+    def clear_literature_scores(self, account_id: str, space_id: str) -> int:
+        """研究方向变更后清空本空间的评分，避免旧方向的分数继续误导排序。"""
+        with self._connect() as connection:
+            return connection.execute(
+                "UPDATE literature_items SET relevance_score = NULL, scored_direction = '', updated_at = ? "
+                "WHERE account_id = ? AND space_id = ? AND (relevance_score IS NOT NULL OR scored_direction != '')",
+                (time.time(), account_id, space_id),
+            ).rowcount
+
+    def list_literature_pending_scores(self, account_id: str, space_id: str, direction: str, limit: int = 60) -> list[dict]:
+        """（保留给后续小参数评分模型）列出尚未按当前方向评分的文献。"""
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT literature_id, title, abstract FROM literature_items "
+                "WHERE account_id = ? AND space_id = ? AND COALESCE(scored_direction, '') != ? AND (title != '' OR abstract != '') "
+                "ORDER BY COALESCE(relevance_score, -1) DESC, updated_at DESC LIMIT ?",
+                (account_id, space_id, direction, max(1, int(limit))),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def update_literature_score(self, literature_id: str, score: Optional[float], scored_direction: str) -> None:
+        """（保留给后续小参数评分模型）写入某条文献的评分。"""
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE literature_items SET relevance_score = ?, scored_direction = ?, updated_at = ? WHERE literature_id = ?",
+                (score, scored_direction, time.time(), literature_id),
+            )
+
+    def literature_identifiers(self, account_id: str, space_id: str) -> set[str]:
+        """本空间已收录文献的特征标识集合：来源 + 源内 ID、DOI、PMCID（供检索时跳过）。"""
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT source, external_id, doi, pmcid FROM literature_items WHERE account_id = ? AND space_id = ?",
+                (account_id, space_id),
+            ).fetchall()
+        keys = set()
+        for row in rows:
+            source = str(row["source"] or "").lower()
+            external_id = str(row["external_id"] or "").lower()
+            if external_id:
+                keys.add(external_id)
+                keys.add(f"{source}:{external_id}")
+            if row["doi"]:
+                keys.add(str(row["doi"]).lower())
+            if row["pmcid"]:
+                keys.add(str(row["pmcid"]).lower())
+                keys.add(f"pmc:{str(row['pmcid']).lower()}")
+        return keys
+
+    def find_literature_by_doi(self, account_id: str, space_id: str, doi: str) -> Optional[dict]:
+        """按 DOI 查已入库文献（跨源去重：同一篇可能同时来自 Europe PMC 与 OpenAlex）。"""
+        if not doi:
+            return None
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM literature_items WHERE account_id = ? AND space_id = ? AND lower(doi) = lower(?)",
+                (account_id, space_id, doi),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def set_literature_fulltext_status(self, literature_id: str, status: str) -> None:
+        """记录全文获取结果（no_oa / blocked / downloaded），便于排查与后续重试。"""
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE literature_items SET fulltext_status = ?, updated_at = ? WHERE literature_id = ?",
+                (status, time.time(), literature_id),
+            )
+
+    def search_literature(self, account_id: str, space_id: str, query: str, limit: int = 50, offset: int = 0) -> dict:
+        """按标题/摘要/作者/期刊做全文检索（FTS5 + bm25 排序），严格限定在本账号本空间。"""
+        text = str(query or "").strip()
+        if not text:
+            return {"items": [], "total": 0, "query": ""}
+        limit = max(1, min(100, int(limit)))
+        try:
+            with self._connect() as connection:
+                rows = connection.execute(
+                    "SELECT li.* FROM literature_fts f JOIN literature_items li ON li.rowid = f.rowid "
+                    "WHERE literature_fts MATCH ? AND li.account_id = ? AND li.space_id = ? "
+                    "ORDER BY bm25(literature_fts) LIMIT ? OFFSET ?",
+                    (text, account_id, space_id, limit, max(0, int(offset))),
+                ).fetchall()
+                total = connection.execute(
+                    "SELECT COUNT(*) AS count FROM literature_fts f JOIN literature_items li ON li.rowid = f.rowid "
+                    "WHERE literature_fts MATCH ? AND li.account_id = ? AND li.space_id = ?",
+                    (text, account_id, space_id),
+                ).fetchone()["count"]
+        except sqlite3.OperationalError as error:
+            raise ValueError(f"检索式无效：{error}") from error
+        return {"items": [self._literature_row(row) for row in rows], "total": total, "query": text}
+
+    def literature_field_counts(self, account_id: str, space_id: str) -> dict:
+        """各学科当前收录条数（用于每日更新报告）。"""
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT COALESCE(field, '未分类') AS field, COUNT(*) AS count FROM literature_items "
+                "WHERE account_id = ? AND space_id = ? GROUP BY COALESCE(field, '未分类') ORDER BY count DESC",
+                (account_id, space_id),
+            ).fetchall()
+        return {row["field"]: row["count"] for row in rows}
+
+    def get_literature(self, account_id: str, space_id: str, literature_id: str) -> Optional[dict]:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM literature_items WHERE literature_id = ? AND account_id = ? AND space_id = ?",
+                (literature_id, account_id, space_id),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def find_literature_by_external(self, account_id: str, space_id: str, source: str, external_id: str) -> Optional[dict]:
+        """按来源标识查已入库的文献（用于复用已下载的全文，避免重复下载）。"""
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM literature_items WHERE account_id = ? AND space_id = ? AND source = ? AND external_id = ?",
+                (account_id, space_id, source, external_id),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def get_research_direction(self, account_id: str, space_id: str) -> Optional[str]:
+        """用户研究方向；未设置返回 None（调用方据此跳过评分）。"""
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT content FROM research_directions WHERE account_id = ? AND space_id = ?",
+                (account_id, space_id),
+            ).fetchone()
+            return row["content"] if row else None
+
+    def set_research_direction(self, account_id: str, space_id: str, content: str) -> str:
+        now = time.time()
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT INTO research_directions(account_id, space_id, content, updated_at) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(account_id, space_id) DO UPDATE SET content = excluded.content, updated_at = excluded.updated_at",
+                (account_id, space_id, content, now),
+            )
+        return content
+
     def delete_task(self, account_id: str, space_id: str, task_id: str) -> bool:
         with self._connect() as connection:
             changed = connection.execute("UPDATE tasks SET status = 'deleted', updated_at = ? WHERE task_id = ? AND account_id = ? AND space_id = ? AND status != 'deleted'", (time.time(), task_id, account_id, space_id)).rowcount
@@ -1485,15 +1826,21 @@ class PlatformStore:
             rows = connection.execute("SELECT * FROM sync_events WHERE account_id = ? AND space_id = ? AND event_id > ? ORDER BY event_id LIMIT ?", (account_id, space_id, after_event_id, limit)).fetchall()
             return [{**dict(row), "payload": json.loads(row["payload_json"])} for row in rows]
 
-    def create_memory(self, account_id: str, space_id: str, namespace: str, category: str, content: str, created_by: str) -> dict:
-        memory_id, now = uuid.uuid4().hex, time.time()
+    def create_memory(self, account_id: str, space_id: str, namespace: str, category: str, content: str, created_by: str, *, memory_id: str | None = None, idempotency_key: str | None = None, metadata: Optional[dict] = None) -> dict:
+        memory_id = memory_id or uuid.uuid4().hex
+        now = time.time()
+        metadata_json = json.dumps(metadata or {}, ensure_ascii=False, sort_keys=True)
         with self._connect() as connection:
+            if idempotency_key:
+                existing = connection.execute("SELECT * FROM long_term_memories WHERE idempotency_key = ?", (idempotency_key,)).fetchone()
+                if existing:
+                    return {"id": existing["memory_id"], "namespace": existing["namespace"], "category": existing["category"], "content": existing["content"], "status": existing["status"], "revision": existing["revision"], "created_at": existing["created_at"], "updated_at": existing["updated_at"], "metadata": json.loads(existing["metadata_json"] or "{}")}
             connection.execute(
-                "INSERT INTO long_term_memories(memory_id, account_id, space_id, namespace, category, content, created_by, created_at, updated_at, revision) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)",
-                (memory_id, account_id, space_id, namespace, category, content, created_by, now, now),
+                "INSERT INTO long_term_memories(memory_id, account_id, space_id, namespace, category, content, created_by, created_at, updated_at, revision, idempotency_key, metadata_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)",
+                (memory_id, account_id, space_id, namespace, category, content, created_by, now, now, idempotency_key, metadata_json),
             )
-            self._append_memory_sync_events(connection, account_id, space_id, namespace, "memory", memory_id, "memory.created", {"namespace": namespace, "category": category, "revision": 1, "created_at": now, "actor_principal_id": created_by})
-        return {"id": memory_id, "namespace": namespace, "category": category, "content": content, "status": "active", "revision": 1, "created_at": now, "updated_at": now}
+            self._append_memory_sync_events(connection, account_id, space_id, namespace, "memory", memory_id, "memory.created", {"namespace": namespace, "category": category, "revision": 1, "created_at": now, "actor_principal_id": created_by, "metadata": metadata or {}})
+        return {"id": memory_id, "namespace": namespace, "category": category, "content": content, "status": "active", "revision": 1, "created_at": now, "updated_at": now, "metadata": metadata or {}}
 
     def list_memories(self, account_id: str, space_id: str, namespaces: list[str], query: Optional[str] = None, limit: int = 50) -> list[dict]:
         if not namespaces:
@@ -1508,7 +1855,7 @@ class PlatformStore:
         params.append(limit)
         with self._connect() as connection:
             rows = connection.execute(query_sql, params).fetchall()
-            return [{"id": row["memory_id"], "namespace": row["namespace"], "category": row["category"], "content": row["content"], "status": row["status"], "revision": row["revision"], "created_at": row["created_at"], "updated_at": row["updated_at"]} for row in rows]
+            return [{"id": row["memory_id"], "namespace": row["namespace"], "category": row["category"], "content": row["content"], "status": row["status"], "revision": row["revision"], "created_at": row["created_at"], "updated_at": row["updated_at"], "metadata": json.loads(row["metadata_json"] or "{}")} for row in rows]
 
     def update_memory(self, account_id: str, space_id: str, memory_id: str, namespaces: list[str], category: str, content: str, expected_revision: int, principal_id: str) -> tuple[Optional[dict], Optional[int]]:
         if not namespaces:

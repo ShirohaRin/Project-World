@@ -10,14 +10,12 @@ auth:
   token: "your-secret-token-here-change-in-production"   # 仅部署引导与受限 MCP 兼容用途；日常客户端使用邮箱登录会话
 
 memory:
-  backend: "sqlite"         # sqlite / chromadb（向量检索）/ redis
-  db_path: "./memory/idea_memory.db"
   long_term:
     default_chat_read: false
     search_limit: 5
-  # 如果使用 ChromaDB 做语义记忆:
-  # backend: "chromadb"
-  # chroma_path: "./memory/chroma_db"
+
+onebot:
+  secret: ""                    # 独立于 auth.token 的 OneBot 入站 secret；也可用 IDEA_ONEBOT_SECRET
 
 neko:
   enabled: false
@@ -49,6 +47,31 @@ agents:
   assistant:
     model: "glm-5.2"
 
+# ============================================================================
+# 自动化任务模块（modules/automation）
+# 云端 JobScheduler 通过 automation.course_reminder / automation.rainclass_monitor
+# 两个工具执行；QQ 走 NapCat（OneBot v11）HTTP 接口。
+# ============================================================================
+automation:
+  enabled: true                # 置 true 后云端调度器才会执行自动化工具
+  checkpoint_db_path: "./memory/automation_checkpoints.db"
+  course_schedule_path: "./automation/course_schedule.json"
+  qq:
+    endpoint: "http://127.0.0.1:3000"      # NapCat OneBot HTTP Server 地址
+    token: ""                              # NapCat 网络配置中的 access_token
+    target_id: "3080713452"                          # 接收提醒的 QQ 号
+  rainclass:
+    base_url: "https://www.yuketang.cn/v2/web/index"  # 雨课堂课程页面地址
+    course_id: ""                          # 留空表示监控全部有效课程
+    storage_state_path: "./automation/rainclass_storage_state.json"
+  rainclass_ppt:
+    enabled: false
+    course_id: ""
+    course_name: ""
+    notes_dir: "./memory/rainclass_notes"
+    poll_interval_seconds: 2
+    settle_samples: 2
+
 # SSH 远程主机白名单（可选）：IDEA 通过 ssh_run 工具连接这些主机执行命令（需 Owner 审批或 ssh 授权）。
 # 推荐通过环境变量 IDEA_SSH_HOSTS 提供 JSON 数组，例如：
 #   [{"host":"host.example.com","alias":"prod","port":22,"user":"deploy","key_path":"/home/deploy/.ssh/id_ed25519"},
@@ -61,3 +84,21 @@ ssh:
       port: 22
       user: "root"
       key_path: "C:\\Users\\pansh\\.ssh\\id_ed25519_113_249_105_33"
+
+# ============================================================================
+# 实时语音对话模块（modules/realtime_voice）
+# enabled 置 true 后才会挂载 /ws/voice 端点。
+# 密钥统一走环境变量（如 IDEA_VOICE_DASHSCOPE_API_KEY），不写入本文件。
+# 当前进度与实现范围见 modules/realtime_voice/实时语音对话模块设计.md。
+# ============================================================================
+voice:
+  enabled: false
+  asr:
+    provider: "dashscope"
+    model: "qwen3-asr-flash-realtime"
+  tts:
+    provider: "dashscope"
+    model: "qwen3-tts-flash-realtime"
+    voice: "Momo"
+  endpointing:
+    silence_ms: 700

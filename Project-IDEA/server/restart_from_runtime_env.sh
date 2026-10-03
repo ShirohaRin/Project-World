@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-server_dir=/opt/idea-server/server
+server_dir=/opt/idea-server
 pid_file="$server_dir/idea-server.pid"
 llm_secrets_file=/opt/idea-server/secrets/llm.env
 
@@ -28,7 +28,7 @@ if [ -f "$pid_file" ]; then
 fi
 
 cd "$server_dir"
-nohup bash -c 'set -a; . /opt/idea-server/server/.env.runtime; . /opt/idea-server/secrets/llm.env; set +a; exec /opt/idea-server/venv/bin/python /opt/idea-server/server/main.py' >> logs/server.log 2>> logs/error.log < /dev/null &
+nohup bash -c 'set -a; . /opt/idea-server/.env.runtime; . /opt/idea-server/secrets/llm.env; set +a; exec /opt/idea-server/venv/bin/python /opt/idea-server/main.py' >> logs/server.log 2>> logs/error.log < /dev/null &
 echo "$!" > "$pid_file"
 for _ in $(seq 1 10); do
     if curl -fsS --max-time 2 http://127.0.0.1:8900/health >/tmp/idea-health.json; then

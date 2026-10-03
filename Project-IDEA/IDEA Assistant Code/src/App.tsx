@@ -1,267 +1,4173 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
-import CodeEditor from './CodeEditor'
-import NekoPanel from './NekoPanel'
-import KnowledgeBasePanel from './KnowledgeBasePanel'
-import { languagePluginForFile, PLUGINS } from './plugins/registry'
-import './plugins/marketplace-theme.css'
+import {
+    useCallback,
+    useEffect,
+    useMemo,
+    useReducer,
+    useRef,
+    useState,
+    type CSSProperties,
+} from "react";
+import CodeEditor from "./CodeEditor";
+import KnowledgeBasePanel from "./KnowledgeBasePanel";
+import WorkflowQueue from "./WorkflowQueue";
+import { languagePluginForFile, PLUGINS } from "./plugins/registry";
+import { computeApi, LOCALLY_EXECUTABLE_METHOD_IDS, type ComputeJob, type ComputeJobEvent, type ComputeJobResult, type ComputeMethodDefinition, type ComputeSchemaField } from "./compute";
+import "./plugins/marketplace-theme.css";
 
-type Mode = 'ide' | 'work' | 'neko' | 'knowledge'
-type ModelKey = 'gpt' | 'deepseek-v4-flash'
-type OpenFile = { path: string; name: string; content: string; savedContent: string }
-type ContextBlock = { path: string; name: string; content: string }
-type ChatMessage = { id: number; role: 'assistant' | 'user'; content: string; modelKey?: ModelKey; streamStatus?: string }
-type Theme = 'dark' | 'light'
-type Background = 'default' | 'graphite' | 'midnight'
-type SettingsTab = 'connection' | 'account' | 'appearance'
-type EditingMemory = { id: string; revision: number }
-type ExecutionLine = { stream: ExecutionOutput['stream']; content: string }
-type ServiceState = 'unconfigured' | 'checking' | 'online' | 'unauthorized' | 'error'
+type Mode = "ide" | "work" | "knowledge" | "compute" | "literature";
+type ModelKey = "gpt-5.6-terra" | "gpt-5.6-sol" | "deepseek-v4-flash" | "deepseek-v4-pro" | string;
+type ChatTarget = "local" | "online";
+type OpenFile = {
+    path: string;
+    name: string;
+    content: string;
+    savedContent: string;
+};
+type ContextBlock = { path: string; name: string; content: string };
+type ChatMessage = {
+    id: number;
+    role: "assistant" | "user";
+    content: string;
+    modelKey?: string;
+    streamStatus?: string;
+};
+type Theme = "dark" | "light";
+type Background = "default" | "graphite" | "midnight";
+type SettingsTab = "connection" | "models" | "mcp" | "rules" | "account" | "appearance";
+type EditingMemory = { id: string; revision: number };
+type ExecutionLine = { stream: ExecutionOutput["stream"]; content: string };
+type ServiceState =
+    "unconfigured" | "checking" | "online" | "unauthorized" | "error";
+type AuthState = {
+    phase:
+        | "booting"
+        | "restoring"
+        | "signed_out"
+        | "signing_in"
+        | "signed_in"
+        | "signing_out";
+    message?: string;
+};
+type AuthAction = { type: AuthState["phase"]; message?: string };
 
-function estimateTokens(value: string): number {
-  const asciiCharacters = [...value].filter((character) => character.charCodeAt(0) <= 0x7f).length
-  return Math.ceil(asciiCharacters / 4) + Math.ceil((value.length - asciiCharacters) / 2)
+function authReducer(_state: AuthState, action: AuthAction): AuthState {
+    return { phase: action.type, message: action.message };
 }
 
-const isOwnerClient = import.meta.env.VITE_CLIENT_FLAVOR === 'owner'
-const INITIAL_MESSAGES: ChatMessage[] = [{ id: 1, role: 'assistant', content: '我是 IDEA Assistant。本地 Work 模式已准备就绪。' }]
+function estimateTokens(value: string): number {
+    const asciiCharacters = [...value].filter(
+        (character) => character.charCodeAt(0) <= 0x7f,
+    ).length;
+    return (
+        Math.ceil(asciiCharacters / 4) +
+        Math.ceil((value.length - asciiCharacters) / 2)
+    );
+}
+
+const isOwnerClient = import.meta.env.VITE_CLIENT_FLAVOR === "owner";
+const INITIAL_MESSAGES: ChatMessage[] = [
+    {
+        id: 1,
+        role: "assistant",
+        content: "我是 IDEA Assistant。本地 Work 模式已准备就绪。",
+    },
+];
 
 function escapeHtml(value: string): string {
-  return value.replace(/[&<>'"]/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#039;', '"': '&quot;' })[character] ?? character)
+    return value.replace(
+        /[&<>'"]/g,
+        (character) =>
+            ({
+                "&": "&amp;",
+                "<": "&lt;",
+                ">": "&gt;",
+                "'": "&#039;",
+                '"': "&quot;",
+            })[character] ?? character,
+    );
 }
 
 function renderMarkdown(source: string): string {
-  return source.split('\n').map((line) => line.startsWith('### ') ? `<h3>${escapeHtml(line.slice(4))}</h3>` : line.startsWith('## ') ? `<h2>${escapeHtml(line.slice(3))}</h2>` : line.startsWith('# ') ? `<h1>${escapeHtml(line.slice(2))}</h1>` : line ? `<p>${escapeHtml(line)}</p>` : '').join('')
+    return source
+        .split("\n")
+        .map((line) =>
+            line.startsWith("### ")
+                ? `<h3>${escapeHtml(line.slice(4))}</h3>`
+                : line.startsWith("## ")
+                  ? `<h2>${escapeHtml(line.slice(3))}</h2>`
+                  : line.startsWith("# ")
+                    ? `<h1>${escapeHtml(line.slice(2))}</h1>`
+                    : line
+                      ? `<p>${escapeHtml(line)}</p>`
+                      : "",
+        )
+        .join("");
 }
 
 function renderApprovalSummary(summary: string) {
-  if (!summary.startsWith('[edit_file]')) return <p>{summary}</p>
-  const lines = summary.split('\n')
-  return <pre className="approval-diff">{lines.map((line, index) => <span key={index} className={line.startsWith('+++') || line.startsWith('---') ? 'diff-plain' : line.startsWith('+') ? 'diff-add' : line.startsWith('-') ? 'diff-del' : line.startsWith('@@') ? 'diff-hunk' : 'diff-plain'}>{line}</span>)}</pre>
+    if (!summary.startsWith("[edit_file]")) return <p>{summary}</p>;
+    const lines = summary.split("\n");
+    return (
+        <pre className="approval-diff">
+            {lines.map((line, index) => (
+                <span
+                    key={index}
+                    className={
+                        line.startsWith("+++") || line.startsWith("---")
+                            ? "diff-plain"
+                            : line.startsWith("+")
+                              ? "diff-add"
+                              : line.startsWith("-")
+                                ? "diff-del"
+                                : line.startsWith("@@")
+                                  ? "diff-hunk"
+                                  : "diff-plain"
+                    }
+                >
+                    {line}
+                </span>
+            ))}
+        </pre>
+    );
 }
 
-function FileNode({ node, selectedPath, onOpen, depth = 0 }: { node: FileTreeEntry; selectedPath?: string; onOpen: (file: FileTreeEntry) => void; depth?: number }) {
-  const [expanded, setExpanded] = useState(depth < 1)
-  if (node.kind === 'directory') return <div className="file-node"><button className="tree-folder" style={{ paddingLeft: 10 + depth * 14 }} onClick={() => setExpanded((value) => !value)}><span>{expanded ? '⌄' : '›'}</span>{node.name}</button>{expanded && node.children?.map((child) => <FileNode key={child.path} node={child} selectedPath={selectedPath} onOpen={onOpen} depth={depth + 1} />)}</div>
-  return <button className={`tree-file ${selectedPath === node.path ? 'active' : ''}`} style={{ paddingLeft: 28 + depth * 14 }} onClick={() => onOpen(node)}><span>{node.name.endsWith('.md') ? 'M' : '·'}</span>{node.name}</button>
+function FileNode({
+    node,
+    selectedPath,
+    onOpen,
+    depth = 0,
+}: {
+    node: FileTreeEntry;
+    selectedPath?: string;
+    onOpen: (file: FileTreeEntry) => void;
+    depth?: number;
+}) {
+    const [expanded, setExpanded] = useState(depth < 1);
+    if (node.kind === "directory")
+        return (
+            <div className="file-node">
+                <button
+                    className="tree-folder"
+                    style={{ paddingLeft: 10 + depth * 14 }}
+                    onClick={() => setExpanded((value) => !value)}
+                >
+                    <span>{expanded ? "⌄" : "›"}</span>
+                    {node.name}
+                </button>
+                {expanded &&
+                    node.children?.map((child) => (
+                        <FileNode
+                            key={child.path}
+                            node={child}
+                            selectedPath={selectedPath}
+                            onOpen={onOpen}
+                            depth={depth + 1}
+                        />
+                    ))}
+            </div>
+        );
+    return (
+        <button
+            className={`tree-file ${selectedPath === node.path ? "active" : ""}`}
+            style={{ paddingLeft: 28 + depth * 14 }}
+            onClick={() => onOpen(node)}
+        >
+            <span>{node.name.endsWith(".md") ? "M" : "·"}</span>
+            {node.name}
+        </button>
+    );
 }
 
-function TaskSidebar({ workspace, workspaceName, onChooseWorkspace, onCreateTask, onOpenConversation, onDeleteConversation, onDeleteTask, onRefresh, onSwitchToIde, showWorkspace = true, newTask, serviceState, conversations, tasks, syncLabel }: { workspace: string; workspaceName: string; onChooseWorkspace: () => void; onCreateTask: () => void; onOpenConversation: (id: string) => void; onDeleteConversation: (id: string) => void; onDeleteTask: (id: string) => void; onRefresh: () => void; onSwitchToIde?: () => void; showWorkspace?: boolean; newTask: boolean; serviceState: ServiceState; conversations: ConversationSummary[]; tasks: TaskSummary[]; syncLabel: string }) {
-  const serviceLabel = serviceState === 'online' ? '在线服务' : serviceState === 'checking' ? '正在连接' : serviceState === 'unauthorized' ? '鉴权失败' : serviceState === 'error' ? '服务不可用' : '未配置服务'
-  return <aside className="chat-sidebar"><button className="new-chat-button" onClick={onCreateTask}><span>＋</span>新建任务</button><div className="chat-sidebar-label">会话 <button className="sync-button" title="刷新跨设备状态" onClick={onRefresh}>↻</button></div><div className="remote-list">{conversations.length ? conversations.map((conversation) => <div className="history-row" key={conversation.id}><button className={newTask ? 'chat-history-item' : 'chat-history-item active'} onClick={() => onOpenConversation(conversation.id)}><span className="history-dot" />会话 · {conversation.messages} 条消息</button><button className="history-delete" title="删除会话" onClick={(event) => { event.stopPropagation(); onDeleteConversation(conversation.id) }}>×</button></div>) : <button className={newTask ? 'chat-history-item active' : 'chat-history-item'} onClick={onCreateTask}><span className="history-dot" />工作会话</button>}</div>{tasks.filter((task) => task.status === 'pending').length ? <><div className="chat-sidebar-label">待续接 · {tasks.filter((task) => task.status === 'pending').length}</div><div className="task-list">{tasks.filter((task) => task.status === 'pending').map((task) => <div className="history-row" key={task.id}><span className="task-item">{task.title}</span><button className="history-delete" title="删除任务" onClick={() => onDeleteTask(task.id)}>×</button></div>)}</div></> : null}{showWorkspace ? <><div className="chat-sidebar-label">工作区</div><button className="workspace-button" title={workspace} onClick={onChooseWorkspace}><span className="chevron">⌄</span>{workspaceName}</button></> : null}<div className="chat-sidebar-footer"><span className={`service-status ${serviceState}`}><span />{serviceLabel} · {syncLabel}</span>{onSwitchToIde ? <button title="切换至 IDE" onClick={onSwitchToIde}>⌘</button> : null}</div></aside>
+function TaskSidebar({
+    workspace,
+    workspaceName,
+    onChooseWorkspace,
+    onCreateTask,
+    onOpenConversation,
+    onDeleteConversation,
+    onDeleteTask,
+    onRefresh,
+    onSwitchToIde,
+    showWorkspace = true,
+    newTask,
+    serviceState,
+    conversations,
+    tasks,
+    syncLabel,
+}: {
+    workspace: string;
+    workspaceName: string;
+    onChooseWorkspace: () => void;
+    onCreateTask: () => void;
+    onOpenConversation: (id: string) => void;
+    onDeleteConversation: (id: string) => void;
+    onDeleteTask: (id: string) => void;
+    onRefresh: () => void;
+    onSwitchToIde?: () => void;
+    showWorkspace?: boolean;
+    newTask: boolean;
+    serviceState: ServiceState;
+    conversations: ConversationSummary[];
+    tasks: TaskSummary[];
+    syncLabel: string;
+}) {
+    const serviceLabel =
+        serviceState === "online"
+            ? "在线服务"
+            : serviceState === "checking"
+              ? "正在连接"
+              : serviceState === "unauthorized"
+                ? "鉴权失败"
+                : serviceState === "error"
+                  ? "服务不可用"
+                  : "未配置服务";
+    return (
+        <aside className="chat-sidebar">
+            <button className="new-chat-button" onClick={onCreateTask}>
+                <span>＋</span>新建任务
+            </button>
+            <div className="chat-sidebar-label">
+                会话{" "}
+                <button
+                    className="sync-button"
+                    title="刷新跨设备状态"
+                    onClick={onRefresh}
+                >
+                    ↻
+                </button>
+            </div>
+            <div className="remote-list">
+                {conversations.length ? (
+                    conversations.map((conversation) => (
+                        <div className="history-row" key={conversation.id}>
+                            <button
+                                className={
+                                    newTask
+                                        ? "chat-history-item"
+                                        : "chat-history-item active"
+                                }
+                                onClick={() =>
+                                    onOpenConversation(conversation.id)
+                                }
+                            >
+                                <span className="history-dot" />
+                                会话 · {conversation.messages} 条消息
+                            </button>
+                            <button
+                                className="history-delete"
+                                title="删除会话"
+                                onClick={(event) => {
+                                    event.stopPropagation();
+                                    onDeleteConversation(conversation.id);
+                                }}
+                            >
+                                ×
+                            </button>
+                        </div>
+                    ))
+                ) : (
+                    <button
+                        className={
+                            newTask
+                                ? "chat-history-item active"
+                                : "chat-history-item"
+                        }
+                        onClick={onCreateTask}
+                    >
+                        <span className="history-dot" />
+                        工作会话
+                    </button>
+                )}
+            </div>
+            {tasks.filter((task) => task.status === "pending").length ? (
+                <>
+                    <div className="chat-sidebar-label">
+                        待续接 ·{" "}
+                        {
+                            tasks.filter((task) => task.status === "pending")
+                                .length
+                        }
+                    </div>
+                    <div className="task-list">
+                        {tasks
+                            .filter((task) => task.status === "pending")
+                            .map((task) => (
+                                <div className="history-row" key={task.id}>
+                                    <span className="task-item">
+                                        {task.title}
+                                    </span>
+                                    <button
+                                        className="history-delete"
+                                        title="删除任务"
+                                        onClick={() => onDeleteTask(task.id)}
+                                    >
+                                        ×
+                                    </button>
+                                </div>
+                            ))}
+                    </div>
+                </>
+            ) : null}
+            {showWorkspace ? (
+                <>
+                    <div className="chat-sidebar-label">工作区</div>
+                    <button
+                        className="workspace-button"
+                        title={workspace}
+                        onClick={onChooseWorkspace}
+                    >
+                        <span className="chevron">⌄</span>
+                        {workspaceName}
+                    </button>
+                </>
+            ) : null}
+            <div className="chat-sidebar-footer">
+                <span className={`service-status ${serviceState}`}>
+                    <span />
+                    {serviceLabel} · {syncLabel}
+                </span>
+                {onSwitchToIde ? (
+                    <button title="切换至 IDE" onClick={onSwitchToIde}>
+                        ⌘
+                    </button>
+                ) : null}
+            </div>
+        </aside>
+    );
 }
 
-function RuntimeOverview({ serviceState, workspace, executionSessionId, runtime, isOwner }: { serviceState: ServiceState; workspace: string; executionSessionId: string | null; runtime: RuntimeSnapshot | null; isOwner: boolean }) {
-  const activeTasks = runtime?.task_counts.active ?? 0
-  const pendingTasks = runtime?.task_counts.pending ?? 0
-  const pendingApprovals = runtime?.pending_approvals ?? 0
-  const localLabel = executionSessionId ? '正在执行' : workspace ? '本地工作区就绪' : '等待工作区'
-  const cloudLabel = serviceState === 'online' ? '已连接' : serviceState === 'checking' ? '连接中' : '不可用'
-  const deviceRuntimes = runtime?.device_runtimes ?? []
-  const onlineRuntimes = deviceRuntimes.filter((item) => item.status === 'online')
+function RuntimeOverview({
+    serviceState,
+    workspace,
+    executionSessionId,
+    runtime,
+    isOwner,
+}: {
+    serviceState: ServiceState;
+    workspace: string;
+    executionSessionId: string | null;
+    runtime: RuntimeSnapshot | null;
+    isOwner: boolean;
+}) {
+    const activeTasks = runtime?.task_counts.active ?? 0;
+    const pendingTasks = runtime?.task_counts.pending ?? 0;
+    const pendingApprovals = runtime?.pending_approvals ?? 0;
+    const localLabel = executionSessionId
+        ? "正在执行"
+        : workspace
+          ? "本地工作区就绪"
+          : "等待工作区";
+    const cloudLabel =
+        serviceState === "online"
+            ? "已连接"
+            : serviceState === "checking"
+              ? "连接中"
+              : "不可用";
+    const deviceRuntimes = runtime?.device_runtimes ?? [];
+    const onlineRuntimes = deviceRuntimes.filter(
+        (item) => item.status === "online",
+    );
 
-  return <section className="runtime-overview" aria-label="IDEA Runtime 状态">
-    <header><div><span className="runtime-eyebrow">DISTRIBUTED IDEA</span><strong>{isOwner ? 'IDEA Owner Runtime' : 'IDEA Assistant Runtime'}</strong></div><span className={`runtime-cloud-state ${serviceState}`}>{cloudLabel}</span></header>
-    <div className="runtime-nodes">
-      <div className={`runtime-node ${executionSessionId ? 'active' : ''}`}><span className="runtime-node-kind">LOCAL</span><strong>本地 Runtime</strong><small>{localLabel}</small></div>
-      <div className="runtime-link" aria-hidden="true" />
-      <div className={`runtime-node cloud ${serviceState === 'online' ? 'active' : ''}`}><span className="runtime-node-kind">CLOUD</span><strong>统一状态与调度</strong><small>{activeTasks ? `${activeTasks} 个 Agent Run 正在运行` : '记忆、会话、任务与 Agent 配置'}</small></div>
-    </div>
-    <footer><span>{pendingTasks ? `${pendingTasks} 个任务待续接` : '当前没有待续接任务'}</span><span>{onlineRuntimes.length ? `${onlineRuntimes.length} 个设备 Runtime 在线` : '没有已上报的设备 Runtime'}</span><span>{executionSessionId ? '本地执行日志正在输出' : activeTasks ? '云端 Agent Run 正在执行' : '本地能力等待任务调用'}</span>{isOwner && pendingApprovals ? <span className="runtime-warning">{pendingApprovals} 个操作等待批准</span> : null}</footer>{deviceRuntimes.length ? <div className="runtime-device-list">{deviceRuntimes.slice(0, 4).map((item) => <span className={item.status} key={item.id} title={Object.entries(item.capabilities).filter(([, enabled]) => enabled).map(([name]) => name).join(' · ') || '无可用能力'}>{item.kind === 'owner_desktop' ? 'SRH' : item.kind === 'desktop' ? '桌面端' : '云端'} · {item.status === 'online' ? '在线' : '离线'}</span>)}</div> : null}
-  </section>
+    return (
+        <section className="runtime-overview" aria-label="IDEA Runtime 状态">
+            <header>
+                <div>
+                    <span className="runtime-eyebrow">DISTRIBUTED IDEA</span>
+                    <strong>
+                        {isOwner
+                            ? "IDEA Owner Runtime"
+                            : "IDEA Assistant Runtime"}
+                    </strong>
+                </div>
+                <span className={`runtime-cloud-state ${serviceState}`}>
+                    {cloudLabel}
+                </span>
+            </header>
+            <div className="runtime-nodes">
+                <div
+                    className={`runtime-node ${executionSessionId ? "active" : ""}`}
+                >
+                    <span className="runtime-node-kind">LOCAL</span>
+                    <strong>本地 Runtime</strong>
+                    <small>{localLabel}</small>
+                </div>
+                <div className="runtime-link" aria-hidden="true" />
+                <div
+                    className={`runtime-node cloud ${serviceState === "online" ? "active" : ""}`}
+                >
+                    <span className="runtime-node-kind">CLOUD</span>
+                    <strong>统一状态与调度</strong>
+                    <small>
+                        {activeTasks
+                            ? `${activeTasks} 个 Agent Run 正在运行`
+                            : "记忆、会话、任务与 Agent 配置"}
+                    </small>
+                </div>
+            </div>
+            <footer>
+                <span>
+                    {pendingTasks
+                        ? `${pendingTasks} 个任务待续接`
+                        : "当前没有待续接任务"}
+                </span>
+                <span>
+                    {onlineRuntimes.length
+                        ? `${onlineRuntimes.length} 个设备 Runtime 在线`
+                        : "没有已上报的设备 Runtime"}
+                </span>
+                <span>
+                    {executionSessionId
+                        ? "本地执行日志正在输出"
+                        : activeTasks
+                          ? "云端 Agent Run 正在执行"
+                          : "本地能力等待任务调用"}
+                </span>
+                {isOwner && pendingApprovals ? (
+                    <span className="runtime-warning">
+                        {pendingApprovals} 个操作等待批准
+                    </span>
+                ) : null}
+            </footer>
+            {deviceRuntimes.length ? (
+                <div className="runtime-device-list">
+                    {deviceRuntimes.slice(0, 4).map((item) => (
+                        <span
+                            className={item.status}
+                            key={item.id}
+                            title={
+                                Object.entries(item.capabilities)
+                                    .filter(([, enabled]) => enabled)
+                                    .map(([name]) => name)
+                                    .join(" · ") || "无可用能力"
+                            }
+                        >
+                            {item.kind === "owner_desktop"
+                                ? "SRH"
+                                : item.kind === "desktop"
+                                  ? "桌面端"
+                                  : "云端"}{" "}
+                            · {item.status === "online" ? "在线" : "离线"}
+                        </span>
+                    ))}
+                </div>
+            ) : null}
+        </section>
+    );
 }
 
-function RunDetailModal({ run, onClose }: { run: RunSummary; onClose: () => void }) {
-  const statusLabel = run.status === 'running' ? '执行中' : run.status === 'completed' ? '已完成' : '失败'
-  const eventLabel: Record<RunEvent['type'], string> = {
-    'run.started': '已创建运行',
-    'tool.started': '工具开始执行',
-    'tool.completed': '工具执行完成',
-    'tools.completed': '工具执行结束',
-    'run.completed': '会话已写入回复',
-    'run.failed': '运行失败',
-  }
-  return <div className="modal-backdrop" role="presentation" onMouseDown={onClose}><section className="run-detail-modal modal-surface" role="dialog" aria-modal="true" aria-label="运行详情" onMouseDown={(event) => event.stopPropagation()}><header><div><span className="runtime-eyebrow">AGENT RUN</span><strong>{run.agent_id} · {statusLabel}</strong></div><button title="关闭运行详情" onClick={onClose}>×</button></header><div className="run-detail-summary"><span>模型：{run.model_key}</span><span>开始：{new Date(run.started_at * 1000).toLocaleString()}</span>{run.finished_at ? <span>结束：{new Date(run.finished_at * 1000).toLocaleString()}</span> : null}{run.iterations ? <span>推理轮次：{run.iterations}</span> : null}</div><section className="run-timeline" aria-label="运行时间线">{run.events?.length ? run.events.map((event) => <div className={`run-event ${event.type}`} key={event.id}><time>{new Date(event.created_at * 1000).toLocaleTimeString()}</time><div><strong>{eventLabel[event.type]}</strong><small>{event.detail}</small></div></div>) : <p>该运行暂无可显示的阶段事件。</p>}</section>{run.tool_calls.length ? <section className="run-tool-summary"><strong>工具调用</strong>{run.tool_calls.map((tool, index) => <span key={`${tool.name}-${index}`} className={tool.success ? 'success' : 'failure'}>{tool.name} · {tool.success ? '成功' : '未成功'}</span>)}</section> : null}</section></div>
+function RunDetailModal({
+    run,
+    onClose,
+}: {
+    run: RunSummary;
+    onClose: () => void;
+}) {
+    const statusLabel =
+        run.status === "running"
+            ? "执行中"
+            : run.status === "completed"
+              ? "已完成"
+              : "失败";
+    const eventLabel: Record<RunEvent["type"], string> = {
+        "run.started": "已创建运行",
+        "tool.started": "工具开始执行",
+        "tool.completed": "工具执行完成",
+        "tools.completed": "工具执行结束",
+        "run.completed": "会话已写入回复",
+        "run.failed": "运行失败",
+    };
+    return (
+        <div
+            className="modal-backdrop"
+            role="presentation"
+            onMouseDown={onClose}
+        >
+            <section
+                className="run-detail-modal modal-surface"
+                role="dialog"
+                aria-modal="true"
+                aria-label="运行详情"
+                onMouseDown={(event) => event.stopPropagation()}
+            >
+                <header>
+                    <div>
+                        <span className="runtime-eyebrow">AGENT RUN</span>
+                        <strong>
+                            {run.agent_id} · {statusLabel}
+                        </strong>
+                    </div>
+                    <button title="关闭运行详情" onClick={onClose}>
+                        ×
+                    </button>
+                </header>
+                <div className="run-detail-summary">
+                    <span>模型：{run.model_key}</span>
+                    <span>
+                        开始：{new Date(run.started_at * 1000).toLocaleString()}
+                    </span>
+                    {run.finished_at ? (
+                        <span>
+                            结束：
+                            {new Date(run.finished_at * 1000).toLocaleString()}
+                        </span>
+                    ) : null}
+                    {run.iterations ? (
+                        <span>推理轮次：{run.iterations}</span>
+                    ) : null}
+                </div>
+                <section className="run-timeline" aria-label="运行时间线">
+                    {run.events?.length ? (
+                        run.events.map((event) => (
+                            <div
+                                className={`run-event ${event.type}`}
+                                key={event.id}
+                            >
+                                <time>
+                                    {new Date(
+                                        event.created_at * 1000,
+                                    ).toLocaleTimeString()}
+                                </time>
+                                <div>
+                                    <strong>{eventLabel[event.type]}</strong>
+                                    <small>{event.detail}</small>
+                                </div>
+                            </div>
+                        ))
+                    ) : (
+                        <p>该运行暂无可显示的阶段事件。</p>
+                    )}
+                </section>
+                {run.tool_calls.length ? (
+                    <section className="run-tool-summary">
+                        <strong>工具调用</strong>
+                        {run.tool_calls.map((tool, index) => (
+                            <span
+                                key={`${tool.name}-${index}`}
+                                className={tool.success ? "success" : "failure"}
+                            >
+                                {tool.name} · {tool.success ? "成功" : "未成功"}
+                            </span>
+                        ))}
+                    </section>
+                ) : null}
+            </section>
+        </div>
+    );
 }
 
-function ChatComposer({ input, setInput, onSend, isSending, disabledAttachment, contextBlocks, onAddCurrentFile, onRemoveContextBlock, modelKey, setModelKey }: { input: string; setInput: (value: string) => void; onSend: () => void; isSending: boolean; disabledAttachment: boolean; contextBlocks: ContextBlock[]; onAddCurrentFile: () => void; onRemoveContextBlock: (path: string) => void; modelKey: ModelKey; setModelKey: (modelKey: ModelKey) => void }) {
-  const contextTokens = contextBlocks.reduce((total, block) => total + estimateTokens(block.content), 0)
-  const [showModelMenu, setShowModelMenu] = useState(false)
-  const options: Array<{ key: ModelKey; label: string }> = [{ key: 'gpt', label: 'GPT' }, { key: 'deepseek-v4-flash', label: 'DeepSeek V4 Flash' }]
-  const chooseModel = (key: ModelKey) => { setModelKey(key); setShowModelMenu(false) }
-  return <div className="composer-wrap"><div className="chat-composer">{contextBlocks.length ? <div className="context-blocks"><span className="context-token-count">临时文件上下文 · 约 {contextTokens.toLocaleString()} token</span>{contextBlocks.map((block) => <span className="context-block" key={block.path} title={`${block.path} · 约 ${estimateTokens(block.content).toLocaleString()} token`}>当前文件 · {block.name} · 约 {estimateTokens(block.content).toLocaleString()} token<button type="button" title={`移除 ${block.name} 上下文`} onClick={() => onRemoveContextBlock(block.path)}>×</button></span>)}</div> : null}<textarea value={input} disabled={isSending} onChange={(event) => setInput(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') setShowModelMenu(false); if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); setShowModelMenu(false); onSend() } }} placeholder="描述你希望完成的任务" rows={1} /><div className="composer-toolbar"><div><button disabled={disabledAttachment} title="附件功能尚未接入">⌕</button><button type="button" disabled={isSending} title="将当前打开文件作为本次消息上下文" onClick={onAddCurrentFile}>＋当前文件</button></div><div className="composer-send-actions"><div className="model-selector"><button className="model-select-button" type="button" title="选择模型" aria-haspopup="menu" aria-expanded={showModelMenu} onMouseDown={(event) => event.preventDefault()} onClick={() => setShowModelMenu((value) => !value)}>⚡ {modelKey === 'gpt' ? 'GPT' : 'DeepSeek'}</button>{showModelMenu ? <div className="model-select-menu" role="menu">{options.map((option) => <button key={option.key} type="button" role="menuitemradio" aria-checked={modelKey === option.key} className={modelKey === option.key ? 'active' : ''} onMouseDown={(event) => event.preventDefault()} onClick={() => chooseModel(option.key)}>{modelKey === option.key ? '✓ ' : ''}{option.label}</button>)}</div> : null}</div><button className="send-button" disabled={!input.trim() || isSending} title="发送" onClick={() => { setShowModelMenu(false); onSend() }}>{isSending ? '…' : '↑'}</button></div></div></div></div>
+function ChatComposer({
+    input,
+    setInput,
+    onSend,
+    isSending,
+    disabledAttachment,
+    contextBlocks,
+    onAddCurrentFile,
+    onRemoveContextBlock,
+    modelKey,
+    setModelKey,
+    chatTarget,
+    setChatTarget,
+}: {
+    input: string;
+    setInput: (value: string) => void;
+    onSend: () => void;
+    isSending: boolean;
+    disabledAttachment: boolean;
+    contextBlocks: ContextBlock[];
+    onAddCurrentFile: () => void;
+    onRemoveContextBlock: (path: string) => void;
+    modelKey: ModelKey;
+    setModelKey: (modelKey: ModelKey) => void;
+    chatTarget: ChatTarget;
+    setChatTarget: (target: ChatTarget) => void;
+}) {
+    const contextTokens = contextBlocks.reduce(
+        (total, block) => total + estimateTokens(block.content),
+        0,
+    );
+    const [showModelMenu, setShowModelMenu] = useState(false);
+    const options: Array<{ key: ModelKey; label: string }> = [
+        { key: "gpt-5.6-terra", label: "gpt-5.6-terra" },
+        { key: "gpt-5.6-sol", label: "gpt-5.6-sol" },
+        { key: "deepseek-v4-flash", label: "deepseek-v4-flash" },
+        { key: "deepseek-v4-pro", label: "deepseek-v4-pro" },
+    ];
+    const chooseModel = (key: ModelKey) => {
+        setModelKey(key);
+        setShowModelMenu(false);
+    };
+    return (
+        <div className="composer-wrap">
+            <div className="chat-composer">
+                {contextBlocks.length ? (
+                    <div className="context-blocks">
+                        <span className="context-token-count">
+                            临时文件上下文 · 约 {contextTokens.toLocaleString()}{" "}
+                            token
+                        </span>
+                        {contextBlocks.map((block) => (
+                            <span
+                                className="context-block"
+                                key={block.path}
+                                title={`${block.path} · 约 ${estimateTokens(block.content).toLocaleString()} token`}
+                            >
+                                当前文件 · {block.name} · 约{" "}
+                                {estimateTokens(block.content).toLocaleString()}{" "}
+                                token
+                                <button
+                                    type="button"
+                                    title={`移除 ${block.name} 上下文`}
+                                    onClick={() =>
+                                        onRemoveContextBlock(block.path)
+                                    }
+                                >
+                                    ×
+                                </button>
+                            </span>
+                        ))}
+                    </div>
+                ) : null}
+                <textarea
+                    value={input}
+                    disabled={isSending}
+                    onChange={(event) => setInput(event.target.value)}
+                    onKeyDown={(event) => {
+                        if (event.key === "Escape") setShowModelMenu(false);
+                        if (event.key === "Enter" && !event.shiftKey) {
+                            event.preventDefault();
+                            setShowModelMenu(false);
+                            onSend();
+                        }
+                    }}
+                    placeholder="描述你希望完成的任务"
+                    rows={1}
+                />
+                <div className="composer-toolbar">
+                    <div>
+                        <button
+                            disabled={disabledAttachment}
+                            title="附件功能尚未接入"
+                        >
+                            ⌕
+                        </button>
+                        <button
+                            type="button"
+                            disabled={isSending}
+                            title="将当前打开文件作为本次消息上下文"
+                            onClick={onAddCurrentFile}
+                        >
+                            ＋当前文件
+                        </button>
+                    </div>
+                    <div className="composer-send-actions">
+                        <div className="model-selector">
+                            <button
+                                type="button"
+                                className="model-select-button"
+                                onClick={() => setChatTarget(chatTarget === "local" ? "online" : "local")}
+                                title="切换本地或在线 Agent"
+                            >
+                                {chatTarget === "local" ? "本地 IDEA" : "在线 IDEA"}
+                            </button>
+                            <button
+                                className="model-select-button"
+                                type="button"
+                                title="选择模型"
+                                aria-haspopup="menu"
+                                aria-expanded={showModelMenu}
+                                onMouseDown={(event) => event.preventDefault()}
+                                onClick={() => setShowModelMenu((value) => !value)}
+                            >
+                                ⚡ {modelKey}
+                            </button>
+                            {showModelMenu ? (
+                                <div className="model-select-menu" role="menu">
+                                    {options.map((option) => (
+                                        <button
+                                            key={option.key}
+                                            type="button"
+                                            role="menuitemradio"
+                                            aria-checked={modelKey === option.key}
+                                            className={modelKey === option.key ? "active" : ""}
+                                            onMouseDown={(event) => event.preventDefault()}
+                                            onClick={() => chooseModel(option.key)}
+                                        >
+                                            {modelKey === option.key ? "✓ " : ""}
+                                            {option.label}
+                                        </button>
+                                    ))}
+                                </div>
+                            ) : null}
+                        </div>
+                        <button
+                            className="send-button"
+                            disabled={!input.trim() || isSending}
+                            title="发送"
+                            onClick={() => {
+                                setShowModelMenu(false);
+                                onSend();
+                            }}
+                        >
+                            {isSending ? "…" : "↑"}
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    );
 }
 
-function LoginPage({ emailInput, setEmailInput, passwordInput, setPasswordInput, onSignIn, isSigningIn, isRestoring, status }: { emailInput: string; setEmailInput: (value: string) => void; passwordInput: string; setPasswordInput: (value: string) => void; onSignIn: () => void; isSigningIn: boolean; isRestoring: boolean; status: string }) {
-  return <main className="login-page"><section className="login-card" aria-label="登录 IDEA Assistant"><div className="login-brand"><span className="project-mark">I</span><strong>IDEA</strong></div><h1>登录 Project IDEA</h1>{isRestoring ? <p className="login-status" role="status">正在恢复登录会话…</p> : <><form onSubmit={(event) => { event.preventDefault(); onSignIn() }}><label>邮箱<input type="email" autoComplete="email" value={emailInput} onChange={(event) => setEmailInput(event.target.value)} placeholder="name@example.com" /></label><label>密码<input type="password" autoComplete="current-password" value={passwordInput} onChange={(event) => setPasswordInput(event.target.value)} placeholder="输入密码" /></label><button className="primary-button" type="submit" disabled={!emailInput.trim() || !passwordInput || isSigningIn}>{isSigningIn ? '正在登录' : '登录'}</button></form>{status && status !== '离线模式 · 本地文件可用' ? <p className="login-status login-error" role="alert">{status}</p> : null}</>} </section></main>
+function LoginPage({
+    emailInput,
+    setEmailInput,
+    passwordInput,
+    setPasswordInput,
+    onSignIn,
+    auth,
+}: {
+    emailInput: string;
+    setEmailInput: (value: string) => void;
+    passwordInput: string;
+    setPasswordInput: (value: string) => void;
+    onSignIn: () => void;
+    auth: AuthState;
+}) {
+    const isRestoring = auth.phase === "booting" || auth.phase === "restoring";
+    const isSigningIn = auth.phase === "signing_in";
+    return (
+        <main className="login-page">
+            <section className="login-card" aria-label="登录 IDEA Assistant">
+                <div className="login-brand">
+                    <span className="project-mark">I</span>
+                    <strong>IDEA</strong>
+                </div>
+                <h1>登录 Project IDEA</h1>
+                {isRestoring ? (
+                    <p className="login-status" role="status">
+                        正在恢复登录会话…
+                    </p>
+                ) : (
+                    <>
+                        <form
+                            onSubmit={(event) => {
+                                event.preventDefault();
+                                onSignIn();
+                            }}
+                        >
+                            <label>
+                                邮箱
+                                <input
+                                    type="email"
+                                    autoComplete="email"
+                                    value={emailInput}
+                                    onChange={(event) =>
+                                        setEmailInput(event.target.value)
+                                    }
+                                    placeholder="name@example.com"
+                                />
+                            </label>
+                            <label>
+                                密码
+                                <input
+                                    type="password"
+                                    autoComplete="current-password"
+                                    value={passwordInput}
+                                    onChange={(event) =>
+                                        setPasswordInput(event.target.value)
+                                    }
+                                    placeholder="输入密码"
+                                />
+                            </label>
+                            <button
+                                className="primary-button"
+                                type="submit"
+                                disabled={
+                                    !emailInput.trim() ||
+                                    !passwordInput ||
+                                    isSigningIn
+                                }
+                            >
+                                {isSigningIn ? "正在登录" : "登录"}
+                            </button>
+                        </form>
+                        {auth.message ? (
+                            <p
+                                className="login-status login-error"
+                                role="alert"
+                            >
+                                {auth.message}
+                            </p>
+                        ) : null}
+                    </>
+                )}{" "}
+            </section>
+        </main>
+    );
 }
 
-function SettingsModal({ activeTab, setActiveTab, onClose, onSignOut, serviceConfig, theme, setTheme, fontSize, setFontSize, background, setBackground, isOwnerClient, hasOwnerSession, memories, showMemoryPanel, setShowMemoryPanel, memoryContent, setMemoryContent, memoryCategory, setMemoryCategory, memoryScope, setMemoryScope, onSaveMemory, onRemoveMemory, isSavingMemory, ownerDevices, onOwnerDevice, credentials, onIssueCredential, onRecoverCredential, onRevokeCredential, issuedToken, credentialNotice, approvals, onApproveApproval, onDenyApproval, grants, onCreateGrant, onRevokeGrant, fileChanges, onAcceptChange, onRevertChange, auditEvents, onRefreshAudit, onUpdateMemory }: SettingsModalProps) {
-  const [grantAccount, setGrantAccount] = useState('')
-  const [editingMemory, setEditingMemory] = useState<EditingMemory | null>(null)
-  const [memoryDraft, setMemoryDraft] = useState<MemoryRecord | null>(null)
-  const [grantCapability, setGrantCapability] = useState<GrantCapability>('file.write')
-  const [grantDays, setGrantDays] = useState('')
-  const capabilityLabels: Record<GrantCapability, string> = { 'file.read': 'file.read · 文件读取', 'file.write': 'file.write · 文件写入', 'file.delete': 'file.delete · 文件删除', command: 'command · 执行命令', network: 'network · 联网抓取', delegate: 'delegate · 调度智能体', ssh: 'ssh · 远程主机' }
-  const createGrant = () => { if (!grantAccount.trim()) return; onCreateGrant({ accountId: grantAccount.trim(), capability: grantCapability, expiresInDays: grantDays.trim() ? Number(grantDays.trim()) : undefined }); setGrantAccount(''); setGrantDays('') }
-  return <div className="modal-backdrop" role="presentation" onMouseDown={onClose}><section className="settings-modal modal-surface" role="dialog" aria-modal="true" aria-label="设置" onMouseDown={(event) => event.stopPropagation()}><header><strong>设置</strong><button title="关闭设置" onClick={onClose}>×</button></header><nav className="settings-tabs"><button className={activeTab === 'connection' ? 'active' : ''} onClick={() => setActiveTab('connection')}>连接</button><button className={activeTab === 'account' ? 'active' : ''} onClick={() => setActiveTab('account')}>账户</button><button className={activeTab === 'appearance' ? 'active' : ''} onClick={() => setActiveTab('appearance')}>外观</button></nav><div className="settings-content">{activeTab === 'connection' ? <section><label>基础服务</label><strong>Project IDEA Cloud</strong><span>https://shiroha-rin.world</span><p>基础能力由客户端内置连接；知识库与扩展能力通过 MCP 管理。</p><UpdateCard /></section> : null}{activeTab === 'account' ? <><section><label>账号登录 <span>已登录</span></label><p>当前设备 ID：{serviceConfig.deviceId || '未生成'}</p><button className='secondary-button' onClick={onSignOut}>退出登录</button></section>{isOwnerClient && serviceConfig.signedIn ? <section><label>Owner 设备认证</label><p>当前 Device ID：{serviceConfig.deviceId || '未生成'}</p>{hasOwnerSession ? <div className="memory-manager"><strong>设备列表</strong>{ownerDevices.length ? ownerDevices.map((device) => <article className="memory-row" key={device.owner_device_id}><div><strong>{device.device_id}</strong><p>状态：{device.status} · 最后活动：{device.last_seen_at ? new Date(device.last_seen_at * 1000).toLocaleString() : '暂无'}</p></div><div>{device.status === 'pending' ? <button onClick={() => onOwnerDevice(device, 'approve')}>批准</button> : null}{device.status === 'approved' ? <button onClick={() => onOwnerDevice(device, 'revoke')}>撤销</button> : null}</div></article>) : <p>暂无已关联设备。</p>}</div> : <p>当前设备等待 Owner 批准。请在已获批 SRH 端批准后退出并重新登录。</p>}</section> : null}{isOwnerClient && hasOwnerSession ? <section><label>TRAE / MCP 自动化凭据</label><p>凭据由已批准的 Owner 设备托管，可随时查看、复制或撤销。</p><div className="memory-manager"><div className="memory-form-row"><button className="primary-button" onClick={() => onIssueCredential('TRAE')}>签发本设备 TRAE 凭据</button></div>{credentialNotice ? <p className="login-status" role="status">{credentialNotice}</p> : null}{issuedToken ? <article className="memory-row"><div><strong>当前凭据</strong><p>{issuedToken}</p></div></article> : null}{credentials.length ? credentials.map((credential) => <article className="memory-row" key={credential.credential_id}><div><strong>{credential.device_label}</strong><p>{credential.capability.toUpperCase()} · {credential.status} · 最后使用：{credential.last_used_at ? new Date(credential.last_used_at * 1000).toLocaleString() : '暂无'}</p></div>{credential.status === 'active' ? <div><button onClick={() => onRecoverCredential(credential)}>查看</button><button onClick={() => onRevokeCredential(credential)}>撤销</button></div> : null}</article>) : <p>暂无自动设备凭据。</p>}</div></section> : null}{hasOwnerSession ? <section><label>工具操作审批{approvals.pending.length ? <span> · {approvals.pending.length} 待处理</span> : null}</label><p>IDEA 的删除文件、执行命令、联网抓取等高风险操作，需经你批准后才会真正执行。</p><div className="memory-manager">{approvals.pending.length ? approvals.pending.map((approval) => <article className="memory-row" key={approval.approval_id}><div><strong>{approval.tool_name}</strong>{renderApprovalSummary(approval.args_summary)}<p>{new Date(approval.requested_at * 1000).toLocaleString()} · {approval.agent_id}</p></div><div><button className="approve-button" onClick={() => onApproveApproval(approval)}>批准</button><button onClick={() => onDenyApproval(approval)}>拒绝</button></div></article>) : <p>暂无待处理的工具审批请求。</p>}</div></section> : null}{hasOwnerSession ? <section><label>文件变更审查{fileChanges.filter((item) => item.status === 'pending').length ? <span> · {fileChanges.filter((item) => item.status === 'pending').length} 待确认</span> : null}</label><p>IDEA 修改的文件会进入待确认队列；对话可以继续，Owner 可随时确认或回滚。</p><div className="memory-manager">{fileChanges.filter((item) => item.status === 'pending').length ? fileChanges.filter((item) => item.status === 'pending').map((change) => <article className="memory-row" key={change.change_id}><div><strong>{change.tool_name} · {change.file_path.split(/[\\/]/).pop()}</strong><p>{change.file_path}</p>{renderApprovalSummary(change.diff_summary)}<p>{new Date(change.created_at * 1000).toLocaleString()}</p></div><div><button className="approve-button" onClick={() => onAcceptChange(change)}>确认</button><button onClick={() => onRevertChange(change)}>回滚</button></div></article>) : <p>暂无待确认的文件变更。</p>}</div></section> : null}{hasOwnerSession ? <section><label>工具权限授权</label><p>为账号授予长期工具权限（免审批）；撤销或过期后恢复按需审批。</p><div className="memory-manager"><div className="memory-form-row"><input value={grantAccount} onChange={(event) => setGrantAccount(event.target.value)} placeholder="账号 ID（account_id）" /><select value={grantCapability} onChange={(event) => setGrantCapability(event.target.value as GrantCapability)}>{(Object.keys(capabilityLabels) as GrantCapability[]).map((cap) => <option key={cap} value={cap}>{capabilityLabels[cap]}</option>)}</select></div><div className="memory-form-row"><input value={grantDays} onChange={(event) => setGrantDays(event.target.value)} placeholder="有效期（天，留空=永久）" /><button className="primary-button" disabled={!grantAccount.trim()} onClick={createGrant}>授予权限</button></div>{grants.length ? grants.map((grant) => <article className="memory-row" key={grant.grant_id}><div><strong>{grant.capability}</strong><p>{grant.account_id} · {grant.workspace || '全部空间'} · {grant.status}{grant.expires_at ? ` · 至 ${new Date(grant.expires_at * 1000).toLocaleDateString()}` : ''}</p></div>{grant.status === 'active' ? <button onClick={() => onRevokeGrant(grant)}>撤销</button> : null}</article>) : <p>暂无权限授权。</p>}</div></section> : null}{hasOwnerSession ? <section><label>操作审计 <button className="inline-action" onClick={onRefreshAudit}>刷新</button></label><div className="audit-list">{auditEvents.slice(0, 40).map((event) => <div className="audit-row" key={event.event_id}><span className="audit-time">{new Date(event.occurred_at * 1000).toLocaleString()}</span><span className="audit-type">{event.event_type}</span><span>{event.decision ?? ''}{event.reason_code ? ` · ${event.reason_code}` : ''}</span></div>)}</div></section> : null}{hasOwnerSession ? <section><label>Owner 私域记忆 <button className="inline-action" onClick={() => setShowMemoryPanel((value) => !value)}>{showMemoryPanel ? '收起' : `管理 ${memories.length}`}</button></label>{showMemoryPanel ? <div className="memory-manager"><textarea value={memoryContent} onChange={(event) => setMemoryContent(event.target.value)} placeholder="保存需在其他设备延续的偏好、约定或项目上下文" /><div className="memory-form-row"><input value={memoryCategory} onChange={(event) => setMemoryCategory(event.target.value)} placeholder="分类" /><select value={memoryScope} onChange={(event) => setMemoryScope(event.target.value as 'personal' | 'shared' | 'owner')}><option value="personal">个人</option><option value="shared">当前空间共享</option><option value="owner">Owner 私人</option></select></div><button className="primary-button" disabled={!memoryContent.trim() || isSavingMemory} onClick={onSaveMemory}>{isSavingMemory ? '正在保存' : '确认保存记忆'}</button>{memories.map((memory) => editingMemory?.id === memory.id && memoryDraft ? <article className="memory-row memory-row-editing" key={memory.id}><div className="memory-edit-fields"><input value={memoryDraft.category} onChange={(event) => setMemoryDraft({ ...memoryDraft, category: event.target.value })} /><textarea value={memoryDraft.content} onChange={(event) => setMemoryDraft({ ...memoryDraft, content: event.target.value })} /></div><div className="memory-row-actions"><button className="approve-button" disabled={!memoryDraft.category.trim() || !memoryDraft.content.trim()} onClick={async () => { if (await onUpdateMemory(memoryDraft)) { setEditingMemory(null); setMemoryDraft(null) } }}>保存</button><button onClick={() => { setEditingMemory(null); setMemoryDraft(null) }}>取消</button></div></article> : <article className="memory-row" key={memory.id}><div><strong>{memory.category}</strong><p>{memory.content}</p><small>修订版 {memory.revision} · {new Date(memory.updated_at * 1000).toLocaleString()}</small></div><div className="memory-row-actions"><button onClick={() => { setEditingMemory({ id: memory.id, revision: memory.revision }); setMemoryDraft({ ...memory }) }}>编辑</button><button title="删除记忆" onClick={() => onRemoveMemory(memory)}>×</button></div></article>)}</div> : null}</section> : null}</> : null}{activeTab === 'appearance' ? <><section><label>显示模式</label><div className="setting-segment"><button className={theme === 'light' ? 'active' : ''} onClick={() => setTheme('light')}>亮色</button><button className={theme === 'dark' ? 'active' : ''} onClick={() => setTheme('dark')}>暗色</button></div></section><section><label>界面字号 <span>{fontSize}px</span></label><input type="range" min="12" max="17" value={fontSize} onChange={(event) => setFontSize(Number(event.target.value))} /></section><section><label>工作区背景</label><div className="background-options">{(['default', 'graphite', 'midnight'] as Background[]).map((item) => <button key={item} className={background === item ? `active ${item}-bg` : `${item}-bg`} onClick={() => setBackground(item)}>{item === 'default' ? '默认' : item === 'graphite' ? '石墨' : '深夜'}</button>)}</div></section></> : null}</div></section></div>
+function ServiceTestPage() {
+    const [message, setMessage] = useState("");
+    const [reply, setReply] = useState("");
+    const [status, setStatus] = useState("尚未测试");
+    const [busy, setBusy] = useState(false);
+    useEffect(() => window.ideaDesktop?.onChatStreamEvent((event) => {
+        if (event.type === "model.text.delta" && typeof event.payload.content === "string") setReply((value) => value + event.payload.content);
+        if (event.type === "run.started") setStatus("在线服务正在生成回复");
+        if (event.type === "run.completed") setStatus("在线服务完成");
+        if (event.type === "run.failed") setStatus("在线服务失败");
+    }), []);
+    async function test() {
+        setBusy(true); setReply(""); setStatus("正在请求在线服务");
+        try {
+            const health = await window.ideaDesktop?.testService();
+            if (!health) throw new Error("在线服务 IPC 不可用");
+            const result = await window.ideaDesktop?.sendChatStream({ agentId: "idea", message: message.trim() || "请回复在线服务测试成功。", useMemory: false, modelKey: "gpt-5.6-terra" });
+            if (!result) throw new Error("在线服务没有返回结果");
+            setReply(result.reply); setStatus(`成功 · ${health.status} · ${result.runId}`);
+        } catch (error) { setStatus(error instanceof Error ? error.message : "测试失败"); } finally { setBusy(false); }
+    }
+    return <main className="service-test-page"><header className="ide-projectbar"><strong>IDEA 在线服务测试</strong><span>独立测试窗口 · 不影响本地 Agent</span></header><section className="service-test-card"><h1>在线服务测试</h1><p>这里单独验证云端健康检查、认证和聊天流，不会阻塞主工作台的本地 IDEA Agent。</p><textarea value={message} onChange={(event) => setMessage(event.target.value)} placeholder="输入在线测试消息" rows={5} /><button className="primary-button" disabled={busy} onClick={() => void test()}>{busy ? "测试中…" : "发送在线测试"}</button><div className="service-test-status">{status}</div><pre>{reply || "等待在线回复…"}</pre></section></main>;
+}
+
+function SettingsModal({
+    activeTab,
+    setActiveTab,
+    onClose,
+    onSignOut,
+    serviceConfig,
+    theme,
+    setTheme,
+    fontSize,
+    setFontSize,
+    background,
+    setBackground,
+    isOwnerClient,
+    hasOwnerSession,
+    memories,
+    showMemoryPanel,
+    setShowMemoryPanel,
+    memoryContent,
+    setMemoryContent,
+    memoryCategory,
+    setMemoryCategory,
+    memoryScope,
+    setMemoryScope,
+    onSaveMemory,
+    onRemoveMemory,
+    isSavingMemory,
+    ownerDevices,
+    onOwnerDevice,
+    credentials,
+    onIssueCredential,
+    onRecoverCredential,
+    onRevokeCredential,
+    issuedToken,
+    credentialNotice,
+    approvals,
+    onApproveApproval,
+    onDenyApproval,
+    grants,
+    onCreateGrant,
+    onRevokeGrant,
+    fileChanges,
+    onAcceptChange,
+    onRevertChange,
+    auditEvents,
+    onRefreshAudit,
+    onUpdateMemory,
+}: SettingsModalProps) {
+    const [grantAccount, setGrantAccount] = useState("");
+    const [editingMemory, setEditingMemory] = useState<EditingMemory | null>(
+        null,
+    );
+    const [memoryDraft, setMemoryDraft] = useState<MemoryRecord | null>(null);
+    const [grantCapability, setGrantCapability] =
+        useState<GrantCapability>("file.write");
+    const [grantDays, setGrantDays] = useState("");
+    const [localModel, setLocalModel] = useState<LocalModelConfig>({ id: "custom", name: "", displayName: "", provider: "openai-compatible", baseUrl: "", model: "", configured: false, hasApiKey: false, official: false });
+    const [localApiKey, setLocalApiKey] = useState("");
+    const [localModelNotice, setLocalModelNotice] = useState("");
+    const [officialModels, setOfficialModels] = useState<ModelDescriptor[]>([]);
+    const [localExtensions, setLocalExtensions] = useState<LocalExtensions>({ mcp: [], rules: [] });
+    const [extensionName, setExtensionName] = useState("");
+    const [extensionValue, setExtensionValue] = useState("");
+    useEffect(() => { void window.ideaDesktop?.getLocalModelConfig().then(setLocalModel); }, []);
+    useEffect(() => { void window.ideaDesktop?.getLocalExtensions().then(setLocalExtensions); }, []);
+    useEffect(() => { void window.ideaDesktop?.getLocalModels().then(setOfficialModels); }, []);
+    const saveLocalModel = async () => { try { const saved = await window.ideaDesktop?.saveLocalModelConfig({ id: localModel.id, name: localModel.name, displayName: localModel.displayName, provider: localModel.provider, baseUrl: localModel.baseUrl, model: localModel.model, apiKey: localApiKey }); if (saved) { setLocalModel(saved); setLocalApiKey(""); setLocalModelNotice("本地模型配置已保存"); } } catch (error) { setLocalModelNotice(error instanceof Error ? error.message : "本地模型配置保存失败"); } };
+    const capabilityLabels: Record<GrantCapability, string> = {
+        "file.read": "file.read · 文件读取",
+        "file.write": "file.write · 文件写入",
+        "file.delete": "file.delete · 文件删除",
+        command: "command · 执行命令",
+        network: "network · 联网抓取",
+        delegate: "delegate · 调度智能体",
+        ssh: "ssh · 远程主机",
+    };
+    const createGrant = () => {
+        if (!grantAccount.trim()) return;
+        onCreateGrant({
+            accountId: grantAccount.trim(),
+            capability: grantCapability,
+            expiresInDays: grantDays.trim()
+                ? Number(grantDays.trim())
+                : undefined,
+        });
+        setGrantAccount("");
+        setGrantDays("");
+    };
+    return (
+        <div
+            className="modal-backdrop"
+            role="presentation"
+            onMouseDown={onClose}
+        >
+            <section
+                className="settings-modal modal-surface"
+                role="dialog"
+                aria-modal="true"
+                aria-label="设置"
+                onMouseDown={(event) => event.stopPropagation()}
+            >
+                <header>
+                    <strong>设置</strong>
+                    <button title="关闭设置" onClick={onClose}>
+                        ×
+                    </button>
+                </header>
+                <nav className="settings-tabs">
+                    <button
+                        className={activeTab === "connection" ? "active" : ""}
+                        onClick={() => setActiveTab("connection")}
+                    >
+                        连接
+                    </button>
+                    <button
+                        className={activeTab === "models" ? "active" : ""}
+                        onClick={() => setActiveTab("models")}
+                    >
+                        模型
+                    </button>
+                    <button
+                        className={activeTab === "mcp" ? "active" : ""}
+                        onClick={() => setActiveTab("mcp")}
+                    >
+                        MCP
+                    </button>
+                    <button
+                        className={activeTab === "rules" ? "active" : ""}
+                        onClick={() => setActiveTab("rules")}
+                    >
+                        规则
+                    </button>
+                    <button
+                        className={activeTab === "account" ? "active" : ""}
+                        onClick={() => setActiveTab("account")}
+                    >
+                        账户
+                    </button>
+                    <button
+                        className={activeTab === "appearance" ? "active" : ""}
+                        onClick={() => setActiveTab("appearance")}
+                    >
+                        外观
+                    </button>
+                </nav>
+                <div className="settings-content">
+                    {activeTab === "connection" ? (
+                        <section>
+                            <label>基础服务</label>
+                            <strong>Project IDEA Cloud</strong>
+                            <span>https://shiroha-rin.world</span>
+                            <p>
+                                基础能力由客户端内置连接；知识库与扩展能力通过
+                                MCP 管理。
+                            </p>
+                            <label>本地 IDEA Agent 模型</label>
+                            <p>官方模型经由已认证服务端访问，自定义模型仍由本地直连。</p>
+                            <input value={localModel.baseUrl} onChange={(event) => setLocalModel({ ...localModel, baseUrl: event.target.value })} placeholder="https://your-local-model.example/v1" />
+                            <input value={localModel.model} onChange={(event) => setLocalModel({ ...localModel, model: event.target.value })} placeholder="模型名称" />
+                            <p>{localModel.official ? `当前官方模型：${localModel.displayName}` : "当前为自定义推理模型"}</p>
+                            <input type="password" value={localApiKey} onChange={(event) => setLocalApiKey(event.target.value)} placeholder="API Key（无 Key 可留空）" />
+                            <button className="secondary-button" onClick={() => void saveLocalModel()}>保存本地模型</button>
+                            {localModelNotice ? <span>{localModelNotice}</span> : null}
+                            <UpdateCard />
+                        </section>
+                    ) : null}
+                    {activeTab === "models" ? (
+                        <section>
+                            <label>本地推理模型</label>
+                            <p>切换只影响本地 IDEA Agent，线上 IDEA 使用服务端固定配置。</p>
+                            <select value={localModel.official ? localModel.id : "custom"} onChange={(event) => { const selected = officialModels.find((item) => item.id === event.target.value); if (selected) setLocalModel({ ...selected, configured: true, hasApiKey: localModel.hasApiKey }); }}>
+                                <option value="custom">自定义推理模型</option>
+                                {officialModels.map((item) => <option key={item.id} value={item.id}>{item.displayName}</option>)}
+                            </select>
+                            <button className="secondary-button" onClick={() => { setLocalModel({ id: `custom-${Date.now()}`, name: "", displayName: "", provider: "openai-compatible", baseUrl: "", model: "", configured: false, hasApiKey: false, official: false }); setLocalModelNotice("请填写新的 OpenAI-compatible 推理模型"); }}>添加推理模型</button>
+                            <input value={localModel.baseUrl} onChange={(event) => setLocalModel({ ...localModel, baseUrl: event.target.value })} placeholder="Base URL" />
+                            <input value={localModel.model} onChange={(event) => setLocalModel({ ...localModel, model: event.target.value })} placeholder="模型名称" />
+                            <input type="password" value={localApiKey} onChange={(event) => setLocalApiKey(event.target.value)} placeholder={localModel.hasApiKey ? "API Key 已保存，留空保持不变" : "API Key"} />
+                            <button className="primary-button" onClick={() => void saveLocalModel()}>保存并切换到此模型</button>
+                            {localModelNotice ? <span>{localModelNotice}</span> : null}
+                        </section>
+                    ) : null}
+                    {activeTab === "mcp" ? (
+                        <section>
+                            <label>本地 MCP 工具</label>
+                            <p>先保存 MCP 服务器配置，工具发现与授权稍后接入。</p>
+                            <input value={extensionName} onChange={(event) => setExtensionName(event.target.value)} placeholder="服务器名称" />
+                            <input value={extensionValue} onChange={(event) => setExtensionValue(event.target.value)} placeholder="服务器地址" />
+                            <button className="primary-button" onClick={() => { if (!extensionName.trim() || !extensionValue.trim()) return; void window.ideaDesktop?.saveLocalExtensions({ ...localExtensions, mcp: [...localExtensions.mcp, { name: extensionName.trim(), url: extensionValue.trim(), enabled: true }] }).then(setLocalExtensions); setExtensionName(""); setExtensionValue(""); }}>添加 MCP 工具服务器</button>
+                            {localExtensions.mcp.map((item) => <p key={`${item.name}-${item.url}`}>{item.name} · {item.url}</p>)}
+                        </section>
+                    ) : null}
+                    {activeTab === "rules" ? (
+                        <section>
+                            <label>本地 Agent 规则</label>
+                            <p>启用的规则会在本地 Agent 规则链路接入。</p>
+                            <input value={extensionName} onChange={(event) => setExtensionName(event.target.value)} placeholder="规则名称" />
+                            <textarea value={extensionValue} onChange={(event) => setExtensionValue(event.target.value)} placeholder="规则内容" rows={5} />
+                            <button className="primary-button" onClick={() => { if (!extensionName.trim() || !extensionValue.trim()) return; void window.ideaDesktop?.saveLocalExtensions({ ...localExtensions, rules: [...localExtensions.rules, { name: extensionName.trim(), content: extensionValue.trim(), enabled: true }] }).then(setLocalExtensions); setExtensionName(""); setExtensionValue(""); }}>添加规则</button>
+                            {localExtensions.rules.map((item) => <p key={item.name}>{item.name} · {item.enabled ? "已启用" : "已停用"}</p>)}
+                        </section>
+                    ) : null}
+                    {activeTab === "account" ? (
+                        <>
+                            <section>
+                                <label>
+                                    账号登录 <span>已登录</span>
+                                </label>
+                                <p>
+                                    当前设备 ID：
+                                    {serviceConfig.deviceId || "未生成"}
+                                </p>
+                                <button
+                                    className="secondary-button"
+                                    onClick={onSignOut}
+                                >
+                                    退出登录
+                                </button>
+                            </section>
+                            {isOwnerClient && serviceConfig.signedIn ? (
+                                <section>
+                                    <label>Owner 设备认证</label>
+                                    <p>
+                                        当前 Device ID：
+                                        {serviceConfig.deviceId || "未生成"}
+                                    </p>
+                                    {hasOwnerSession ? (
+                                        <div className="memory-manager">
+                                            <strong>设备列表</strong>
+                                            {ownerDevices.length ? (
+                                                ownerDevices.map((device) => (
+                                                    <article
+                                                        className="memory-row"
+                                                        key={
+                                                            device.owner_device_id
+                                                        }
+                                                    >
+                                                        <div>
+                                                            <strong>
+                                                                {
+                                                                    device.device_id
+                                                                }
+                                                            </strong>
+                                                            <p>
+                                                                状态：
+                                                                {device.status}{" "}
+                                                                · 最后活动：
+                                                                {device.last_seen_at
+                                                                    ? new Date(
+                                                                          device.last_seen_at *
+                                                                              1000,
+                                                                      ).toLocaleString()
+                                                                    : "暂无"}
+                                                            </p>
+                                                        </div>
+                                                        <div>
+                                                            {device.status ===
+                                                            "pending" ? (
+                                                                <button
+                                                                    onClick={() =>
+                                                                        onOwnerDevice(
+                                                                            device,
+                                                                            "approve",
+                                                                        )
+                                                                    }
+                                                                >
+                                                                    批准
+                                                                </button>
+                                                            ) : null}
+                                                            {device.status ===
+                                                            "approved" ? (
+                                                                <button
+                                                                    onClick={() =>
+                                                                        onOwnerDevice(
+                                                                            device,
+                                                                            "revoke",
+                                                                        )
+                                                                    }
+                                                                >
+                                                                    撤销
+                                                                </button>
+                                                            ) : null}
+                                                        </div>
+                                                    </article>
+                                                ))
+                                            ) : (
+                                                <p>暂无已关联设备。</p>
+                                            )}
+                                        </div>
+                                    ) : (
+                                        <p>
+                                            当前设备等待 Owner 批准。请在已获批
+                                            SRH 端批准后退出并重新登录。
+                                        </p>
+                                    )}
+                                </section>
+                            ) : null}
+                            {isOwnerClient && hasOwnerSession ? (
+                                <section>
+                                    <label>TRAE / MCP 自动化凭据</label>
+                                    <p>
+                                        凭据由已批准的 Owner
+                                        设备托管，可随时查看、复制或撤销。
+                                    </p>
+                                    <div className="memory-manager">
+                                        <div className="memory-form-row">
+                                            <button
+                                                className="primary-button"
+                                                onClick={() =>
+                                                    onIssueCredential("TRAE")
+                                                }
+                                            >
+                                                签发本设备 TRAE 凭据
+                                            </button>
+                                        </div>
+                                        {credentialNotice ? (
+                                            <p
+                                                className="login-status"
+                                                role="status"
+                                            >
+                                                {credentialNotice}
+                                            </p>
+                                        ) : null}
+                                        {issuedToken ? (
+                                            <article className="memory-row">
+                                                <div>
+                                                    <strong>当前凭据</strong>
+                                                    <p>{issuedToken}</p>
+                                                </div>
+                                            </article>
+                                        ) : null}
+                                        {credentials.length ? (
+                                            credentials.map((credential) => (
+                                                <article
+                                                    className="memory-row"
+                                                    key={
+                                                        credential.credential_id
+                                                    }
+                                                >
+                                                    <div>
+                                                        <strong>
+                                                            {
+                                                                credential.device_label
+                                                            }
+                                                        </strong>
+                                                        <p>
+                                                            {credential.capability.toUpperCase()}{" "}
+                                                            ·{" "}
+                                                            {credential.status}{" "}
+                                                            · 最后使用：
+                                                            {credential.last_used_at
+                                                                ? new Date(
+                                                                      credential.last_used_at *
+                                                                          1000,
+                                                                  ).toLocaleString()
+                                                                : "暂无"}
+                                                        </p>
+                                                    </div>
+                                                    {credential.status ===
+                                                    "active" ? (
+                                                        <div>
+                                                            <button
+                                                                onClick={() =>
+                                                                    onRecoverCredential(
+                                                                        credential,
+                                                                    )
+                                                                }
+                                                            >
+                                                                查看
+                                                            </button>
+                                                            <button
+                                                                onClick={() =>
+                                                                    onRevokeCredential(
+                                                                        credential,
+                                                                    )
+                                                                }
+                                                            >
+                                                                撤销
+                                                            </button>
+                                                        </div>
+                                                    ) : null}
+                                                </article>
+                                            ))
+                                        ) : (
+                                            <p>暂无自动设备凭据。</p>
+                                        )}
+                                    </div>
+                                </section>
+                            ) : null}
+                            {hasOwnerSession ? (
+                                <section>
+                                    <label>
+                                        工具操作审批
+                                        {approvals.pending.length ? (
+                                            <span>
+                                                {" "}
+                                                · {
+                                                    approvals.pending.length
+                                                }{" "}
+                                                待处理
+                                            </span>
+                                        ) : null}
+                                    </label>
+                                    <p>
+                                        IDEA
+                                        的删除文件、执行命令、联网抓取等高风险操作，需经你批准后才会真正执行。
+                                    </p>
+                                    <div className="memory-manager">
+                                        {approvals.pending.length ? (
+                                            approvals.pending.map(
+                                                (approval) => (
+                                                    <article
+                                                        className="memory-row"
+                                                        key={
+                                                            approval.approval_id
+                                                        }
+                                                    >
+                                                        <div>
+                                                            <strong>
+                                                                {
+                                                                    approval.tool_name
+                                                                }
+                                                            </strong>
+                                                            {renderApprovalSummary(
+                                                                approval.args_summary,
+                                                            )}
+                                                            <p>
+                                                                {new Date(
+                                                                    approval.requested_at *
+                                                                        1000,
+                                                                ).toLocaleString()}{" "}
+                                                                ·{" "}
+                                                                {
+                                                                    approval.agent_id
+                                                                }
+                                                            </p>
+                                                        </div>
+                                                        <div>
+                                                            <button
+                                                                className="approve-button"
+                                                                onClick={() =>
+                                                                    onApproveApproval(
+                                                                        approval,
+                                                                    )
+                                                                }
+                                                            >
+                                                                批准
+                                                            </button>
+                                                            <button
+                                                                onClick={() =>
+                                                                    onDenyApproval(
+                                                                        approval,
+                                                                    )
+                                                                }
+                                                            >
+                                                                拒绝
+                                                            </button>
+                                                        </div>
+                                                    </article>
+                                                ),
+                                            )
+                                        ) : (
+                                            <p>暂无待处理的工具审批请求。</p>
+                                        )}
+                                    </div>
+                                </section>
+                            ) : null}
+                            {hasOwnerSession ? (
+                                <section>
+                                    <label>
+                                        文件变更审查
+                                        {fileChanges.filter(
+                                            (item) => item.status === "pending",
+                                        ).length ? (
+                                            <span>
+                                                {" "}
+                                                ·{" "}
+                                                {
+                                                    fileChanges.filter(
+                                                        (item) =>
+                                                            item.status ===
+                                                            "pending",
+                                                    ).length
+                                                }{" "}
+                                                待确认
+                                            </span>
+                                        ) : null}
+                                    </label>
+                                    <p>
+                                        IDEA
+                                        修改的文件会进入待确认队列；对话可以继续，Owner
+                                        可随时确认或回滚。
+                                    </p>
+                                    <div className="memory-manager">
+                                        {fileChanges.filter(
+                                            (item) => item.status === "pending",
+                                        ).length ? (
+                                            fileChanges
+                                                .filter(
+                                                    (item) =>
+                                                        item.status ===
+                                                        "pending",
+                                                )
+                                                .map((change) => (
+                                                    <article
+                                                        className="memory-row"
+                                                        key={change.change_id}
+                                                    >
+                                                        <div>
+                                                            <strong>
+                                                                {
+                                                                    change.tool_name
+                                                                }{" "}
+                                                                ·{" "}
+                                                                {change.file_path
+                                                                    .split(
+                                                                        /[\\/]/,
+                                                                    )
+                                                                    .pop()}
+                                                            </strong>
+                                                            <p>
+                                                                {
+                                                                    change.file_path
+                                                                }
+                                                            </p>
+                                                            {renderApprovalSummary(
+                                                                change.diff_summary,
+                                                            )}
+                                                            <p>
+                                                                {new Date(
+                                                                    change.created_at *
+                                                                        1000,
+                                                                ).toLocaleString()}
+                                                            </p>
+                                                        </div>
+                                                        <div>
+                                                            <button
+                                                                className="approve-button"
+                                                                onClick={() =>
+                                                                    onAcceptChange(
+                                                                        change,
+                                                                    )
+                                                                }
+                                                            >
+                                                                确认
+                                                            </button>
+                                                            <button
+                                                                onClick={() =>
+                                                                    onRevertChange(
+                                                                        change,
+                                                                    )
+                                                                }
+                                                            >
+                                                                回滚
+                                                            </button>
+                                                        </div>
+                                                    </article>
+                                                ))
+                                        ) : (
+                                            <p>暂无待确认的文件变更。</p>
+                                        )}
+                                    </div>
+                                </section>
+                            ) : null}
+                            {hasOwnerSession ? (
+                                <section>
+                                    <label>工具权限授权</label>
+                                    <p>
+                                        为账号授予长期工具权限（免审批）；撤销或过期后恢复按需审批。
+                                    </p>
+                                    <div className="memory-manager">
+                                        <div className="memory-form-row">
+                                            <input
+                                                value={grantAccount}
+                                                onChange={(event) =>
+                                                    setGrantAccount(
+                                                        event.target.value,
+                                                    )
+                                                }
+                                                placeholder="账号 ID（account_id）"
+                                            />
+                                            <select
+                                                value={grantCapability}
+                                                onChange={(event) =>
+                                                    setGrantCapability(
+                                                        event.target
+                                                            .value as GrantCapability,
+                                                    )
+                                                }
+                                            >
+                                                {(
+                                                    Object.keys(
+                                                        capabilityLabels,
+                                                    ) as GrantCapability[]
+                                                ).map((cap) => (
+                                                    <option
+                                                        key={cap}
+                                                        value={cap}
+                                                    >
+                                                        {capabilityLabels[cap]}
+                                                    </option>
+                                                ))}
+                                            </select>
+                                        </div>
+                                        <div className="memory-form-row">
+                                            <input
+                                                value={grantDays}
+                                                onChange={(event) =>
+                                                    setGrantDays(
+                                                        event.target.value,
+                                                    )
+                                                }
+                                                placeholder="有效期（天，留空=永久）"
+                                            />
+                                            <button
+                                                className="primary-button"
+                                                disabled={!grantAccount.trim()}
+                                                onClick={createGrant}
+                                            >
+                                                授予权限
+                                            </button>
+                                        </div>
+                                        {grants.length ? (
+                                            grants.map((grant) => (
+                                                <article
+                                                    className="memory-row"
+                                                    key={grant.grant_id}
+                                                >
+                                                    <div>
+                                                        <strong>
+                                                            {grant.capability}
+                                                        </strong>
+                                                        <p>
+                                                            {grant.account_id} ·{" "}
+                                                            {grant.workspace ||
+                                                                "全部空间"}{" "}
+                                                            · {grant.status}
+                                                            {grant.expires_at
+                                                                ? ` · 至 ${new Date(grant.expires_at * 1000).toLocaleDateString()}`
+                                                                : ""}
+                                                        </p>
+                                                    </div>
+                                                    {grant.status ===
+                                                    "active" ? (
+                                                        <button
+                                                            onClick={() =>
+                                                                onRevokeGrant(
+                                                                    grant,
+                                                                )
+                                                            }
+                                                        >
+                                                            撤销
+                                                        </button>
+                                                    ) : null}
+                                                </article>
+                                            ))
+                                        ) : (
+                                            <p>暂无权限授权。</p>
+                                        )}
+                                    </div>
+                                </section>
+                            ) : null}
+                            {hasOwnerSession ? (
+                                <section>
+                                    <label>
+                                        操作审计{" "}
+                                        <button
+                                            className="inline-action"
+                                            onClick={onRefreshAudit}
+                                        >
+                                            刷新
+                                        </button>
+                                    </label>
+                                    <div className="audit-list">
+                                        {auditEvents
+                                            .slice(0, 40)
+                                            .map((event) => (
+                                                <div
+                                                    className="audit-row"
+                                                    key={event.event_id}
+                                                >
+                                                    <span className="audit-time">
+                                                        {new Date(
+                                                            event.occurred_at *
+                                                                1000,
+                                                        ).toLocaleString()}
+                                                    </span>
+                                                    <span className="audit-type">
+                                                        {event.event_type}
+                                                    </span>
+                                                    <span>
+                                                        {event.decision ?? ""}
+                                                        {event.reason_code
+                                                            ? ` · ${event.reason_code}`
+                                                            : ""}
+                                                    </span>
+                                                </div>
+                                            ))}
+                                    </div>
+                                </section>
+                            ) : null}
+                            {hasOwnerSession ? (
+                                <section>
+                                    <label>
+                                        Owner 私域记忆{" "}
+                                        <button
+                                            className="inline-action"
+                                            onClick={() =>
+                                                setShowMemoryPanel(
+                                                    (value) => !value,
+                                                )
+                                            }
+                                        >
+                                            {showMemoryPanel
+                                                ? "收起"
+                                                : `管理 ${memories.length}`}
+                                        </button>
+                                    </label>
+                                    {showMemoryPanel ? (
+                                        <div className="memory-manager">
+                                            <textarea
+                                                value={memoryContent}
+                                                onChange={(event) =>
+                                                    setMemoryContent(
+                                                        event.target.value,
+                                                    )
+                                                }
+                                                placeholder="保存需在其他设备延续的偏好、约定或项目上下文"
+                                            />
+                                            <div className="memory-form-row">
+                                                <input
+                                                    value={memoryCategory}
+                                                    onChange={(event) =>
+                                                        setMemoryCategory(
+                                                            event.target.value,
+                                                        )
+                                                    }
+                                                    placeholder="分类"
+                                                />
+                                                <select
+                                                    value={memoryScope}
+                                                    onChange={(event) =>
+                                                        setMemoryScope(
+                                                            event.target
+                                                                .value as
+                                                                | "personal"
+                                                                | "shared"
+                                                                | "owner",
+                                                        )
+                                                    }
+                                                >
+                                                    <option value="personal">
+                                                        个人
+                                                    </option>
+                                                    <option value="shared">
+                                                        当前空间共享
+                                                    </option>
+                                                    <option value="owner">
+                                                        Owner 私人
+                                                    </option>
+                                                </select>
+                                            </div>
+                                            <button
+                                                className="primary-button"
+                                                disabled={
+                                                    !memoryContent.trim() ||
+                                                    isSavingMemory
+                                                }
+                                                onClick={onSaveMemory}
+                                            >
+                                                {isSavingMemory
+                                                    ? "正在保存"
+                                                    : "确认保存记忆"}
+                                            </button>
+                                            {memories.map((memory) =>
+                                                editingMemory?.id ===
+                                                    memory.id && memoryDraft ? (
+                                                    <article
+                                                        className="memory-row memory-row-editing"
+                                                        key={memory.id}
+                                                    >
+                                                        <div className="memory-edit-fields">
+                                                            <input
+                                                                value={
+                                                                    memoryDraft.category
+                                                                }
+                                                                onChange={(
+                                                                    event,
+                                                                ) =>
+                                                                    setMemoryDraft(
+                                                                        {
+                                                                            ...memoryDraft,
+                                                                            category:
+                                                                                event
+                                                                                    .target
+                                                                                    .value,
+                                                                        },
+                                                                    )
+                                                                }
+                                                            />
+                                                            <textarea
+                                                                value={
+                                                                    memoryDraft.content
+                                                                }
+                                                                onChange={(
+                                                                    event,
+                                                                ) =>
+                                                                    setMemoryDraft(
+                                                                        {
+                                                                            ...memoryDraft,
+                                                                            content:
+                                                                                event
+                                                                                    .target
+                                                                                    .value,
+                                                                        },
+                                                                    )
+                                                                }
+                                                            />
+                                                        </div>
+                                                        <div className="memory-row-actions">
+                                                            <button
+                                                                className="approve-button"
+                                                                disabled={
+                                                                    !memoryDraft.category.trim() ||
+                                                                    !memoryDraft.content.trim()
+                                                                }
+                                                                onClick={async () => {
+                                                                    if (
+                                                                        await onUpdateMemory(
+                                                                            memoryDraft,
+                                                                        )
+                                                                    ) {
+                                                                        setEditingMemory(
+                                                                            null,
+                                                                        );
+                                                                        setMemoryDraft(
+                                                                            null,
+                                                                        );
+                                                                    }
+                                                                }}
+                                                            >
+                                                                保存
+                                                            </button>
+                                                            <button
+                                                                onClick={() => {
+                                                                    setEditingMemory(
+                                                                        null,
+                                                                    );
+                                                                    setMemoryDraft(
+                                                                        null,
+                                                                    );
+                                                                }}
+                                                            >
+                                                                取消
+                                                            </button>
+                                                        </div>
+                                                    </article>
+                                                ) : (
+                                                    <article
+                                                        className="memory-row"
+                                                        key={memory.id}
+                                                    >
+                                                        <div>
+                                                            <strong>
+                                                                {
+                                                                    memory.category
+                                                                }
+                                                            </strong>
+                                                            <p>
+                                                                {memory.content}
+                                                            </p>
+                                                            <small>
+                                                                修订版{" "}
+                                                                {
+                                                                    memory.revision
+                                                                }{" "}
+                                                                ·{" "}
+                                                                {new Date(
+                                                                    memory.updated_at *
+                                                                        1000,
+                                                                ).toLocaleString()}
+                                                            </small>
+                                                        </div>
+                                                        <div className="memory-row-actions">
+                                                            <button
+                                                                onClick={() => {
+                                                                    setEditingMemory(
+                                                                        {
+                                                                            id: memory.id,
+                                                                            revision:
+                                                                                memory.revision,
+                                                                        },
+                                                                    );
+                                                                    setMemoryDraft(
+                                                                        {
+                                                                            ...memory,
+                                                                        },
+                                                                    );
+                                                                }}
+                                                            >
+                                                                编辑
+                                                            </button>
+                                                            <button
+                                                                title="删除记忆"
+                                                                onClick={() =>
+                                                                    onRemoveMemory(
+                                                                        memory,
+                                                                    )
+                                                                }
+                                                            >
+                                                                ×
+                                                            </button>
+                                                        </div>
+                                                    </article>
+                                                ),
+                                            )}
+                                        </div>
+                                    ) : null}
+                                </section>
+                            ) : null}
+                        </>
+                    ) : null}
+                    {activeTab === "appearance" ? (
+                        <>
+                            <section>
+                                <label>显示模式</label>
+                                <div className="setting-segment">
+                                    <button
+                                        className={
+                                            theme === "light" ? "active" : ""
+                                        }
+                                        onClick={() => setTheme("light")}
+                                    >
+                                        亮色
+                                    </button>
+                                    <button
+                                        className={
+                                            theme === "dark" ? "active" : ""
+                                        }
+                                        onClick={() => setTheme("dark")}
+                                    >
+                                        暗色
+                                    </button>
+                                </div>
+                            </section>
+                            <section>
+                                <label>
+                                    界面字号 <span>{fontSize}px</span>
+                                </label>
+                                <input
+                                    type="range"
+                                    min="12"
+                                    max="17"
+                                    value={fontSize}
+                                    onChange={(event) =>
+                                        setFontSize(Number(event.target.value))
+                                    }
+                                />
+                            </section>
+                            <section>
+                                <label>工作区背景</label>
+                                <div className="background-options">
+                                    {(
+                                        [
+                                            "default",
+                                            "graphite",
+                                            "midnight",
+                                        ] as Background[]
+                                    ).map((item) => (
+                                        <button
+                                            key={item}
+                                            className={
+                                                background === item
+                                                    ? `active ${item}-bg`
+                                                    : `${item}-bg`
+                                            }
+                                            onClick={() => setBackground(item)}
+                                        >
+                                            {item === "default"
+                                                ? "默认"
+                                                : item === "graphite"
+                                                  ? "石墨"
+                                                  : "深夜"}
+                                        </button>
+                                    ))}
+                                </div>
+                            </section>
+                        </>
+                    ) : null}
+                </div>
+            </section>
+        </div>
+    );
 }
 
 function UpdateCard() {
-  const [status, setStatus] = useState<UpdateStatus>({ state: 'checked' })
-  const check = async () => { setStatus({ state: 'checked' }); const result = await window.ideaDesktop?.checkForUpdates(); if (result) setStatus(result) }
-  const install = async () => { if (!window.confirm('下载完成后将关闭客户端并安装更新，登录状态会保留。是否继续？')) return; setStatus({ state: 'downloading', update: status.update }); const result = await window.ideaDesktop?.installUpdate(); if (result) setStatus(result) }
-  useEffect(() => { void check() }, [])
-  return <section className="update-card"><div><label>客户端更新</label>{status.state === 'checked' ? <p>正在检查更新…</p> : null}{status.state === 'available' && status.update ? <><strong>发现 IDEA 更新 v{status.update.version}</strong><p className="update-notes">{status.update.releaseNotes}</p></> : null}{status.state === 'downloading' ? <p>正在下载更新…</p> : null}{status.state === 'downloaded' ? <p>更新安装程序已启动。</p> : null}{status.state === 'error' ? <p className="update-error">更新检查失败：{status.message ?? '请稍后重试'}</p> : null}</div><div className="update-actions">{status.state === 'available' ? <button className="primary-button" onClick={() => void install()}>下载并安装</button> : null}<button className="secondary-button" disabled={status.state === 'checked' || status.state === 'downloading'} onClick={() => void check()}>检查更新</button></div></section>
+    const [status, setStatus] = useState<UpdateStatus>({ state: "checked" });
+    const check = async () => {
+        setStatus({ state: "checked" });
+        const result = await window.ideaDesktop?.checkForUpdates();
+        if (result) setStatus(result);
+    };
+    const install = async () => {
+        if (
+            !window.confirm(
+                "下载完成后将关闭客户端并安装更新，登录状态会保留。是否继续？",
+            )
+        )
+            return;
+        setStatus({ state: "downloading", update: status.update });
+        const result = await window.ideaDesktop?.installUpdate();
+        if (result) setStatus(result);
+    };
+    useEffect(() => {
+        void check();
+    }, []);
+    return (
+        <section className="update-card">
+            <div>
+                <label>客户端更新</label>
+                {status.state === "checked" ? <p>正在检查更新…</p> : null}
+                {status.state === "available" && status.update ? (
+                    <>
+                        <strong>发现 IDEA 更新 v{status.update.version}</strong>
+                        <p className="update-notes">
+                            {status.update.releaseNotes}
+                        </p>
+                    </>
+                ) : null}
+                {status.state === "downloading" ? <p>正在下载更新…</p> : null}
+                {status.state === "downloaded" ? (
+                    <p>更新安装程序已启动。</p>
+                ) : null}
+                {status.state === "error" ? (
+                    <p className="update-error">
+                        更新检查失败：{status.message ?? "请稍后重试"}
+                    </p>
+                ) : null}
+            </div>
+            <div className="update-actions">
+                {status.state === "available" ? (
+                    <button
+                        className="primary-button"
+                        onClick={() => void install()}
+                    >
+                        下载并安装
+                    </button>
+                ) : null}
+                <button
+                    className="secondary-button"
+                    disabled={
+                        status.state === "checked" ||
+                        status.state === "downloading"
+                    }
+                    onClick={() => void check()}
+                >
+                    检查更新
+                </button>
+            </div>
+        </section>
+    );
 }
-type SettingsModalProps = { activeTab: SettingsTab; setActiveTab: (tab: SettingsTab) => void; onClose: () => void; onSignOut: () => void; serviceConfig: ServiceConfig; theme: Theme; setTheme: (theme: Theme) => void; fontSize: number; setFontSize: (size: number) => void; background: Background; setBackground: (background: Background) => void; isOwnerClient: boolean; hasOwnerSession: boolean; memories: MemoryRecord[]; showMemoryPanel: boolean; setShowMemoryPanel: (value: boolean | ((current: boolean) => boolean)) => void; memoryContent: string; setMemoryContent: (value: string) => void; memoryCategory: string; setMemoryCategory: (value: string) => void; memoryScope: 'personal' | 'shared' | 'owner'; setMemoryScope: (value: 'personal' | 'shared' | 'owner') => void; onSaveMemory: () => void; onRemoveMemory: (memory: MemoryRecord) => void; onUpdateMemory: (memory: MemoryRecord) => Promise<boolean>; isSavingMemory: boolean; ownerDevices: OwnerDevice[]; onOwnerDevice: (device: OwnerDevice, action: 'approve' | 'revoke') => void; credentials: AutomatedDeviceCredential[]; onIssueCredential: (target: 'IDEA' | 'TRAE') => void; onRecoverCredential: (credential: AutomatedDeviceCredential) => void; onRevokeCredential: (credential: AutomatedDeviceCredential) => void; issuedToken: string | null; credentialNotice: string | null; approvals: ApprovalSnapshot; onApproveApproval: (approval: ToolApproval) => void; onDenyApproval: (approval: ToolApproval) => void; grants: CapabilityGrant[]; onCreateGrant: (request: { accountId: string; capability: GrantCapability; expiresInDays?: number }) => void; onRevokeGrant: (grant: CapabilityGrant) => void; fileChanges: FileChange[]; onAcceptChange: (change: FileChange) => void; onRevertChange: (change: FileChange) => void; auditEvents: AuditEvent[]; onRefreshAudit: () => void }
+type SettingsModalProps = {
+    activeTab: SettingsTab;
+    setActiveTab: (tab: SettingsTab) => void;
+    onClose: () => void;
+    onSignOut: () => void;
+    serviceConfig: ServiceConfig;
+    theme: Theme;
+    setTheme: (theme: Theme) => void;
+    fontSize: number;
+    setFontSize: (size: number) => void;
+    background: Background;
+    setBackground: (background: Background) => void;
+    isOwnerClient: boolean;
+    hasOwnerSession: boolean;
+    memories: MemoryRecord[];
+    showMemoryPanel: boolean;
+    setShowMemoryPanel: (
+        value: boolean | ((current: boolean) => boolean),
+    ) => void;
+    memoryContent: string;
+    setMemoryContent: (value: string) => void;
+    memoryCategory: string;
+    setMemoryCategory: (value: string) => void;
+    memoryScope: "personal" | "shared" | "owner";
+    setMemoryScope: (value: "personal" | "shared" | "owner") => void;
+    onSaveMemory: () => void;
+    onRemoveMemory: (memory: MemoryRecord) => void;
+    onUpdateMemory: (memory: MemoryRecord) => Promise<boolean>;
+    isSavingMemory: boolean;
+    ownerDevices: OwnerDevice[];
+    onOwnerDevice: (device: OwnerDevice, action: "approve" | "revoke") => void;
+    credentials: AutomatedDeviceCredential[];
+    onIssueCredential: (target: "IDEA" | "TRAE") => void;
+    onRecoverCredential: (credential: AutomatedDeviceCredential) => void;
+    onRevokeCredential: (credential: AutomatedDeviceCredential) => void;
+    issuedToken: string | null;
+    credentialNotice: string | null;
+    approvals: ApprovalSnapshot;
+    onApproveApproval: (approval: ToolApproval) => void;
+    onDenyApproval: (approval: ToolApproval) => void;
+    grants: CapabilityGrant[];
+    onCreateGrant: (request: {
+        accountId: string;
+        capability: GrantCapability;
+        expiresInDays?: number;
+    }) => void;
+    onRevokeGrant: (grant: CapabilityGrant) => void;
+    fileChanges: FileChange[];
+    onAcceptChange: (change: FileChange) => void;
+    onRevertChange: (change: FileChange) => void;
+    auditEvents: AuditEvent[];
+    onRefreshAudit: () => void;
+};
+
+function computeFieldControl(field: ComputeSchemaField, value: string, onChange: (next: string) => void) {
+    if (field.type === "select") {
+        return <select value={value} onChange={(event) => onChange(event.target.value)}><option value="">请选择</option>{field.options?.map((option) => { const item = typeof option === "string" ? { value: option, label: option } : option; return <option key={item.value} value={item.value}>{item.label}</option> })}</select>;
+    }
+    if (field.type === "switch") {
+        return <input type="checkbox" checked={value === "true"} onChange={(event) => onChange(event.target.checked ? "true" : "false")} />;
+    }
+    return <textarea value={value} placeholder={field.description} onChange={(event) => onChange(event.target.value)} />;
+}
+
+function ComputeMarketplace() {
+    const [view, setView] = useState<"methods" | "queue">("methods");
+    const [methods, setMethods] = useState<ComputeMethodDefinition[]>([]);
+    const [selected, setSelected] = useState<ComputeMethodDefinition | null>(null);
+    const [message, setMessage] = useState("");
+    const [input, setInput] = useState<Record<string, string>>({});
+    const [job, setJob] = useState<ComputeJob | null>(null);
+    const [jobEvents, setJobEvents] = useState<ComputeJobEvent[]>([]);
+    const [result, setResult] = useState<ComputeJobResult | null>(null);
+    const [submitting, setSubmitting] = useState(false);
+    useEffect(() => { void computeApi.listMethods().then(setMethods); }, []);
+    useEffect(() => { setInput({}); setJob(null); setJobEvents([]); setResult(null); setMessage(""); }, [selected?.id]);
+
+    const running = job?.status === "queued" || job?.status === "running";
+
+    async function refresh(jobId: string): Promise<ComputeJob> {
+        const [next, events] = await Promise.all([computeApi.getJob(jobId), computeApi.listJobEvents(jobId)]);
+        setJob(next); setJobEvents(events);
+        if (next.status === "completed") setResult(await computeApi.getJobResult(jobId));
+        return next;
+    }
+
+    // 任务由 Electron 主进程的子进程执行，界面按固定间隔轮询状态与事件；
+    // 进入终态后停止轮询，并在完成时取回结果引用。
+    useEffect(() => {
+        if (!job || (job.status !== "queued" && job.status !== "running")) return;
+        const jobId = job.id;
+        let stopped = false;
+        const timer = setInterval(() => {
+            void refresh(jobId).then((next) => {
+                if (stopped) return;
+                if (next.status === "failed") setMessage(`任务失败：${next.error ?? "未知原因"}`);
+                if (next.status === "completed") setMessage("工作流执行完成，结果文件已写出。");
+            }).catch((error) => { if (!stopped) setMessage(error instanceof Error ? error.message : "任务状态读取失败") });
+        }, 1_500);
+        return () => { stopped = true; clearInterval(timer); };
+    }, [job?.id, job?.status]);
+
+    async function submit() {
+        if (!selected) return;
+        setSubmitting(true); setMessage(""); setResult(null);
+        try {
+            const createdJob = await computeApi.createJob(selected.id, input);
+            setJob(createdJob);
+            setJobEvents(await computeApi.listJobEvents(createdJob.id));
+            setMessage(`任务 ${createdJob.id} 已提交，正在执行。`);
+        } catch (error) {
+            setMessage(error instanceof Error ? error.message : "创建任务失败");
+        } finally { setSubmitting(false); }
+    }
+
+    async function cancel() {
+        if (!job) return;
+        try {
+            const next = await computeApi.cancelJob(job.id);
+            setJob(next);
+            setJobEvents(await computeApi.listJobEvents(job.id));
+            setMessage(next.status === "cancelled" ? "任务已取消。若已开始写出，输出路径上可能残留未写完的文件。" : `任务当前状态：${next.status}`);
+        } catch (error) {
+            setMessage(error instanceof Error ? error.message : "取消任务失败");
+        }
+    }
+    async function openResult(target: "report" | "output") {
+        if (!job) return;
+        try {
+            const opened = await computeApi.openJobResult(job.id, target);
+            setMessage(`已打开：${opened.path}`);
+        } catch (error) {
+            setMessage(error instanceof Error ? error.message : "打开结果失败");
+        }
+    }
+    const summary = (result?.outcome as { summary?: Record<string, number> } | undefined)?.summary;
+    const retention = summary && summary.total_reads > 0 ? summary.output_reads / summary.total_reads : null;
+    const executable = selected ? LOCALLY_EXECUTABLE_METHOD_IDS.includes(selected.id) : false;
+    return <section className="compute-marketplace">
+        <header><span className="runtime-eyebrow">BIO COMPUTE MARKETPLACE</span><h1>生物计算方法广场</h1><p>统一发现、配置与调用生物计算服务。当前只有 fastp 预处理工作流接通了真实执行链路，其余方法仍只是调用契约。</p><nav className="compute-view-tabs" aria-label="生物计算页面"><button className={view === "methods" ? "active" : ""} onClick={() => setView("methods")}>方法广场</button><button className={view === "queue" ? "active" : ""} onClick={() => setView("queue")}>工作队列组装</button></nav></header>
+        {view === "queue" ? <WorkflowQueue /> : <div className="compute-grid">
+            <div className="compute-method-list">{methods.map((method) => <button key={method.id} className={selected?.id === method.id ? "active" : ""} onClick={() => setSelected(method)}><strong>{method.name}</strong><small>{method.category} · {method.provider}</small><span>{method.status}</span></button>)}</div>
+            {selected ? <article className="compute-method-detail">
+                <h2>{selected.name}</h2>
+                <p>{selected.description}</p>
+                <div className="compute-input-form">{selected.inputSchema.map((field) => <label key={field.name}>{field.label}{computeFieldControl(field, input[field.name] ?? field.defaultValue ?? "", (next) => setInput((current) => ({ ...current, [field.name]: next })))}</label>)}</div>
+                <dl><dt>版本</dt><dd>{selected.version}</dd><dt>执行方式</dt><dd>{selected.executionMode}</dd><dt>输出</dt><dd>{selected.outputDescription}</dd></dl>
+                <button disabled={submitting || !executable} onClick={() => void submit()}>{submitting ? "提交中…" : "创建调用任务"}</button>
+                {!executable ? <p className="compute-notice">该方法目前只登记了调用契约，尚未接通真实执行链路，提交会被拒绝。当前可执行的是 fastp 预处理工作流。</p> : null}
+                {job ? <>
+                    <p className="compute-job-status">任务状态：{job.status}{job.progress > 0 ? ` · 进度 ${job.progress}%` : ""}</p>
+                    {job.error ? <p className="compute-notice">{job.error}</p> : null}
+                    <div className="compute-job-events">{jobEvents.map((event) => <div key={event.id}>{event.message}<small>{event.createdAt}</small></div>)}</div>
+                    <button className="compute-cancel-button" disabled={!running} onClick={() => void cancel()}>取消任务</button>
+                </> : null}
+                {result?.status === "available" ? <div className="compute-job-events">
+                    <strong>结果</strong>
+                    {result.outputs?.length ? <div>输出文件<small>{result.outputs.join("、")}</small></div> : null}
+                    {result.html ? <div>HTML 报告<small>{result.html}</small></div> : null}
+                    {result.log ? <div>运行日志<small>{result.log}</small></div> : null}
+                    {summary ? <div>读入/写出 reads<small>{summary.total_reads} → {summary.output_reads}{retention === null ? "" : `（保留 ${(retention * 100).toFixed(2)}%）`}</small></div> : null}
+                    <div>
+                        {result.html ? <button onClick={() => void openResult("report")}>打开 HTML 报告</button> : null}
+                        {result.outputs?.length ? <button className="compute-cancel-button" onClick={() => void openResult("output")}>显示输出文件位置</button> : null}
+                    </div>
+                </div> : null}
+                {message ? <p className="compute-notice">{message}</p> : null}
+            </article> : <div className="compute-empty">选择一个方法查看接口信息</div>}
+        </div>}
+    </section>;
+}
+
+function LiteraturePanel() {
+    const [items, setItems] = useState<LiteraturePaper[]>([]);
+    const [total, setTotal] = useState(0);
+    const [direction, setDirection] = useState("");
+    const [directionDraft, setDirectionDraft] = useState("");
+    const [editingDirection, setEditingDirection] = useState(false);
+    const [loading, setLoading] = useState(true);
+    const [refreshing, setRefreshing] = useState(false);
+    const [collecting, setCollecting] = useState(false);
+    const [savingDirection, setSavingDirection] = useState(false);
+    const [downloadingId, setDownloadingId] = useState<string | null>(null);
+    const [notice, setNotice] = useState("");
+    const [error, setError] = useState("");
+
+    const load = useCallback(async (initial = false) => {
+        if (initial) setLoading(true); else setRefreshing(true);
+        setError("");
+        try {
+            const [result, profile] = await Promise.all([
+                window.ideaDesktop?.listLiterature(50, 0),
+                window.ideaDesktop?.getLiteratureResearchDirection(),
+            ]);
+            if (!result || !profile) throw new Error("文献服务不可用");
+            setItems(result.items); setTotal(result.total); setDirection(profile.content ?? "");
+            setDirectionDraft(profile.content ?? "");
+        } catch (reason) {
+            setError(reason instanceof Error ? reason.message : "文献加载失败");
+        } finally { setLoading(false); setRefreshing(false); }
+    }, []);
+    useEffect(() => { void load(true); }, [load]);
+    async function collect() {
+        setCollecting(true); setError(""); setNotice("");
+        try {
+            const result = await window.ideaDesktop?.collectLiterature();
+            if (!result) throw new Error("采集服务不可用");
+            setNotice(result.reason === "no_research_direction" ? "未设置检索方向，本次未更新索引" : `索引更新完成：新增 ${result.count} 条${result.skipped ? `，跳过已收录 ${result.skipped} 条` : ""}`);
+            await load();
+        }
+        catch (reason) { setError(reason instanceof Error ? reason.message : "采集失败"); }
+        finally { setCollecting(false); }
+    }
+    async function saveDirection() {
+        setSavingDirection(true); setError("");
+        try { const result = await window.ideaDesktop?.saveLiteratureResearchDirection(directionDraft); if (!result) throw new Error("研究方向保存服务不可用"); setDirection(result.content ?? directionDraft.trim()); setDirectionDraft(result.content ?? directionDraft.trim()); setEditingDirection(false); setNotice("研究方向已保存"); }
+        catch (reason) { setError(reason instanceof Error ? reason.message : "研究方向保存失败"); }
+        finally { setSavingDirection(false); }
+    }
+    async function download(item: LiteraturePaper) {
+        setDownloadingId(item.literature_id); setError(""); setNotice("");
+        try { const result = await window.ideaDesktop?.downloadLiterature(item.literature_id); if (!result) throw new Error("下载服务不可用"); setNotice(result.canceled ? "已取消保存" : result.saved ? `已保存至 ${result.path}` : "下载未保存"); }
+        catch (reason) { setError(reason instanceof Error ? reason.message : "下载失败"); }
+        finally { setDownloadingId(null); }
+    }
+    return <main className="literature-panel">
+        <header className="literature-header"><div><span className="runtime-eyebrow">LITERATURE DESK</span><h1>学术文献</h1><p>共 {total} 条索引 · 每日 09:00（UTC+8）自动更新</p></div><div className="literature-actions"><button className="secondary-button" disabled={refreshing || loading} onClick={() => void load()}>↻ 刷新</button><button className="primary-button" disabled={collecting} onClick={() => void collect()}>{collecting ? "更新中…" : "立即更新"}</button></div></header>
+        <section className="literature-direction"><div><strong>检索方向</strong>{editingDirection ? <textarea value={directionDraft} onChange={(event) => setDirectionDraft(event.target.value)} rows={3} placeholder="输入用于文献检索的研究方向或主题" /> : <p>{direction || "尚未设置检索方向"}</p>}</div>{editingDirection ? <div className="literature-direction-actions"><button className="primary-button" disabled={savingDirection} onClick={() => void saveDirection()}>{savingDirection ? "保存中…" : "保存"}</button><button className="secondary-button" onClick={() => { setDirectionDraft(direction); setEditingDirection(false); }}>取消</button></div> : <button className="secondary-button" onClick={() => setEditingDirection(true)}>编辑</button>}</section>
+        {notice ? <div className="literature-notice">{notice}</div> : null}{error ? <div className="literature-error">{error}<button className="inline-action" onClick={() => void load()}>重试</button></div> : null}
+        {loading ? <div className="literature-state">正在加载文献…</div> : error && !items.length ? <div className="literature-state">无法加载文献</div> : !items.length ? <div className="literature-state"><strong>暂无文献</strong><span>设置检索方向后点“立即更新”，或等每日 09:00 的自动更新。</span></div> : <div className="literature-list">{items.map((item) => <article className="literature-item" key={item.literature_id}><div className="literature-item-main"><h2>{item.title}</h2><div className="literature-meta"><span>{item.authors.length ? item.authors.join("、") : "作者未提供"}</span><span>{item.venue || item.source || "来源未提供"}</span><span>{item.date || "日期未提供"}</span>{item.url ? <a className="literature-source-link" href={item.url} target="_blank" rel="noreferrer">来源链接</a> : null}</div><p>{item.abstract || "暂无摘要"}</p></div><div className="literature-item-side"><strong>{item.score === null ? (item.authority === null ? "—" : item.authority.toFixed(2)) : item.score.toFixed(2)}</strong><small>{item.score === null ? "来源权威度" : "相关性"}</small><button className="secondary-button" disabled={downloadingId === item.literature_id} onClick={() => void download(item)}>{downloadingId === item.literature_id ? "下载中…" : "下载 PDF"}</button></div></article>)}</div>}
+    </main>;
+}
 
 export default function App() {
-  const [mode, setMode] = useState<Mode>('work')
-  const [workspace, setWorkspace] = useState('')
-  const [tree, setTree] = useState<FileTreeEntry[]>([])
-  const [openFile, setOpenFile] = useState<OpenFile | null>(null)
-  const [editorView, setEditorView] = useState<'edit' | 'preview' | 'split'>('edit')
-  const [status, setStatus] = useState('离线模式 · 本地文件可用')
-  const [serviceState, setServiceState] = useState<ServiceState>('unconfigured')
-  const [serviceConfig, setServiceConfig] = useState<ServiceConfig>({ serverUrl: '', spaceId: '', deviceId: '', signedIn: false })
-  const [emailInput, setEmailInput] = useState('')
-  const [passwordInput, setPasswordInput] = useState('')
-  const [isSigningIn, setIsSigningIn] = useState(false)
-  const [authReady, setAuthReady] = useState(false)
-  const [chatInput, setChatInput] = useState('')
-  const [contextBlocks, setContextBlocks] = useState<ContextBlock[]>([])
-  const [modelKey, setModelKey] = useState<ModelKey>('gpt')
-  const [chatMessages, setChatMessages] = useState<ChatMessage[]>(INITIAL_MESSAGES)
-  const [conversationId, setConversationId] = useState<string | undefined>()
-  const [isSending, setIsSending] = useState(false)
-  const [conversations, setConversations] = useState<ConversationSummary[]>([])
-  const [tasks, setTasks] = useState<TaskSummary[]>([])
-  const [runtime, setRuntime] = useState<RuntimeSnapshot | null>(null)
-  const [pendingHandoffs, setPendingHandoffs] = useState<TaskHandoff[]>([])
-  const [selectedRun, setSelectedRun] = useState<RunSummary | null>(null)
-  const [isLoadingRun, setIsLoadingRun] = useState(false)
-  const [memories, setMemories] = useState<MemoryRecord[]>([])
-  const [ownerDevices, setOwnerDevices] = useState<OwnerDevice[]>([])
-  const [credentials, setCredentials] = useState<AutomatedDeviceCredential[]>([])
-  const [approvals, setApprovals] = useState<ApprovalSnapshot>({ pending: [], recent: [] })
-  const [grants, setGrants] = useState<CapabilityGrant[]>([])
-  const [fileChanges, setFileChanges] = useState<FileChange[]>([])
-  const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([])
-  const syncCursorRef = useRef(0)
-  const activeStreamMessageIdRef = useRef<number | null>(null)
-  const [issuedToken, setIssuedToken] = useState<string | null>(null)
-  const [credentialNotice, setCredentialNotice] = useState<string | null>(null)
-  const [showMemoryPanel, setShowMemoryPanel] = useState(false)
-  const [memoryContent, setMemoryContent] = useState('')
-  const [memoryCategory, setMemoryCategory] = useState('general')
-  const [memoryScope, setMemoryScope] = useState<'personal' | 'shared' | 'owner'>('personal')
-  const [isSavingMemory, setIsSavingMemory] = useState(false)
-  const [showSettings, setShowSettings] = useState(false)
-  const [settingsTab, setSettingsTab] = useState<SettingsTab>('connection')
-  const [headerMenu, setHeaderMenu] = useState<'file' | 'edit' | 'view' | 'window' | 'help' | null>(null)
-  const [theme, setTheme] = useState<Theme>('dark')
-  const [fontSize, setFontSize] = useState(13)
-  const [background, setBackground] = useState<Background>('default')
-  const [showMarketplace, setShowMarketplace] = useState(false)
-  const [marketplaceTab, setMarketplaceTab] = useState<'discovered' | 'enabled'>('discovered')
-  const [pluginSearch, setPluginSearch] = useState('')
-  const [enabledPlugins, setEnabledPlugins] = useState<string[]>(() => PLUGINS.filter((plugin) => plugin.enabledByDefault).map((plugin) => plugin.id))
-  const [showFileSearch, setShowFileSearch] = useState(false)
-  const [fileSearch, setFileSearch] = useState('')
-  const [executionLines, setExecutionLines] = useState<ExecutionLine[]>([])
-  const [executionSessionId, setExecutionSessionId] = useState<string | null>(null)
-  const isDirty = Boolean(openFile && openFile.content !== openFile.savedContent)
-  const hasOwnerSession = isOwnerClient && serviceConfig.route === 'owner_idea'
-  const workspaceName = workspace ? workspace.split('\\').pop() ?? workspace : '未选择工作区'
-  const flattenedFiles = useMemo(() => { const result: FileTreeEntry[] = []; const walk = (nodes: FileTreeEntry[]) => nodes.forEach((node) => { if (node.kind === 'file') result.push(node); else walk(node.children ?? []) }); walk(tree); return result }, [tree])
-  const filteredPlugins = useMemo(() => PLUGINS.filter((plugin) => (marketplaceTab === 'enabled' ? enabledPlugins.includes(plugin.id) : true) && `${plugin.name} ${plugin.description}`.toLowerCase().includes(pluginSearch.toLowerCase())), [enabledPlugins, marketplaceTab, pluginSearch])
-
-  const openSettings = () => { setSettingsTab('connection'); setShowSettings(true); setHeaderMenu(null) }
-  useEffect(() => { void refreshTree() }, [workspace])
-  useEffect(() => { void loadServiceConfig() }, [])
-  useEffect(() => window.ideaDesktop?.onExecutionOutput((event) => {
-    setExecutionSessionId((current) => {
-      if (current !== event.sessionId) return current
-      setExecutionLines((lines) => [...lines, { stream: event.stream, content: event.content }].slice(-500))
-      return event.terminal ? null : current
-    })
-  }), [])
-  useEffect(() => window.ideaDesktop?.onChatStreamEvent((event) => {
-    const messageId = activeStreamMessageIdRef.current
-    if (messageId === null) return
-    const content = typeof event.payload.content === 'string' ? event.payload.content : ''
-    const toolName = typeof event.payload.name === 'string' ? event.payload.name : '工具'
-    const streamStatus = event.type === 'run.started' ? '正在生成回复' : event.type === 'tool.started' ? `${toolName} 正在执行` : event.type === 'tool.completed' ? `${toolName} 已完成` : event.type === 'run.completed' ? undefined : event.type === 'run.failed' ? '运行失败' : undefined
-    setChatMessages((messages) => messages.map((message) => message.id !== messageId ? message : {
-      ...message,
-      content: event.type === 'model.text.delta' ? message.content + content : message.content,
-      streamStatus,
-    }))
-  }), [])
-  useEffect(() => {
-    if (!serviceConfig.signedIn || serviceState !== 'online') return
-    const timer = setInterval(() => { void pollSyncEvents(); void window.ideaDesktop?.heartbeatRuntime().catch(() => undefined) }, 20_000)
-    return () => clearInterval(timer)
-  }, [serviceConfig.signedIn, serviceState])
-
-  async function refreshTree() { if (!workspace) { setTree([]); return } try { setTree(await window.ideaDesktop?.readWorkspaceTree(workspace) ?? []); setStatus('文件树已更新') } catch (reason) { setStatus(reason instanceof Error ? reason.message : '无法读取工作区') } }
-  async function loadServiceConfig() { try { const config = await window.ideaDesktop?.getServiceConfig(); if (!config) return; setServiceConfig(config); if (config.signedIn) await checkService(config) } finally { setAuthReady(true) } }
-  async function checkService(config = serviceConfig): Promise<boolean> { if (!config.serverUrl || !config.signedIn) { setServiceState('unconfigured'); return false } setServiceState('checking'); try { const health = await window.ideaDesktop?.testService(); if (!health || health.status !== 'healthy') throw new Error('服务健康检查失败'); await window.ideaDesktop?.registerRuntime(); setServiceState('online'); void refreshRemoteState(config); return true } catch (reason) { setServiceState((reason instanceof Error && reason.message.includes('401')) ? 'unauthorized' : 'error'); setStatus(reason instanceof Error ? reason.message : '服务不可用'); return false } }
-  async function refreshRemoteState(config = serviceConfig) { if (!config.serverUrl || !config.signedIn) return; try { const [nextConversations, nextTasks, nextRuntime, nextHandoffs, nextMemories] = await Promise.all([window.ideaDesktop?.listConversations(), window.ideaDesktop?.listTasks(), window.ideaDesktop?.getRuntimeSnapshot(), window.ideaDesktop?.listPendingHandoffs(), (isOwnerClient && config.route === 'owner_idea') ? window.ideaDesktop?.listMemories?.() : Promise.resolve([])]); setConversations(nextConversations ?? []); setTasks(nextTasks ?? []); setRuntime(nextRuntime ?? null); setPendingHandoffs(nextHandoffs ?? []); setMemories(nextMemories ?? []); if (isOwnerClient && config.route === 'owner_idea') { setOwnerDevices(await window.ideaDesktop?.listOwnerDevices?.() ?? []); setCredentials(await window.ideaDesktop?.listOwnerCredentials?.() ?? []); setApprovals(await window.ideaDesktop?.listOwnerApprovals?.() ?? { pending: [], recent: [] }); setGrants(await window.ideaDesktop?.listOwnerGrants?.() ?? []); setFileChanges(await window.ideaDesktop?.listOwnerFileChanges?.() ?? []); setAuditEvents(await window.ideaDesktop?.listAuditEvents?.() ?? []) } } catch (reason) { setStatus(reason instanceof Error ? `同步失败：${reason.message}` : '同步失败') } }
-  async function pollSyncEvents() { try { const snapshot = await window.ideaDesktop?.getSyncEvents(syncCursorRef.current); if (!snapshot) return; syncCursorRef.current = snapshot.next_cursor; if (!snapshot.events.length) return; const requested = snapshot.events.filter((event) => event.event_type === 'approval.requested').length; const refreshRuntime = snapshot.events.some((event) => ['runtime.updated', 'agent_run.created', 'agent_run.completed', 'agent_run.failed', 'task.created', 'task.deleted', 'handoff.created', 'handoff.accepted', 'handoff.running', 'handoff.completed', 'handoff.failed', 'handoff.cancelled', 'approval.requested', 'approval.decided'].includes(event.event_type)); if (refreshRuntime) await refreshRemoteState(); if (requested) setStatus(`收到 ${requested} 个新的工具审批请求`) } catch { /* 后台轮询失败静默处理 */ } }
-  async function saveServiceSettings() { try { const config = await window.ideaDesktop?.saveServiceConfig({ spaceId: serviceConfig.spaceId }); if (!config) return; setServiceConfig(config); if (config.signedIn) await checkService(config); setStatus('服务设置已保存') } catch (reason) { setStatus(reason instanceof Error ? reason.message : '无法保存服务设置') } }
-  async function signInWithPassword() { if (!emailInput.trim() || !passwordInput || isSigningIn) return; try { await saveServiceSettings(); setIsSigningIn(true); await window.ideaDesktop?.passwordLogin(emailInput.trim(), passwordInput); const config = await window.ideaDesktop?.getServiceConfig(); if (!config || !await checkService(config)) throw new Error('服务会话验证失败'); setServiceConfig(config); setPasswordInput(''); setStatus('已登录') } catch (reason) { setServiceState('unauthorized'); setStatus(reason instanceof Error ? reason.message : '登录失败') } finally { setIsSigningIn(false) } }
-  async function signOut() { await window.ideaDesktop?.logout(); const config = await window.ideaDesktop?.getServiceConfig(); if (config) setServiceConfig(config); setMemories([]); setOwnerDevices([]); setServiceState('unconfigured'); setStatus('已退出在线账户') }
-  async function chooseWorkspace() { const selected = await window.ideaDesktop?.chooseWorkspace(); if (selected) { setWorkspace(selected); setOpenFile(null) } }
-  async function openLocalFile(file: FileTreeEntry) { try { const result = await window.ideaDesktop?.readFile(workspace, file.path); if (result) { setOpenFile({ ...result, savedContent: result.content }); setEditorView('edit'); setStatus(`已打开 ${result.name}`); setShowFileSearch(false) } } catch (reason) { setStatus(reason instanceof Error ? reason.message : '无法打开文件') } }
-  async function createFile() { if (!workspace) { setStatus('请先选择工作区'); return } const relativePath = window.prompt('输入相对文件名（例如 src/new-file.ts）'); if (!relativePath?.trim()) return; try { const result = await window.ideaDesktop?.createFile(workspace, relativePath.trim()); if (result) { await refreshTree(); await openLocalFile({ path: result.path, name: result.name, kind: 'file' }) } } catch (reason) { setStatus(reason instanceof Error ? reason.message : '无法创建文件') } }
-  async function saveCurrentFile() { if (!openFile) return; try { await window.ideaDesktop?.saveFile(workspace, openFile.path, openFile.content); setOpenFile((file) => file ? { ...file, savedContent: file.content } : null); setStatus(`已保存 ${openFile.name}`); void refreshTree() } catch (reason) { setStatus(reason instanceof Error ? reason.message : '保存失败') } }
-  const updateOpenFile = useCallback((content: string) => setOpenFile((file) => file ? { ...file, content } : null), [])
-  function closeCurrentFile() { if (isDirty && !window.confirm('当前文件尚未保存，确定关闭吗？')) return; setOpenFile(null); setExecutionLines([]); setExecutionSessionId(null) }
-  function addCurrentFileContext() { if (!openFile) { setStatus('请先打开要添加的文件'); return } setContextBlocks((blocks) => blocks.some((block) => block.path === openFile.path) ? blocks : [...blocks, { path: openFile.path, name: openFile.name, content: openFile.content }]); setStatus(`已添加 ${openFile.name} 到本次上下文`) }
-  function removeContextBlock(path: string) { setContextBlocks((blocks) => blocks.filter((block) => block.path !== path)) }
-  function citeCurrentFile() { if (!openFile) return; addCurrentFileContext(); setMode('work') }
-  async function startExecution(runMode: 'run' | 'debug') { if (!openFile || executionSessionId) return; const plugin = languagePluginForFile(openFile.name); if (!plugin || !enabledPlugins.includes(plugin.id)) { setStatus('当前文件没有可用的运行插件'); return } if (isDirty) await saveCurrentFile(); try { setExecutionLines([{ stream: 'system', content: `${runMode === 'debug' ? '调试' : '运行'} ${openFile.name}\n` }]); const result = await window.ideaDesktop?.startExecution(workspace, openFile.path, runMode); if (result) setExecutionSessionId(result.sessionId) } catch (reason) { setStatus(reason instanceof Error ? reason.message : '无法启动执行') } }
-  async function stopExecution() { if (!executionSessionId) return; await window.ideaDesktop?.stopExecution(executionSessionId); setStatus('已请求停止执行') }
-  async function executeHandoff(handoff: TaskHandoff) { if (!workspace) { setStatus('请先选择交接任务对应的本地工作区'); return } if (executionSessionId || !handoff.has_execution_manifest) return; if (!window.confirm('将只执行服务端批准的工作区内单文件任务。确认继续吗？')) return; try { setExecutionLines([{ stream: 'system', content: '正在领取已批准的本地交接任务。\n' }]); const result = await window.ideaDesktop?.executeHandoff(handoff.id, workspace); if (!result) throw new Error('交接执行服务不可用'); setExecutionSessionId(result.sessionId); setPendingHandoffs((items) => items.filter((item) => item.id !== handoff.id)); setStatus('交接任务已开始执行') } catch (reason) { setStatus(reason instanceof Error ? reason.message : '无法执行交接任务'); void refreshRemoteState() } }
-  function togglePlugin(pluginId: string) { setEnabledPlugins((items) => items.includes(pluginId) ? items.filter((item) => item !== pluginId) : [...items, pluginId]) }
-  async function saveMemory() { if (!memoryContent.trim() || isSavingMemory) return; try { setIsSavingMemory(true); const memory = await window.ideaDesktop?.createMemory?.({ scope: memoryScope, category: memoryCategory.trim() || 'general', content: memoryContent.trim() }); if (!memory) throw new Error('记忆保存服务不可用'); setMemories((items) => [memory, ...items]); setMemoryContent('') } catch (reason) { setStatus(reason instanceof Error ? reason.message : '记忆保存失败') } finally { setIsSavingMemory(false) } }
-  async function updateMemory(memory: MemoryRecord): Promise<boolean> { try { const updated = await window.ideaDesktop?.updateMemory?.({ id: memory.id, revision: memory.revision, category: memory.category.trim(), content: memory.content.trim() }); if (!updated) throw new Error('记忆更新服务不可用'); setMemories((items) => items.map((item) => item.id === updated.id ? updated : item)); setStatus('记忆已更新'); return true } catch (reason) { const message = reason instanceof Error ? reason.message : '记忆更新失败'; setStatus(message); window.alert(message); return false } }
-  async function removeMemory(memory: MemoryRecord) { if (!window.confirm('确认删除这条记忆吗？')) return; try { await window.ideaDesktop?.deleteMemory?.({ id: memory.id, revision: memory.revision }); setMemories((items) => items.filter((item) => item.id !== memory.id)) } catch (reason) { setStatus(reason instanceof Error ? reason.message : '记忆删除失败') } }
-  async function updateOwnerDevice(device: OwnerDevice, action: 'approve' | 'revoke') { if (action === 'approve') await window.ideaDesktop?.approveOwnerDevice?.(device.owner_device_id); else if (window.confirm('确认撤销该设备吗？')) await window.ideaDesktop?.revokeOwnerDevice?.(device.owner_device_id); setOwnerDevices(await window.ideaDesktop?.listOwnerDevices?.() ?? []) }
-  async function decideApproval(approval: ToolApproval, action: 'approve' | 'deny') { if (action === 'approve' && !window.confirm(`批准删除/执行高风险操作「${approval.tool_name}」吗？\n${approval.args_summary}`)) return; try { if (action === 'approve') await window.ideaDesktop?.approveOwnerApproval?.(approval.approval_id); else await window.ideaDesktop?.denyOwnerApproval?.(approval.approval_id); setApprovals(await window.ideaDesktop?.listOwnerApprovals?.() ?? { pending: [], recent: [] }); setStatus(action === 'approve' ? `已批准 ${approval.tool_name}` : `已拒绝 ${approval.tool_name}`) } catch (reason) { setStatus(reason instanceof Error ? reason.message : '审批处理失败') } }
-  async function createGrant(request: { accountId: string; capability: GrantCapability; expiresInDays?: number }) { try { const grant = await window.ideaDesktop?.createOwnerGrant?.(request); if (!grant) throw new Error('权限授权服务不可用'); setGrants(await window.ideaDesktop?.listOwnerGrants?.() ?? []); setStatus(`已授予 ${grant.capability} 给 ${grant.account_id}`) } catch (reason) { setStatus(reason instanceof Error ? reason.message : '权限授权创建失败') } }
-  async function revokeGrant(grant: CapabilityGrant) { if (!window.confirm(`确认撤销 ${grant.account_id} 的 ${grant.capability} 授权吗？`)) return; try { await window.ideaDesktop?.revokeOwnerGrant?.(grant.grant_id); setGrants(await window.ideaDesktop?.listOwnerGrants?.() ?? []); setStatus('权限授权已撤销') } catch (reason) { setStatus(reason instanceof Error ? reason.message : '权限授权撤销失败') } }
-  async function acceptChange(change: FileChange) { try { await window.ideaDesktop?.acceptOwnerFileChange?.(change.change_id); setFileChanges(await window.ideaDesktop?.listOwnerFileChanges?.() ?? []); setStatus('已确认文件变更') } catch (reason) { setStatus(reason instanceof Error ? reason.message : '变更确认失败') } }
-  async function revertChange(change: FileChange) { if (!window.confirm(`确认回滚对 ${change.file_path} 的修改吗？`)) return; try { await window.ideaDesktop?.revertOwnerFileChange?.(change.change_id); setFileChanges(await window.ideaDesktop?.listOwnerFileChanges?.() ?? []); setStatus(`已回滚 ${change.file_path}`) } catch (reason) { setStatus(reason instanceof Error ? reason.message : '变更回滚失败') } }
-  async function refreshAudit() { try { setAuditEvents(await window.ideaDesktop?.listAuditEvents?.() ?? []); setStatus('审计记录已刷新') } catch (reason) { setStatus(reason instanceof Error ? reason.message : '审计记录刷新失败') } }
-  async function openRunDetail(runId: string) { try { setIsLoadingRun(true); const detail = await window.ideaDesktop?.getRunDetail(runId); if (!detail) throw new Error('运行详情服务不可用'); setSelectedRun(detail) } catch (reason) { setStatus(reason instanceof Error ? reason.message : '无法读取运行详情') } finally { setIsLoadingRun(false) } }
-  async function issueCredential(target: 'IDEA' | 'TRAE') {
-    try {
-      setCredentialNotice(`正在签发本设备 ${target} 凭据…`)
-      setIssuedToken(null)
-      const credential = await window.ideaDesktop?.issueOwnerCredential?.({ deviceLabel: `${target} · ${serviceConfig.deviceId}`, capability: 'idea' })
-      if (!credential) throw new Error('自动设备凭据服务不可用')
-      setIssuedToken(credential.token)
-      setCredentials((items) => [credential, ...items])
-      setCredentialNotice(`本设备 ${target} 凭据已签发，Token 仅显示一次。`)
-    } catch (reason) {
-      const message = reason instanceof Error ? reason.message : '自动设备凭据签发失败'
-      setCredentialNotice(`签发失败：${message}`)
-      setStatus(message)
+    if (new URLSearchParams(window.location.search).get("surface") === "service-test") return <ServiceTestPage />;
+    function reportLoginRecoveryDebug(
+        msg: string,
+        data: Record<string, unknown>,
+    ): void {
+        void fetch("http://127.0.0.1:7777/event", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                sessionId: "login-recovery",
+                runId: "pre-fix",
+                hypothesisId: "C",
+                location: "src/App.tsx",
+                msg: `[DEBUG] ${msg}`,
+                data,
+                ts: Date.now(),
+            }),
+        }).catch(() => undefined);
     }
-  }
-  async function recoverCredential(credential: AutomatedDeviceCredential) { try { setCredentialNotice(`正在读取 ${credential.device_label} 的托管凭据…`); const result = await window.ideaDesktop?.recoverOwnerCredential?.(credential.credential_id); if (!result) throw new Error('自动设备凭据读取服务不可用'); setIssuedToken(result.token); setCredentialNotice(`${credential.device_label} 的凭据已读取。`); } catch (reason) { const message = reason instanceof Error ? reason.message : '自动设备凭据读取失败'; setCredentialNotice(`读取失败：${message}`); setStatus(message); } }
-  async function revokeCredential(credential: AutomatedDeviceCredential) { if (!window.confirm(`确认撤销 ${credential.device_label} 吗？`)) return; try { await window.ideaDesktop?.revokeOwnerCredential?.(credential.credential_id); setCredentials((items) => items.map((item) => item.credential_id === credential.credential_id ? { ...item, status: 'revoked', revoked_at: Date.now() / 1000 } : item)) } catch (reason) { setStatus(reason instanceof Error ? reason.message : '自动设备凭据撤销失败') } }
-  async function sendChatMessage() { const content = chatInput.trim(); if (!content || isSending) return; const messageId = Date.now(); const assistantMessageId = messageId + 1; const blocksForRequest = contextBlocks.map((block) => openFile?.path === block.path ? { ...block, content: openFile.content, name: openFile.name } : block); setChatMessages((messages) => [...messages, { id: messageId, role: 'user', content }, { id: assistantMessageId, role: 'assistant', content: '', modelKey, streamStatus: '正在连接 IDEA' }]); setChatInput(''); setContextBlocks([]); setIsSending(true); activeStreamMessageIdRef.current = assistantMessageId; try { const result = await window.ideaDesktop?.sendChatStream({ agentId: 'idea', message: content, contextBlocks: blocksForRequest, conversationId, useMemory: true, modelKey }); if (!result) throw new Error('在线服务不可用'); setConversationId(result.conversationId); setChatMessages((messages) => messages.map((message) => message.id !== assistantMessageId ? message : { ...message, content: result.reply, modelKey: result.modelKey, streamStatus: undefined })); void refreshRemoteState() } catch (reason) { const failure = `在线服务暂不可用：${reason instanceof Error ? reason.message : '未知错误'}`; setChatMessages((messages) => messages.map((message) => message.id !== assistantMessageId ? message : { ...message, content: message.content || failure, streamStatus: undefined })) } finally { activeStreamMessageIdRef.current = null; setIsSending(false) } }
-  async function openRemoteConversation(id: string) { try { const conversation = await window.ideaDesktop?.getConversation(id); if (!conversation) return; setConversationId(id); setChatMessages(conversation.messages.map((message, index) => ({ id: Number(message.timestamp * 1000) + index, role: message.role, content: message.content }))) } catch (reason) { setStatus(reason instanceof Error ? reason.message : '无法读取会话') } }
-  async function deleteConversation(id: string) { if (!window.confirm('确认删除这段会话吗？关联任务也会被删除。')) return; try { const remove = window.ideaDesktop?.deleteConversation; if (!remove) throw new Error('当前客户端不支持删除会话，请更新客户端'); await remove(id); if (conversationId === id) { setConversationId(undefined); setChatMessages([]) } await refreshRemoteState(); setStatus('会话已删除') } catch (reason) { const message = reason instanceof Error ? reason.message : '会话删除失败'; setStatus(message); window.alert(message) } }
-  async function deleteTask(id: string) { if (!window.confirm('确认删除这个任务吗？')) return; try { await window.ideaDesktop?.deleteTask(id); setTasks((items) => items.filter((item) => item.id !== id)); setStatus('任务已删除'); void refreshRemoteState() } catch (reason) { setStatus(reason instanceof Error ? reason.message : '任务删除失败') } }
-  const menu = <nav className="app-menu-bar" aria-label="应用菜单">{(['file', 'edit', 'view', 'window', 'help'] as const).map((item) => <button key={item} className={headerMenu === item ? 'active' : ''} onClick={() => setHeaderMenu((current) => current === item ? null : item)}>{item[0].toUpperCase() + item.slice(1)}</button>)}{headerMenu ? <div className="app-menu-popover">{headerMenu === 'file' ? <><button onClick={() => { void chooseWorkspace(); setHeaderMenu(null) }}>打开工作区</button><button onClick={() => { void createFile(); setHeaderMenu(null) }}>新建文件</button><button disabled={!isDirty} onClick={() => { void saveCurrentFile(); setHeaderMenu(null) }}>保存</button></> : headerMenu === 'view' ? <button onClick={openSettings}>设置</button> : headerMenu === 'help' ? <button onClick={() => { setShowMarketplace(true); setHeaderMenu(null) }}>插件市场</button> : <button disabled>{headerMenu === 'edit' ? '请在编辑器中修改当前文件' : '切换工作模式'}</button>}</div> : null}</nav>
-  const projectBar = <header className="ide-projectbar"><div className="project-picker"><span className="project-mark">I</span><strong>IDEA</strong></div>{menu}<span className="brand-divider">/</span><span>{mode === 'ide' ? '编辑器' : mode === 'work' ? '工作台' : mode === 'knowledge' ? '知识库' : 'N.E.K.O'}</span><nav className="mode-switch"><button className={mode === 'ide' ? 'active' : ''} onClick={() => setMode('ide')}>IDE</button><button className={mode === 'work' ? 'active' : ''} onClick={() => setMode('work')}>WORK</button><button className={mode === 'knowledge' ? 'active' : ''} onClick={() => setMode('knowledge')}>RAG</button><button className={mode === 'neko' ? 'active' : ''} onClick={() => setMode('neko')}>N.E.K.O</button></nav><div className="project-actions"><span>{workspaceName}</span><button title="运行" disabled={!openFile || Boolean(executionSessionId)} onClick={() => void startExecution('run')}>▷</button><button title="调试" disabled={!openFile || Boolean(executionSessionId)} onClick={() => void startExecution('debug')}>☼</button><button title="设置" onClick={openSettings}>⚙</button></div></header>
-  if (!authReady || !serviceConfig.signedIn || serviceState !== 'online') {
-    return <LoginPage emailInput={emailInput} setEmailInput={setEmailInput} passwordInput={passwordInput} setPasswordInput={setPasswordInput} onSignIn={() => void signInWithPassword()} isSigningIn={isSigningIn} isRestoring={!authReady} status={status} />
-  }
+    const [mode, setMode] = useState<Mode>("work");
+    const [workspace, setWorkspace] = useState("");
+    const [tree, setTree] = useState<FileTreeEntry[]>([]);
+    const [openFile, setOpenFile] = useState<OpenFile | null>(null);
+    const [editorView, setEditorView] = useState<"edit" | "preview" | "split">(
+        "edit",
+    );
+    const [status, setStatus] = useState("离线模式 · 本地文件可用");
+    const [serviceState, setServiceState] =
+        useState<ServiceState>("unconfigured");
+    const [serviceConfig, setServiceConfig] = useState<ServiceConfig>({
+        serverUrl: "",
+        spaceId: "",
+        deviceId: "",
+        signedIn: false,
+    });
+    const [emailInput, setEmailInput] = useState("");
+    const [passwordInput, setPasswordInput] = useState("");
+    const [isSigningIn, setIsSigningIn] = useState(false);
+    const [auth, dispatchAuth] = useReducer(authReducer, {
+        phase: "signed_out",
+    });
+    const authRequestIdRef = useRef(0);
+    const [chatInput, setChatInput] = useState("");
+    const [contextBlocks, setContextBlocks] = useState<ContextBlock[]>([]);
+    const [modelKey, setModelKey] = useState<ModelKey>("gpt-5.6-terra");
+    const [chatTarget, setChatTarget] = useState<ChatTarget>("local");
+    const [, setLocalModel] = useState<LocalModelConfig | null>(null);
+    const [chatMessages, setChatMessages] =
+        useState<ChatMessage[]>(INITIAL_MESSAGES);
+    const [conversationId, setConversationId] = useState<string | undefined>();
+    const [isSending, setIsSending] = useState(false);
+    const [conversations, setConversations] = useState<ConversationSummary[]>(
+        [],
+    );
+    const [tasks, setTasks] = useState<TaskSummary[]>([]);
+    const [runtime, setRuntime] = useState<RuntimeSnapshot | null>(null);
+    const [pendingHandoffs, setPendingHandoffs] = useState<TaskHandoff[]>([]);
+    const [selectedRun, setSelectedRun] = useState<RunSummary | null>(null);
+    const [isLoadingRun, setIsLoadingRun] = useState(false);
+    const [memories, setMemories] = useState<MemoryRecord[]>([]);
+    const [ownerDevices, setOwnerDevices] = useState<OwnerDevice[]>([]);
+    const [credentials, setCredentials] = useState<AutomatedDeviceCredential[]>(
+        [],
+    );
+    const [approvals, setApprovals] = useState<ApprovalSnapshot>({
+        pending: [],
+        recent: [],
+    });
+    const [grants, setGrants] = useState<CapabilityGrant[]>([]);
+    const [fileChanges, setFileChanges] = useState<FileChange[]>([]);
+    const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([]);
+    const syncCursorRef = useRef(0);
+    const activeStreamMessageIdRef = useRef<number | null>(null);
+    const [issuedToken, setIssuedToken] = useState<string | null>(null);
+    const [credentialNotice, setCredentialNotice] = useState<string | null>(
+        null,
+    );
+    const [showMemoryPanel, setShowMemoryPanel] = useState(false);
+    const [memoryContent, setMemoryContent] = useState("");
+    const [memoryCategory, setMemoryCategory] = useState("general");
+    const [memoryScope, setMemoryScope] = useState<
+        "personal" | "shared" | "owner"
+    >("personal");
+    const [isSavingMemory, setIsSavingMemory] = useState(false);
+    const [showSettings, setShowSettings] = useState(false);
+    const [settingsTab, setSettingsTab] = useState<SettingsTab>("connection");
+    const [headerMenu, setHeaderMenu] = useState<
+        "file" | "edit" | "view" | "window" | "help" | null
+    >(null);
+    const [theme, setTheme] = useState<Theme>("dark");
+    const [fontSize, setFontSize] = useState(13);
+    const [background, setBackground] = useState<Background>("default");
+    useEffect(() => {
+        void window.ideaDesktop?.getLocalModelConfig().then(setLocalModel);
+    }, []);
+    const [showMarketplace, setShowMarketplace] = useState(false);
+    const [marketplaceTab, setMarketplaceTab] = useState<
+        "discovered" | "enabled"
+    >("discovered");
+    const [pluginSearch, setPluginSearch] = useState("");
+    const [enabledPlugins, setEnabledPlugins] = useState<string[]>(() =>
+        PLUGINS.filter((plugin) => plugin.enabledByDefault).map(
+            (plugin) => plugin.id,
+        ),
+    );
+    const [showFileSearch, setShowFileSearch] = useState(false);
+    const [fileSearch, setFileSearch] = useState("");
+    const [executionLines, setExecutionLines] = useState<ExecutionLine[]>([]);
+    const [executionSessionId, setExecutionSessionId] = useState<string | null>(
+        null,
+    );
+    const isDirty = Boolean(
+        openFile && openFile.content !== openFile.savedContent,
+    );
+    const hasOwnerSession =
+        isOwnerClient && serviceConfig.route === "owner_idea";
+    const workspaceName = workspace
+        ? (workspace.split("\\").pop() ?? workspace)
+        : "未选择工作区";
+    const flattenedFiles = useMemo(() => {
+        const result: FileTreeEntry[] = [];
+        const walk = (nodes: FileTreeEntry[]) =>
+            nodes.forEach((node) => {
+                if (node.kind === "file") result.push(node);
+                else walk(node.children ?? []);
+            });
+        walk(tree);
+        return result;
+    }, [tree]);
+    const filteredPlugins = useMemo(
+        () =>
+            PLUGINS.filter(
+                (plugin) =>
+                    (marketplaceTab === "enabled"
+                        ? enabledPlugins.includes(plugin.id)
+                        : true) &&
+                    `${plugin.name} ${plugin.description}`
+                        .toLowerCase()
+                        .includes(pluginSearch.toLowerCase()),
+            ),
+        [enabledPlugins, marketplaceTab, pluginSearch],
+    );
 
-  return <div className={`offline-app theme-${theme} background-${background}`} style={{ '--ui-font-size': `${fontSize}px` } as CSSProperties}><div className="app-body"><aside className="activity-rail"><button className={mode === 'ide' ? 'rail-button active' : 'rail-button'} title="资源管理器" onClick={() => setMode('ide')}>▤</button><button className={mode === 'work' ? 'rail-button active' : 'rail-button'} title="工作台" onClick={() => setMode('work')}>✓</button><button className={mode === 'knowledge' ? 'rail-button active' : 'rail-button'} title="知识库" onClick={() => setMode('knowledge')}>⌕</button><button className={mode === 'neko' ? 'rail-button active' : 'rail-button'} title="N.E.K.O 角色" onClick={() => setMode('neko')}>◉</button><button className={showMarketplace ? 'rail-button active' : 'rail-button'} title="插件市场" onClick={() => setShowMarketplace(true)}>▦</button><div className="rail-spacer" /><button className="rail-button" title="打开工作区" onClick={() => void chooseWorkspace()}>⌂</button><button className={showSettings ? 'rail-button active' : 'rail-button'} title="设置" onClick={openSettings}>⚙</button></aside><section className="app-shell">{projectBar}{mode === 'knowledge' ? <KnowledgeBasePanel /> : mode === 'ide' ? <main className="ide-layout"><div className="ide-workbench"><aside className="explorer-panel"><div className="panel-title"><span>项目</span><div className="panel-tools"><button title="新建文件" onClick={() => void createFile()}>□</button><button title="刷新文件树" onClick={() => void refreshTree()}>↻</button></div></div><button className="workspace-button" title={workspace} onClick={() => void chooseWorkspace()}><span className="chevron">⌄</span>{workspaceName}</button><div className="tree-list">{tree.map((node) => <FileNode key={node.path} node={node} selectedPath={openFile?.path} onOpen={(file) => void openLocalFile(file)} />)}</div><div className="explorer-footer"><button onClick={() => setShowFileSearch(true)}>⌕ 搜索文件</button><span className="disabled-action" title="版本控制尚未接入">⑂ 源代码管理未接入</span></div></aside><section className="editor-panel">{openFile ? <><div className="editor-tabs"><div className="file-tab"><span>{openFile.name.endsWith('.md') ? 'M' : '·'}</span>{openFile.name}{isDirty ? ' •' : ''}<button title="关闭文件" onClick={closeCurrentFile}>×</button></div><div className="editor-actions">{openFile.name.endsWith('.md') ? <><button className={editorView === 'edit' ? 'active' : ''} onClick={() => setEditorView('edit')}>源码</button><button className={editorView === 'split' ? 'active' : ''} onClick={() => setEditorView('split')}>同步预览</button><button className={editorView === 'preview' ? 'active' : ''} onClick={() => setEditorView('preview')}>预览</button></> : null}<button onClick={citeCurrentFile}>引用到对话</button><button className="save-button" disabled={!isDirty} onClick={() => void saveCurrentFile()}>保存</button></div></div><div className="editor-breadcrumb"><span>{workspaceName}</span><b>›</b><span>{openFile.name}</span></div><div className="editor-content">{editorView === 'split' && openFile.name.endsWith('.md') ? <div className="markdown-split"><CodeEditor value={openFile.content} onChange={updateOpenFile} fileName={openFile.name} enabled onSave={() => void saveCurrentFile()} /><article className="markdown-preview" dangerouslySetInnerHTML={{ __html: renderMarkdown(openFile.content) }} /></div> : editorView === 'preview' && openFile.name.endsWith('.md') ? <article className="markdown-preview" dangerouslySetInnerHTML={{ __html: renderMarkdown(openFile.content) }} /> : <CodeEditor value={openFile.content} onChange={updateOpenFile} fileName={openFile.name} enabled onSave={() => void saveCurrentFile()} />}</div>{executionLines.length ? <section className="execution-panel"><header><strong>输出</strong><div>{executionSessionId ? <button onClick={() => void stopExecution()}>停止</button> : null}<button onClick={() => setExecutionLines([])}>清除</button></div></header><pre>{executionLines.map((line, index) => <span className={line.stream} key={`${index}-${line.content}`}>{line.content}</span>)}</pre></section> : null}</> : <div className="empty-editor"><div className="empty-symbol">I</div><h1>IDEA 编辑器</h1><p>从左侧项目树打开本地文件。</p><button onClick={() => void chooseWorkspace()}>打开项目</button></div>}</section><TaskSidebar workspace={workspace} workspaceName={workspaceName} onChooseWorkspace={() => void chooseWorkspace()} onCreateTask={() => { setMode('work'); setChatMessages([]); setConversationId(undefined) }} onOpenConversation={(id) => void openRemoteConversation(id)} onDeleteConversation={(id) => void deleteConversation(id)} onDeleteTask={(id) => void deleteTask(id)} onRefresh={() => void refreshRemoteState()} newTask={false} serviceState={serviceState} conversations={conversations} tasks={tasks} syncLabel="本地" /></div><footer className="ide-statusbar"><span>⌘ {status}</span><span>{openFile ? `${openFile.content.split('\n').length} 行` : '未打开文件'}</span><span>{isDirty ? '未保存更改' : 'UTF-8'}</span></footer></main> : mode === 'neko' ? <NekoPanel /> : <main className="work-layout"><TaskSidebar workspace={workspace} workspaceName={workspaceName} onChooseWorkspace={() => void chooseWorkspace()} onCreateTask={() => { setChatMessages([]); setConversationId(undefined) }} onOpenConversation={(id) => void openRemoteConversation(id)} onDeleteConversation={(id) => void deleteConversation(id)} onDeleteTask={(id) => void deleteTask(id)} onRefresh={() => void refreshRemoteState()} onSwitchToIde={() => setMode('ide')} showWorkspace={false} newTask={false} serviceState={serviceState} conversations={conversations} tasks={tasks} syncLabel="本地" /><section className="chat-panel"><div className="chat-scroll"><div className="chat-thread"><RuntimeOverview serviceState={serviceState} workspace={workspace} executionSessionId={executionSessionId} runtime={runtime} isOwner={hasOwnerSession} />{pendingHandoffs.filter((handoff) => handoff.has_execution_manifest && handoff.status === 'pending').length ? <section className="runtime-run-list" aria-label="待执行交接任务">{pendingHandoffs.filter((handoff) => handoff.has_execution_manifest && handoff.status === 'pending').map((handoff) => <button className="runtime-run running" disabled={Boolean(executionSessionId)} key={handoff.id} onClick={() => void executeHandoff(handoff)} title="领取并运行已批准的工作区内单文件任务"><span>待领取</span><strong>{handoff.agent_id}</strong><small>已批准的本地单文件任务</small></button>)}</section> : null}{pendingHandoffs.filter((handoff) => handoff.status === 'accepted' || handoff.status === 'running').length ? <section className="runtime-run-list" aria-label="需要人工确认的恢复任务">{pendingHandoffs.filter((handoff) => handoff.status === 'accepted' || handoff.status === 'running').map((handoff) => <div className="runtime-run running" key={handoff.id}><span>需要人工确认</span><strong>{handoff.agent_id}</strong><small>{handoff.status === 'running' ? '服务端记录为执行中，未自动重放' : '已领取但尚未开始，未自动重放'}</small></div>)}</section> : null}{runtime?.recent_runs.length ? <section className="runtime-run-list" aria-label="最近运行">{runtime.recent_runs.slice(0, 4).map((run) => <button className={`runtime-run ${run.status}`} disabled={isLoadingRun} key={run.id} onClick={() => void openRunDetail(run.id)} title="查看运行详情"><span>{run.status === 'running' ? '执行中' : run.status === 'completed' ? '已完成' : '失败'}</span><strong>{run.agent_id}</strong><small>{run.summary || run.error || `模型：${run.model_key}`}</small></button>)}</section> : null}{chatMessages.map((message) => <article className={`chat-message ${message.role}`} key={message.id}>{message.role === 'assistant' ? <div className="assistant-avatar">I</div> : null}<div className="message-content">{message.content ? message.content.split('\n').map((line, index) => <p key={index}>{line || <br />}</p>) : null}{message.streamStatus ? <small className="chat-stream-status">{message.streamStatus}</small> : null}</div></article>)}</div></div><ChatComposer input={chatInput} setInput={setChatInput} onSend={sendChatMessage} isSending={isSending} disabledAttachment contextBlocks={contextBlocks} onAddCurrentFile={addCurrentFileContext} onRemoveContextBlock={removeContextBlock} modelKey={modelKey} setModelKey={setModelKey} /></section><footer className="work-statusbar"><span>⌘ {status}</span><span>{serviceState === 'online' ? '在线服务' : '本地工作区'}</span>{isOwnerClient && hasOwnerSession && approvals.pending.length ? <button className="approval-badge" title="打开设置查看审批" onClick={openSettings}>⚠ {approvals.pending.length} 个审批待处理</button> : null}<span>智能体：IDEA</span></footer></main>}</section></div>{selectedRun ? <RunDetailModal run={selectedRun} onClose={() => setSelectedRun(null)} /> : null}{showSettings ? <SettingsModal activeTab={settingsTab} setActiveTab={setSettingsTab} onClose={() => setShowSettings(false)} onSignOut={() => void signOut()} serviceConfig={serviceConfig} theme={theme} setTheme={setTheme} fontSize={fontSize} setFontSize={setFontSize} background={background} setBackground={setBackground} isOwnerClient={isOwnerClient} hasOwnerSession={hasOwnerSession} memories={memories} showMemoryPanel={showMemoryPanel} setShowMemoryPanel={setShowMemoryPanel} memoryContent={memoryContent} setMemoryContent={setMemoryContent} memoryCategory={memoryCategory} setMemoryCategory={setMemoryCategory} memoryScope={memoryScope} setMemoryScope={setMemoryScope} onSaveMemory={() => void saveMemory()} onRemoveMemory={(memory) => void removeMemory(memory)} onUpdateMemory={updateMemory} isSavingMemory={isSavingMemory} ownerDevices={ownerDevices} onOwnerDevice={(device, action) => void updateOwnerDevice(device, action)} credentials={credentials} onIssueCredential={(capability) => void issueCredential(capability)} onRecoverCredential={(credential) => void recoverCredential(credential)} onRevokeCredential={(credential) => void revokeCredential(credential)} issuedToken={issuedToken} credentialNotice={credentialNotice} approvals={approvals} onApproveApproval={(approval) => void decideApproval(approval, 'approve')} onDenyApproval={(approval) => void decideApproval(approval, 'deny')} grants={grants} onCreateGrant={(request) => void createGrant(request)} onRevokeGrant={(grant) => void revokeGrant(grant)} fileChanges={fileChanges} onAcceptChange={(change) => void acceptChange(change)} onRevertChange={(change) => void revertChange(change)} auditEvents={auditEvents} onRefreshAudit={() => void refreshAudit()} /> : null}{showFileSearch ? <div className="modal-backdrop" onMouseDown={() => setShowFileSearch(false)}><section className="file-search-modal" onMouseDown={(event) => event.stopPropagation()}><header><strong>搜索文件</strong><button onClick={() => setShowFileSearch(false)}>×</button></header><input autoFocus value={fileSearch} onChange={(event) => setFileSearch(event.target.value)} placeholder="按文件名筛选" /> <div>{flattenedFiles.filter((file) => file.name.toLowerCase().includes(fileSearch.toLowerCase())).map((file) => <button key={file.path} onClick={() => void openLocalFile(file)}>{file.name}</button>)}</div></section></div> : null}{showMarketplace ? <aside className="marketplace-panel"><header><div><strong>插件市场</strong><small>本地插件</small></div><button onClick={() => setShowMarketplace(false)}>×</button></header><div className="marketplace-search">⌕ <input value={pluginSearch} onChange={(event) => setPluginSearch(event.target.value)} placeholder="搜索插件" /></div><nav><button className={marketplaceTab === 'discovered' ? 'active' : ''} onClick={() => setMarketplaceTab('discovered')}>已发现</button><button className={marketplaceTab === 'enabled' ? 'active' : ''} onClick={() => setMarketplaceTab('enabled')}>已启用</button></nav><div className="plugin-list">{filteredPlugins.map((plugin) => <article className="plugin-card" key={plugin.id}><div className="plugin-icon">{plugin.category === '语言支持' ? '&lt;/&gt;' : '⌘'}</div><div><h3>{plugin.name} <small>v{plugin.version}</small></h3><p>{plugin.description}</p></div><button className={enabledPlugins.includes(plugin.id) ? 'plugin-toggle enabled' : 'plugin-toggle'} onClick={() => togglePlugin(plugin.id)}>{enabledPlugins.includes(plugin.id) ? '已启用' : '启用'}</button></article>)}{!filteredPlugins.length ? <p className="empty-list">没有匹配的插件。</p> : null}</div></aside> : null}</div>
+    const openSettings = () => {
+        setSettingsTab("connection");
+        setShowSettings(true);
+        setHeaderMenu(null);
+    };
+    useEffect(() => {
+        void refreshTree();
+    }, [workspace]);
+    useEffect(() => {
+        void loadServiceConfig();
+    }, []);
+    useEffect(
+        () =>
+            window.ideaDesktop?.onExecutionOutput((event) => {
+                setExecutionSessionId((current) => {
+                    if (current !== event.sessionId) return current;
+                    setExecutionLines((lines) =>
+                        [
+                            ...lines,
+                            { stream: event.stream, content: event.content },
+                        ].slice(-500),
+                    );
+                    return event.terminal ? null : current;
+                });
+            }),
+        [],
+    );
+    useEffect(
+        () =>
+            window.ideaDesktop?.onChatStreamEvent((event) => {
+                const messageId = activeStreamMessageIdRef.current;
+                if (messageId === null) return;
+                const content =
+                    typeof event.payload.content === "string"
+                        ? event.payload.content
+                        : "";
+                const toolName =
+                    typeof event.payload.name === "string"
+                        ? event.payload.name
+                        : "工具";
+                const streamStatus =
+                    event.type === "run.started"
+                        ? "正在生成回复"
+                        : event.type === "tool.started"
+                          ? `${toolName} 正在执行`
+                          : event.type === "tool.completed"
+                            ? `${toolName} 已完成`
+                            : event.type === "run.completed"
+                              ? undefined
+                              : event.type === "run.failed"
+                                ? "运行失败"
+                                : undefined;
+                setChatMessages((messages) =>
+                    messages.map((message) =>
+                        message.id !== messageId
+                            ? message
+                            : {
+                                  ...message,
+                                  content:
+                                      event.type === "model.text.delta"
+                                          ? message.content + content
+                                          : message.content,
+                                  streamStatus,
+                              },
+                    ),
+                );
+            }),
+        [],
+    );
+    useEffect(
+        () =>
+            window.ideaDesktop?.onLocalChatStreamEvent((event) => {
+                const messageId = activeStreamMessageIdRef.current;
+                if (messageId === null) return;
+                const content = typeof event.payload.content === "string" ? event.payload.content : "";
+                setChatMessages((messages) => messages.map((message) => message.id !== messageId ? message : { ...message, content: event.type === "model.text.delta" ? message.content + content : message.content, streamStatus: event.type === "run.started" ? "本地 Agent 正在生成回复" : event.type === "run.completed" ? undefined : message.streamStatus }));
+            }),
+        [],
+    );
+    useEffect(() => {
+        if (!serviceConfig.signedIn || serviceState !== "online") return;
+        const timer = setInterval(() => {
+            void pollSyncEvents();
+            void window.ideaDesktop?.heartbeatRuntime().catch(() => undefined);
+        }, 20_000);
+        return () => clearInterval(timer);
+    }, [serviceConfig.signedIn, serviceState]);
+
+    async function refreshTree() {
+        if (!workspace) {
+            setTree([]);
+            return;
+        }
+        try {
+            setTree(
+                (await window.ideaDesktop?.readWorkspaceTree(workspace)) ?? [],
+            );
+            setStatus("文件树已更新");
+        } catch (reason) {
+            setStatus(
+                reason instanceof Error ? reason.message : "无法读取工作区",
+            );
+        }
+    }
+    async function loadServiceConfig() {
+        const requestId = ++authRequestIdRef.current;
+        try {
+            const config = await window.ideaDesktop?.getServiceConfig();
+            reportLoginRecoveryDebug("service config loaded", {
+                hasConfig: Boolean(config),
+                signedIn: Boolean(config?.signedIn),
+            });
+            if (requestId !== authRequestIdRef.current) return;
+            if (!config || !config.signedIn) {
+                dispatchAuth({ type: "signed_out" });
+                return;
+            }
+            dispatchAuth({ type: "restoring" });
+            setServiceConfig(config);
+            if (await checkService(config)) dispatchAuth({ type: "signed_in" });
+            else
+                dispatchAuth({
+                    type: "signed_out",
+                    message: "登录会话已失效，请重新登录",
+                });
+        } catch (reason) {
+            if (requestId === authRequestIdRef.current)
+                dispatchAuth({
+                    type: "signed_out",
+                    message:
+                        reason instanceof Error
+                            ? reason.message
+                            : "登录会话恢复失败",
+                });
+        } finally {
+            if (requestId === authRequestIdRef.current)
+                reportLoginRecoveryDebug(
+                    "initial auth readiness completed",
+                    {},
+                );
+        }
+    }
+    async function checkService(config = serviceConfig): Promise<boolean> {
+        if (!config.serverUrl || !config.signedIn) {
+            setServiceState("unconfigured");
+            return false;
+        }
+        setServiceState("checking");
+        try {
+            const health = await window.ideaDesktop?.testService();
+            if (!health || health.status !== "healthy")
+                throw new Error("服务健康检查失败");
+            setServiceState("online");
+            void window.ideaDesktop
+                ?.registerRuntime()
+                .catch((reason) =>
+                    setStatus(
+                        reason instanceof Error
+                            ? `本地 Runtime 未注册：${reason.message}`
+                            : "本地 Runtime 未注册",
+                    ),
+                );
+            void refreshRemoteState(config);
+            return true;
+        } catch (reason) {
+            setServiceState(
+                reason instanceof Error && reason.message.includes("401")
+                    ? "unauthorized"
+                    : "error",
+            );
+            setStatus(reason instanceof Error ? reason.message : "服务不可用");
+            return false;
+        }
+    }
+    async function refreshRemoteState(config = serviceConfig) {
+        if (!config.serverUrl || !config.signedIn) return;
+        try {
+            const [
+                nextConversations,
+                nextTasks,
+                nextRuntime,
+                nextHandoffs,
+                nextMemories,
+            ] = await Promise.all([
+                window.ideaDesktop?.listConversations(),
+                window.ideaDesktop?.listTasks(),
+                window.ideaDesktop?.getRuntimeSnapshot(),
+                window.ideaDesktop?.listPendingHandoffs(),
+                isOwnerClient && config.route === "owner_idea"
+                    ? window.ideaDesktop?.listMemories?.()
+                    : Promise.resolve([]),
+            ]);
+            setConversations(nextConversations ?? []);
+            setTasks(nextTasks ?? []);
+            setRuntime(nextRuntime ?? null);
+            setPendingHandoffs(nextHandoffs ?? []);
+            setMemories(nextMemories ?? []);
+            if (isOwnerClient && config.route === "owner_idea") {
+                setOwnerDevices(
+                    (await window.ideaDesktop?.listOwnerDevices?.()) ?? [],
+                );
+                setCredentials(
+                    (await window.ideaDesktop?.listOwnerCredentials?.()) ?? [],
+                );
+                setApprovals(
+                    (await window.ideaDesktop?.listOwnerApprovals?.()) ?? {
+                        pending: [],
+                        recent: [],
+                    },
+                );
+                setGrants(
+                    (await window.ideaDesktop?.listOwnerGrants?.()) ?? [],
+                );
+                setFileChanges(
+                    (await window.ideaDesktop?.listOwnerFileChanges?.()) ?? [],
+                );
+                setAuditEvents(
+                    (await window.ideaDesktop?.listAuditEvents?.()) ?? [],
+                );
+            }
+        } catch (reason) {
+            setStatus(
+                reason instanceof Error
+                    ? `同步失败：${reason.message}`
+                    : "同步失败",
+            );
+        }
+    }
+    async function pollSyncEvents() {
+        try {
+            const snapshot = await window.ideaDesktop?.getSyncEvents(
+                syncCursorRef.current,
+            );
+            if (!snapshot) return;
+            syncCursorRef.current = snapshot.next_cursor;
+            if (!snapshot.events.length) return;
+            const requested = snapshot.events.filter(
+                (event) => event.event_type === "approval.requested",
+            ).length;
+            const refreshRuntime = snapshot.events.some((event) =>
+                [
+                    "runtime.updated",
+                    "agent_run.created",
+                    "agent_run.completed",
+                    "agent_run.failed",
+                    "task.created",
+                    "task.deleted",
+                    "handoff.created",
+                    "handoff.accepted",
+                    "handoff.running",
+                    "handoff.completed",
+                    "handoff.failed",
+                    "handoff.cancelled",
+                    "approval.requested",
+                    "approval.decided",
+                ].includes(event.event_type),
+            );
+            if (refreshRuntime) await refreshRemoteState();
+            if (requested) setStatus(`收到 ${requested} 个新的工具审批请求`);
+        } catch {
+            /* 后台轮询失败静默处理 */
+        }
+    }
+    async function signInWithPassword() {
+        if (!emailInput.trim() || !passwordInput || isSigningIn) return;
+        const requestId = ++authRequestIdRef.current;
+        dispatchAuth({ type: "signing_in" });
+        setIsSigningIn(true);
+        try {
+            await window.ideaDesktop?.passwordLogin(
+                emailInput.trim(),
+                passwordInput,
+            );
+            const config = await window.ideaDesktop?.getServiceConfig();
+            if (requestId !== authRequestIdRef.current || !config?.signedIn)
+                throw new Error("登录会话未保存");
+            setServiceConfig(config);
+            if (!(await checkService(config)))
+                throw new Error("登录后服务鉴权失败");
+            dispatchAuth({ type: "signed_in" });
+            setPasswordInput("");
+            setStatus("已登录");
+        } catch (reason) {
+            if (requestId === authRequestIdRef.current) {
+                dispatchAuth({
+                    type: "signed_out",
+                    message:
+                        reason instanceof Error ? reason.message : "登录失败",
+                });
+                setServiceState("unauthorized");
+            }
+        } finally {
+            if (requestId === authRequestIdRef.current) setIsSigningIn(false);
+        }
+    }
+    async function signOut() {
+        const requestId = ++authRequestIdRef.current;
+        dispatchAuth({ type: "signing_out" });
+        try {
+            await window.ideaDesktop?.logout();
+            const config = await window.ideaDesktop?.getServiceConfig();
+            if (requestId !== authRequestIdRef.current) return;
+            reportLoginRecoveryDebug("logout completed in renderer", {
+                signedIn: Boolean(config?.signedIn),
+            });
+            if (config) setServiceConfig(config);
+            setMemories([]);
+            setOwnerDevices([]);
+            setCredentials([]);
+            setApprovals({ pending: [], recent: [] });
+            setGrants([]);
+            setFileChanges([]);
+            setAuditEvents([]);
+            setConversations([]);
+            setTasks([]);
+            setRuntime(null);
+            setPendingHandoffs([]);
+            syncCursorRef.current = 0;
+            dispatchAuth({ type: "signed_out", message: "已退出在线账户" });
+            setServiceState("unconfigured");
+        } catch (reason) {
+            if (requestId === authRequestIdRef.current)
+                dispatchAuth({
+                    type: "signed_out",
+                    message:
+                        reason instanceof Error
+                            ? reason.message
+                            : "退出登录失败",
+                });
+        }
+    }
+    async function chooseWorkspace() {
+        const selected = await window.ideaDesktop?.chooseWorkspace();
+        if (selected) {
+            setWorkspace(selected);
+            setOpenFile(null);
+        }
+    }
+    async function openLocalFile(file: FileTreeEntry) {
+        try {
+            const result = await window.ideaDesktop?.readFile(
+                workspace,
+                file.path,
+            );
+            if (result) {
+                setOpenFile({ ...result, savedContent: result.content });
+                setEditorView("edit");
+                setStatus(`已打开 ${result.name}`);
+                setShowFileSearch(false);
+            }
+        } catch (reason) {
+            setStatus(
+                reason instanceof Error ? reason.message : "无法打开文件",
+            );
+        }
+    }
+    async function createFile() {
+        if (!workspace) {
+            setStatus("请先选择工作区");
+            return;
+        }
+        const relativePath = window.prompt(
+            "输入相对文件名（例如 src/new-file.ts）",
+        );
+        if (!relativePath?.trim()) return;
+        try {
+            const result = await window.ideaDesktop?.createFile(
+                workspace,
+                relativePath.trim(),
+            );
+            if (result) {
+                await refreshTree();
+                await openLocalFile({
+                    path: result.path,
+                    name: result.name,
+                    kind: "file",
+                });
+            }
+        } catch (reason) {
+            setStatus(
+                reason instanceof Error ? reason.message : "无法创建文件",
+            );
+        }
+    }
+    async function saveCurrentFile() {
+        if (!openFile) return;
+        try {
+            await window.ideaDesktop?.saveFile(
+                workspace,
+                openFile.path,
+                openFile.content,
+            );
+            setOpenFile((file) =>
+                file ? { ...file, savedContent: file.content } : null,
+            );
+            setStatus(`已保存 ${openFile.name}`);
+            void refreshTree();
+        } catch (reason) {
+            setStatus(reason instanceof Error ? reason.message : "保存失败");
+        }
+    }
+    const updateOpenFile = useCallback(
+        (content: string) =>
+            setOpenFile((file) => (file ? { ...file, content } : null)),
+        [],
+    );
+    function closeCurrentFile() {
+        if (isDirty && !window.confirm("当前文件尚未保存，确定关闭吗？"))
+            return;
+        setOpenFile(null);
+        setExecutionLines([]);
+        setExecutionSessionId(null);
+    }
+    function addCurrentFileContext() {
+        if (!openFile) {
+            setStatus("请先打开要添加的文件");
+            return;
+        }
+        setContextBlocks((blocks) =>
+            blocks.some((block) => block.path === openFile.path)
+                ? blocks
+                : [
+                      ...blocks,
+                      {
+                          path: openFile.path,
+                          name: openFile.name,
+                          content: openFile.content,
+                      },
+                  ],
+        );
+        setStatus(`已添加 ${openFile.name} 到本次上下文`);
+    }
+    function removeContextBlock(path: string) {
+        setContextBlocks((blocks) =>
+            blocks.filter((block) => block.path !== path),
+        );
+    }
+    function citeCurrentFile() {
+        if (!openFile) return;
+        addCurrentFileContext();
+        setMode("work");
+    }
+    async function startExecution(runMode: "run" | "debug") {
+        if (!openFile || executionSessionId) return;
+        const plugin = languagePluginForFile(openFile.name);
+        if (!plugin || !enabledPlugins.includes(plugin.id)) {
+            setStatus("当前文件没有可用的运行插件");
+            return;
+        }
+        if (isDirty) await saveCurrentFile();
+        try {
+            setExecutionLines([
+                {
+                    stream: "system",
+                    content: `${runMode === "debug" ? "调试" : "运行"} ${openFile.name}\n`,
+                },
+            ]);
+            const result = await window.ideaDesktop?.startExecution(
+                workspace,
+                openFile.path,
+                runMode,
+            );
+            if (result) setExecutionSessionId(result.sessionId);
+        } catch (reason) {
+            setStatus(
+                reason instanceof Error ? reason.message : "无法启动执行",
+            );
+        }
+    }
+    async function stopExecution() {
+        if (!executionSessionId) return;
+        await window.ideaDesktop?.stopExecution(executionSessionId);
+        setStatus("已请求停止执行");
+    }
+    async function executeHandoff(handoff: TaskHandoff) {
+        if (!workspace) {
+            setStatus("请先选择交接任务对应的本地工作区");
+            return;
+        }
+        if (executionSessionId || !handoff.has_execution_manifest) return;
+        if (
+            !window.confirm(
+                "将只执行服务端批准的工作区内单文件任务。确认继续吗？",
+            )
+        )
+            return;
+        try {
+            setExecutionLines([
+                {
+                    stream: "system",
+                    content: "正在领取已批准的本地交接任务。\n",
+                },
+            ]);
+            const result = await window.ideaDesktop?.executeHandoff(
+                handoff.id,
+                workspace,
+            );
+            if (!result) throw new Error("交接执行服务不可用");
+            setExecutionSessionId(result.sessionId);
+            setPendingHandoffs((items) =>
+                items.filter((item) => item.id !== handoff.id),
+            );
+            setStatus("交接任务已开始执行");
+        } catch (reason) {
+            setStatus(
+                reason instanceof Error ? reason.message : "无法执行交接任务",
+            );
+            void refreshRemoteState();
+        }
+    }
+    function togglePlugin(pluginId: string) {
+        setEnabledPlugins((items) =>
+            items.includes(pluginId)
+                ? items.filter((item) => item !== pluginId)
+                : [...items, pluginId],
+        );
+    }
+    async function saveMemory() {
+        if (!memoryContent.trim() || isSavingMemory) return;
+        try {
+            setIsSavingMemory(true);
+            const memory = await window.ideaDesktop?.createMemory?.({
+                scope: memoryScope,
+                category: memoryCategory.trim() || "general",
+                content: memoryContent.trim(),
+            });
+            if (!memory) throw new Error("记忆保存服务不可用");
+            setMemories((items) => [memory, ...items]);
+            setMemoryContent("");
+        } catch (reason) {
+            setStatus(
+                reason instanceof Error ? reason.message : "记忆保存失败",
+            );
+        } finally {
+            setIsSavingMemory(false);
+        }
+    }
+    async function updateMemory(memory: MemoryRecord): Promise<boolean> {
+        try {
+            const updated = await window.ideaDesktop?.updateMemory?.({
+                id: memory.id,
+                revision: memory.revision,
+                category: memory.category.trim(),
+                content: memory.content.trim(),
+            });
+            if (!updated) throw new Error("记忆更新服务不可用");
+            setMemories((items) =>
+                items.map((item) => (item.id === updated.id ? updated : item)),
+            );
+            setStatus("记忆已更新");
+            return true;
+        } catch (reason) {
+            const message =
+                reason instanceof Error ? reason.message : "记忆更新失败";
+            setStatus(message);
+            window.alert(message);
+            return false;
+        }
+    }
+    async function removeMemory(memory: MemoryRecord) {
+        if (!window.confirm("确认删除这条记忆吗？")) return;
+        try {
+            await window.ideaDesktop?.deleteMemory?.({
+                id: memory.id,
+                revision: memory.revision,
+            });
+            setMemories((items) =>
+                items.filter((item) => item.id !== memory.id),
+            );
+        } catch (reason) {
+            setStatus(
+                reason instanceof Error ? reason.message : "记忆删除失败",
+            );
+        }
+    }
+    async function updateOwnerDevice(
+        device: OwnerDevice,
+        action: "approve" | "revoke",
+    ) {
+        if (action === "approve")
+            await window.ideaDesktop?.approveOwnerDevice?.(
+                device.owner_device_id,
+            );
+        else if (window.confirm("确认撤销该设备吗？"))
+            await window.ideaDesktop?.revokeOwnerDevice?.(
+                device.owner_device_id,
+            );
+        setOwnerDevices((await window.ideaDesktop?.listOwnerDevices?.()) ?? []);
+    }
+    async function decideApproval(
+        approval: ToolApproval,
+        action: "approve" | "deny",
+    ) {
+        if (
+            action === "approve" &&
+            !window.confirm(
+                `批准删除/执行高风险操作「${approval.tool_name}」吗？\n${approval.args_summary}`,
+            )
+        )
+            return;
+        try {
+            if (action === "approve")
+                await window.ideaDesktop?.approveOwnerApproval?.(
+                    approval.approval_id,
+                );
+            else
+                await window.ideaDesktop?.denyOwnerApproval?.(
+                    approval.approval_id,
+                );
+            setApprovals(
+                (await window.ideaDesktop?.listOwnerApprovals?.()) ?? {
+                    pending: [],
+                    recent: [],
+                },
+            );
+            setStatus(
+                action === "approve"
+                    ? `已批准 ${approval.tool_name}`
+                    : `已拒绝 ${approval.tool_name}`,
+            );
+        } catch (reason) {
+            setStatus(
+                reason instanceof Error ? reason.message : "审批处理失败",
+            );
+        }
+    }
+    async function createGrant(request: {
+        accountId: string;
+        capability: GrantCapability;
+        expiresInDays?: number;
+    }) {
+        try {
+            const grant = await window.ideaDesktop?.createOwnerGrant?.(request);
+            if (!grant) throw new Error("权限授权服务不可用");
+            setGrants((await window.ideaDesktop?.listOwnerGrants?.()) ?? []);
+            setStatus(`已授予 ${grant.capability} 给 ${grant.account_id}`);
+        } catch (reason) {
+            setStatus(
+                reason instanceof Error ? reason.message : "权限授权创建失败",
+            );
+        }
+    }
+    async function revokeGrant(grant: CapabilityGrant) {
+        if (
+            !window.confirm(
+                `确认撤销 ${grant.account_id} 的 ${grant.capability} 授权吗？`,
+            )
+        )
+            return;
+        try {
+            await window.ideaDesktop?.revokeOwnerGrant?.(grant.grant_id);
+            setGrants((await window.ideaDesktop?.listOwnerGrants?.()) ?? []);
+            setStatus("权限授权已撤销");
+        } catch (reason) {
+            setStatus(
+                reason instanceof Error ? reason.message : "权限授权撤销失败",
+            );
+        }
+    }
+    async function acceptChange(change: FileChange) {
+        try {
+            await window.ideaDesktop?.acceptOwnerFileChange?.(change.change_id);
+            setFileChanges(
+                (await window.ideaDesktop?.listOwnerFileChanges?.()) ?? [],
+            );
+            setStatus("已确认文件变更");
+        } catch (reason) {
+            setStatus(
+                reason instanceof Error ? reason.message : "变更确认失败",
+            );
+        }
+    }
+    async function revertChange(change: FileChange) {
+        if (!window.confirm(`确认回滚对 ${change.file_path} 的修改吗？`))
+            return;
+        try {
+            await window.ideaDesktop?.revertOwnerFileChange?.(change.change_id);
+            setFileChanges(
+                (await window.ideaDesktop?.listOwnerFileChanges?.()) ?? [],
+            );
+            setStatus(`已回滚 ${change.file_path}`);
+        } catch (reason) {
+            setStatus(
+                reason instanceof Error ? reason.message : "变更回滚失败",
+            );
+        }
+    }
+    async function refreshAudit() {
+        try {
+            setAuditEvents(
+                (await window.ideaDesktop?.listAuditEvents?.()) ?? [],
+            );
+            setStatus("审计记录已刷新");
+        } catch (reason) {
+            setStatus(
+                reason instanceof Error ? reason.message : "审计记录刷新失败",
+            );
+        }
+    }
+    async function openRunDetail(runId: string) {
+        try {
+            setIsLoadingRun(true);
+            const detail = await window.ideaDesktop?.getRunDetail(runId);
+            if (!detail) throw new Error("运行详情服务不可用");
+            setSelectedRun(detail);
+        } catch (reason) {
+            setStatus(
+                reason instanceof Error ? reason.message : "无法读取运行详情",
+            );
+        } finally {
+            setIsLoadingRun(false);
+        }
+    }
+    async function issueCredential(target: "IDEA" | "TRAE") {
+        try {
+            setCredentialNotice(`正在签发本设备 ${target} 凭据…`);
+            setIssuedToken(null);
+            const credential = await window.ideaDesktop?.issueOwnerCredential?.(
+                {
+                    deviceLabel: `${target} · ${serviceConfig.deviceId}`,
+                    capability: "idea",
+                },
+            );
+            if (!credential) throw new Error("自动设备凭据服务不可用");
+            setIssuedToken(credential.token);
+            setCredentials((items) => [credential, ...items]);
+            setCredentialNotice(
+                `本设备 ${target} 凭据已签发，Token 仅显示一次。`,
+            );
+        } catch (reason) {
+            const message =
+                reason instanceof Error
+                    ? reason.message
+                    : "自动设备凭据签发失败";
+            setCredentialNotice(`签发失败：${message}`);
+            setStatus(message);
+        }
+    }
+    async function recoverCredential(credential: AutomatedDeviceCredential) {
+        try {
+            setCredentialNotice(
+                `正在读取 ${credential.device_label} 的托管凭据…`,
+            );
+            const result = await window.ideaDesktop?.recoverOwnerCredential?.(
+                credential.credential_id,
+            );
+            if (!result) throw new Error("自动设备凭据读取服务不可用");
+            setIssuedToken(result.token);
+            setCredentialNotice(`${credential.device_label} 的凭据已读取。`);
+        } catch (reason) {
+            const message =
+                reason instanceof Error
+                    ? reason.message
+                    : "自动设备凭据读取失败";
+            setCredentialNotice(`读取失败：${message}`);
+            setStatus(message);
+        }
+    }
+    async function revokeCredential(credential: AutomatedDeviceCredential) {
+        if (!window.confirm(`确认撤销 ${credential.device_label} 吗？`)) return;
+        try {
+            await window.ideaDesktop?.revokeOwnerCredential?.(
+                credential.credential_id,
+            );
+            setCredentials((items) =>
+                items.map((item) =>
+                    item.credential_id === credential.credential_id
+                        ? {
+                              ...item,
+                              status: "revoked",
+                              revoked_at: Date.now() / 1000,
+                          }
+                        : item,
+                ),
+            );
+        } catch (reason) {
+            setStatus(
+                reason instanceof Error
+                    ? reason.message
+                    : "自动设备凭据撤销失败",
+            );
+        }
+    }
+    async function sendChatMessage() {
+        const content = chatInput.trim();
+        if (!content || isSending) return;
+        const messageId = Date.now();
+        const assistantMessageId = messageId + 1;
+        const blocksForRequest = contextBlocks.map((block) =>
+            openFile?.path === block.path
+                ? { ...block, content: openFile.content, name: openFile.name }
+                : block,
+        );
+        setChatMessages((messages) => [
+            ...messages,
+            { id: messageId, role: "user", content },
+            {
+                id: assistantMessageId,
+                role: "assistant",
+                content: "",
+                modelKey,
+                streamStatus: "正在连接 IDEA",
+            },
+        ]);
+        setChatInput("");
+        setContextBlocks([]);
+        setIsSending(true);
+        activeStreamMessageIdRef.current = assistantMessageId;
+        try {
+            const result = chatTarget === "local"
+                ? await window.ideaDesktop?.sendLocalChatStream({
+                      agentId: "idea",
+                      message: content,
+                      contextBlocks: blocksForRequest,
+                      conversationId,
+                      modelKey,
+                  })
+                : await window.ideaDesktop?.sendChatStream({
+                agentId: "idea",
+                message: content,
+                contextBlocks: blocksForRequest,
+                conversationId,
+                useMemory: true,
+                modelKey,
+                  });
+            if (!result) throw new Error("在线服务不可用");
+            setConversationId(result.conversationId);
+            setChatMessages((messages) =>
+                messages.map((message) =>
+                    message.id !== assistantMessageId
+                        ? message
+                        : {
+                              ...message,
+                              content: result.reply,
+                              modelKey: result.modelKey,
+                              streamStatus: undefined,
+                          },
+                ),
+            );
+            void refreshRemoteState();
+        } catch (reason) {
+            const failure = `${chatTarget === "local" ? "本地 Agent" : "在线服务"}暂不可用：${reason instanceof Error ? reason.message : "未知错误"}`;
+            setChatMessages((messages) =>
+                messages.map((message) =>
+                    message.id !== assistantMessageId
+                        ? message
+                        : {
+                              ...message,
+                              content: message.content || failure,
+                              streamStatus: undefined,
+                          },
+                ),
+            );
+        } finally {
+            activeStreamMessageIdRef.current = null;
+            setIsSending(false);
+        }
+    }
+    async function openRemoteConversation(id: string) {
+        try {
+            const conversation = await window.ideaDesktop?.getConversation(id);
+            if (!conversation) return;
+            setConversationId(id);
+            setChatMessages(
+                conversation.messages.map((message, index) => ({
+                    id: Number(message.timestamp * 1000) + index,
+                    role: message.role,
+                    content: message.content,
+                })),
+            );
+        } catch (reason) {
+            setStatus(
+                reason instanceof Error ? reason.message : "无法读取会话",
+            );
+        }
+    }
+    async function deleteConversation(id: string) {
+        if (!window.confirm("确认删除这段会话吗？关联任务也会被删除。")) return;
+        try {
+            const remove = window.ideaDesktop?.deleteConversation;
+            if (!remove)
+                throw new Error("当前客户端不支持删除会话，请更新客户端");
+            await remove(id);
+            if (conversationId === id) {
+                setConversationId(undefined);
+                setChatMessages([]);
+            }
+            await refreshRemoteState();
+            setStatus("会话已删除");
+        } catch (reason) {
+            const message =
+                reason instanceof Error ? reason.message : "会话删除失败";
+            setStatus(message);
+            window.alert(message);
+        }
+    }
+    async function deleteTask(id: string) {
+        if (!window.confirm("确认删除这个任务吗？")) return;
+        try {
+            await window.ideaDesktop?.deleteTask(id);
+            setTasks((items) => items.filter((item) => item.id !== id));
+            setStatus("任务已删除");
+            void refreshRemoteState();
+        } catch (reason) {
+            setStatus(
+                reason instanceof Error ? reason.message : "任务删除失败",
+            );
+        }
+    }
+    const menu = (
+        <nav className="app-menu-bar" aria-label="应用菜单">
+            {(["file", "edit", "view", "window", "help"] as const).map(
+                (item) => (
+                    <button
+                        key={item}
+                        className={headerMenu === item ? "active" : ""}
+                        onClick={() =>
+                            setHeaderMenu((current) =>
+                                current === item ? null : item,
+                            )
+                        }
+                    >
+                        {item[0].toUpperCase() + item.slice(1)}
+                    </button>
+                ),
+            )}
+            {headerMenu ? (
+                <div className="app-menu-popover">
+                    {headerMenu === "file" ? (
+                        <>
+                            <button
+                                onClick={() => {
+                                    void chooseWorkspace();
+                                    setHeaderMenu(null);
+                                }}
+                            >
+                                打开工作区
+                            </button>
+                            <button
+                                onClick={() => {
+                                    void createFile();
+                                    setHeaderMenu(null);
+                                }}
+                            >
+                                新建文件
+                            </button>
+                            <button
+                                disabled={!isDirty}
+                                onClick={() => {
+                                    void saveCurrentFile();
+                                    setHeaderMenu(null);
+                                }}
+                            >
+                                保存
+                            </button>
+                        </>
+                    ) : headerMenu === "view" ? (
+                        <>
+                            <button onClick={openSettings}>设置</button>
+                            <button onClick={() => { void window.ideaDesktop?.openServiceTest(); setHeaderMenu(null); }}>在线服务测试</button>
+                        </>
+                    ) : headerMenu === "help" ? (
+                        <button
+                            onClick={() => {
+                                setShowMarketplace(true);
+                                setHeaderMenu(null);
+                            }}
+                        >
+                            插件市场
+                        </button>
+                    ) : (
+                        <button disabled>
+                            {headerMenu === "edit"
+                                ? "请在编辑器中修改当前文件"
+                                : "切换工作模式"}
+                        </button>
+                    )}
+                </div>
+            ) : null}
+        </nav>
+    );
+    const projectBar = (
+        <header className="ide-projectbar">
+            <div className="project-picker">
+                <span className="project-mark">I</span>
+                <strong>IDEA</strong>
+            </div>
+            {menu}
+            <span className="brand-divider">/</span>
+            <span>
+                {mode === "ide"
+                    ? "编辑器"
+                    : mode === "work"
+                      ? "工作台"
+                      : mode === "compute"
+                        ? "生物计算方法广场"
+                        : mode === "literature"
+                          ? "学术文献"
+                          : "知识库"}
+            </span>
+            <nav className="mode-switch">
+                <button
+                    className={mode === "ide" ? "active" : ""}
+                    onClick={() => setMode("ide")}
+                >
+                    IDE
+                </button>
+                <button
+                    className={mode === "work" ? "active" : ""}
+                    onClick={() => setMode("work")}
+                >
+                    WORK
+                </button>
+                <button
+                    className={mode === "knowledge" ? "active" : ""}
+                    onClick={() => setMode("knowledge")}
+                >
+                    RAG
+                </button>
+                <button
+                    className={mode === "compute" ? "active" : ""}
+                    onClick={() => setMode("compute")}
+                >
+                    生物计算
+                </button>
+                <button
+                    className={mode === "literature" ? "active" : ""}
+                    onClick={() => setMode("literature")}
+                >
+                    文献
+                </button>
+            </nav>
+            <div className="project-actions">
+                <span>{workspaceName}</span>
+                <button
+                    title="运行"
+                    disabled={!openFile || Boolean(executionSessionId)}
+                    onClick={() => void startExecution("run")}
+                >
+                    ▷
+                </button>
+                <button
+                    title="调试"
+                    disabled={!openFile || Boolean(executionSessionId)}
+                    onClick={() => void startExecution("debug")}
+                >
+                    ☼
+                </button>
+                <button title="设置" onClick={openSettings}>
+                    ⚙
+                </button>
+            </div>
+        </header>
+    );
+    if (auth.phase !== "signed_in") {
+        return (
+            <LoginPage
+                emailInput={emailInput}
+                setEmailInput={setEmailInput}
+                passwordInput={passwordInput}
+                setPasswordInput={setPasswordInput}
+                onSignIn={() => void signInWithPassword()}
+                auth={auth}
+            />
+        );
+    }
+
+    return (
+        <div
+            className={`offline-app theme-${theme} background-${background}`}
+            style={{ "--ui-font-size": `${fontSize}px` } as CSSProperties}
+        >
+            <div className="app-body">
+                <aside className="activity-rail">
+                    <button
+                        className={
+                            mode === "ide"
+                                ? "rail-button active"
+                                : "rail-button"
+                        }
+                        title="资源管理器"
+                        onClick={() => setMode("ide")}
+                    >
+                        ▤
+                    </button>
+                    <button
+                        className={
+                            mode === "work"
+                                ? "rail-button active"
+                                : "rail-button"
+                        }
+                        title="工作台"
+                        onClick={() => setMode("work")}
+                    >
+                        ✓
+                    </button>
+                    <button
+                        className={
+                            mode === "knowledge"
+                                ? "rail-button active"
+                                : "rail-button"
+                        }
+                        title="知识库"
+                        onClick={() => setMode("knowledge")}
+                    >
+                        ⌕
+                    </button>
+                    <button
+                        className={mode === "compute" ? "rail-button active" : "rail-button"}
+                        title="生物计算方法广场"
+                        onClick={() => setMode("compute")}
+                    >
+                        🧬
+                    </button>
+                    <button
+                        className={mode === "literature" ? "rail-button active" : "rail-button"}
+                        title="学术文献"
+                        onClick={() => setMode("literature")}
+                    >
+                        ▤
+                    </button>
+                    <button
+                        className={
+                            showMarketplace
+                                ? "rail-button active"
+                                : "rail-button"
+                        }
+                        title="插件市场"
+                        onClick={() => setShowMarketplace(true)}
+                    >
+                        ▦
+                    </button>
+                    <div className="rail-spacer" />
+                    <button
+                        className="rail-button"
+                        title="打开工作区"
+                        onClick={() => void chooseWorkspace()}
+                    >
+                        ⌂
+                    </button>
+                    <button
+                        className={
+                            showSettings ? "rail-button active" : "rail-button"
+                        }
+                        title="设置"
+                        onClick={openSettings}
+                    >
+                        ⚙
+                    </button>
+                </aside>
+                <section className="app-shell">
+                    {projectBar}
+                    {mode === "knowledge" ? (
+                        <KnowledgeBasePanel />
+                    ) : mode === "compute" ? (
+                        <ComputeMarketplace />
+                    ) : mode === "literature" ? (
+                        <LiteraturePanel />
+                    ) : mode === "ide" ? (
+                        <main className="ide-layout">
+                            <div className="ide-workbench">
+                                <aside className="explorer-panel">
+                                    <div className="panel-title">
+                                        <span>项目</span>
+                                        <div className="panel-tools">
+                                            <button
+                                                title="新建文件"
+                                                onClick={() =>
+                                                    void createFile()
+                                                }
+                                            >
+                                                □
+                                            </button>
+                                            <button
+                                                title="刷新文件树"
+                                                onClick={() =>
+                                                    void refreshTree()
+                                                }
+                                            >
+                                                ↻
+                                            </button>
+                                        </div>
+                                    </div>
+                                    <button
+                                        className="workspace-button"
+                                        title={workspace}
+                                        onClick={() => void chooseWorkspace()}
+                                    >
+                                        <span className="chevron">⌄</span>
+                                        {workspaceName}
+                                    </button>
+                                    <div className="tree-list">
+                                        {tree.map((node) => (
+                                            <FileNode
+                                                key={node.path}
+                                                node={node}
+                                                selectedPath={openFile?.path}
+                                                onOpen={(file) =>
+                                                    void openLocalFile(file)
+                                                }
+                                            />
+                                        ))}
+                                    </div>
+                                    <div className="explorer-footer">
+                                        <button
+                                            onClick={() =>
+                                                setShowFileSearch(true)
+                                            }
+                                        >
+                                            ⌕ 搜索文件
+                                        </button>
+                                        <span
+                                            className="disabled-action"
+                                            title="版本控制尚未接入"
+                                        >
+                                            ⑂ 源代码管理未接入
+                                        </span>
+                                    </div>
+                                </aside>
+                                <section className="editor-panel">
+                                    {openFile ? (
+                                        <>
+                                            <div className="editor-tabs">
+                                                <div className="file-tab">
+                                                    <span>
+                                                        {openFile.name.endsWith(
+                                                            ".md",
+                                                        )
+                                                            ? "M"
+                                                            : "·"}
+                                                    </span>
+                                                    {openFile.name}
+                                                    {isDirty ? " •" : ""}
+                                                    <button
+                                                        title="关闭文件"
+                                                        onClick={
+                                                            closeCurrentFile
+                                                        }
+                                                    >
+                                                        ×
+                                                    </button>
+                                                </div>
+                                                <div className="editor-actions">
+                                                    {openFile.name.endsWith(
+                                                        ".md",
+                                                    ) ? (
+                                                        <>
+                                                            <button
+                                                                className={
+                                                                    editorView ===
+                                                                    "edit"
+                                                                        ? "active"
+                                                                        : ""
+                                                                }
+                                                                onClick={() =>
+                                                                    setEditorView(
+                                                                        "edit",
+                                                                    )
+                                                                }
+                                                            >
+                                                                源码
+                                                            </button>
+                                                            <button
+                                                                className={
+                                                                    editorView ===
+                                                                    "split"
+                                                                        ? "active"
+                                                                        : ""
+                                                                }
+                                                                onClick={() =>
+                                                                    setEditorView(
+                                                                        "split",
+                                                                    )
+                                                                }
+                                                            >
+                                                                同步预览
+                                                            </button>
+                                                            <button
+                                                                className={
+                                                                    editorView ===
+                                                                    "preview"
+                                                                        ? "active"
+                                                                        : ""
+                                                                }
+                                                                onClick={() =>
+                                                                    setEditorView(
+                                                                        "preview",
+                                                                    )
+                                                                }
+                                                            >
+                                                                预览
+                                                            </button>
+                                                        </>
+                                                    ) : null}
+                                                    <button
+                                                        onClick={
+                                                            citeCurrentFile
+                                                        }
+                                                    >
+                                                        引用到对话
+                                                    </button>
+                                                    <button
+                                                        className="save-button"
+                                                        disabled={!isDirty}
+                                                        onClick={() =>
+                                                            void saveCurrentFile()
+                                                        }
+                                                    >
+                                                        保存
+                                                    </button>
+                                                </div>
+                                            </div>
+                                            <div className="editor-breadcrumb">
+                                                <span>{workspaceName}</span>
+                                                <b>›</b>
+                                                <span>{openFile.name}</span>
+                                            </div>
+                                            <div className="editor-content">
+                                                {editorView === "split" &&
+                                                openFile.name.endsWith(
+                                                    ".md",
+                                                ) ? (
+                                                    <div className="markdown-split">
+                                                        <CodeEditor
+                                                            value={
+                                                                openFile.content
+                                                            }
+                                                            onChange={
+                                                                updateOpenFile
+                                                            }
+                                                            fileName={
+                                                                openFile.name
+                                                            }
+                                                            enabled
+                                                            onSave={() =>
+                                                                void saveCurrentFile()
+                                                            }
+                                                        />
+                                                        <article
+                                                            className="markdown-preview"
+                                                            dangerouslySetInnerHTML={{
+                                                                __html: renderMarkdown(
+                                                                    openFile.content,
+                                                                ),
+                                                            }}
+                                                        />
+                                                    </div>
+                                                ) : editorView === "preview" &&
+                                                  openFile.name.endsWith(
+                                                      ".md",
+                                                  ) ? (
+                                                    <article
+                                                        className="markdown-preview"
+                                                        dangerouslySetInnerHTML={{
+                                                            __html: renderMarkdown(
+                                                                openFile.content,
+                                                            ),
+                                                        }}
+                                                    />
+                                                ) : (
+                                                    <CodeEditor
+                                                        value={openFile.content}
+                                                        onChange={
+                                                            updateOpenFile
+                                                        }
+                                                        fileName={openFile.name}
+                                                        enabled
+                                                        onSave={() =>
+                                                            void saveCurrentFile()
+                                                        }
+                                                    />
+                                                )}
+                                            </div>
+                                            {executionLines.length ? (
+                                                <section className="execution-panel">
+                                                    <header>
+                                                        <strong>输出</strong>
+                                                        <div>
+                                                            {executionSessionId ? (
+                                                                <button
+                                                                    onClick={() =>
+                                                                        void stopExecution()
+                                                                    }
+                                                                >
+                                                                    停止
+                                                                </button>
+                                                            ) : null}
+                                                            <button
+                                                                onClick={() =>
+                                                                    setExecutionLines(
+                                                                        [],
+                                                                    )
+                                                                }
+                                                            >
+                                                                清除
+                                                            </button>
+                                                        </div>
+                                                    </header>
+                                                    <pre>
+                                                        {executionLines.map(
+                                                            (line, index) => (
+                                                                <span
+                                                                    className={
+                                                                        line.stream
+                                                                    }
+                                                                    key={`${index}-${line.content}`}
+                                                                >
+                                                                    {
+                                                                        line.content
+                                                                    }
+                                                                </span>
+                                                            ),
+                                                        )}
+                                                    </pre>
+                                                </section>
+                                            ) : null}
+                                        </>
+                                    ) : (
+                                        <div className="empty-editor">
+                                            <div className="empty-symbol">
+                                                I
+                                            </div>
+                                            <h1>IDEA 编辑器</h1>
+                                            <p>从左侧项目树打开本地文件。</p>
+                                            <button
+                                                onClick={() =>
+                                                    void chooseWorkspace()
+                                                }
+                                            >
+                                                打开项目
+                                            </button>
+                                        </div>
+                                    )}
+                                </section>
+                                <TaskSidebar
+                                    workspace={workspace}
+                                    workspaceName={workspaceName}
+                                    onChooseWorkspace={() =>
+                                        void chooseWorkspace()
+                                    }
+                                    onCreateTask={() => {
+                                        setMode("work");
+                                        setChatMessages([]);
+                                        setConversationId(undefined);
+                                    }}
+                                    onOpenConversation={(id) =>
+                                        void openRemoteConversation(id)
+                                    }
+                                    onDeleteConversation={(id) =>
+                                        void deleteConversation(id)
+                                    }
+                                    onDeleteTask={(id) => void deleteTask(id)}
+                                    onRefresh={() => void refreshRemoteState()}
+                                    newTask={false}
+                                    serviceState={serviceState}
+                                    conversations={conversations}
+                                    tasks={tasks}
+                                    syncLabel="本地"
+                                />
+                            </div>
+                            <footer className="ide-statusbar">
+                                <span>⌘ {status}</span>
+                                <span>
+                                    {openFile
+                                        ? `${openFile.content.split("\n").length} 行`
+                                        : "未打开文件"}
+                                </span>
+                                <span>{isDirty ? "未保存更改" : "UTF-8"}</span>
+                            </footer>
+                        </main>
+                    ) : (
+                        <main className="work-layout">
+                            <TaskSidebar
+                                workspace={workspace}
+                                workspaceName={workspaceName}
+                                onChooseWorkspace={() => void chooseWorkspace()}
+                                onCreateTask={() => {
+                                    setChatMessages([]);
+                                    setConversationId(undefined);
+                                }}
+                                onOpenConversation={(id) =>
+                                    void openRemoteConversation(id)
+                                }
+                                onDeleteConversation={(id) =>
+                                    void deleteConversation(id)
+                                }
+                                onDeleteTask={(id) => void deleteTask(id)}
+                                onRefresh={() => void refreshRemoteState()}
+                                onSwitchToIde={() => setMode("ide")}
+                                showWorkspace={false}
+                                newTask={false}
+                                serviceState={serviceState}
+                                conversations={conversations}
+                                tasks={tasks}
+                                syncLabel="本地"
+                            />
+                            <section className="chat-panel">
+                                <div className="chat-scroll">
+                                    <div className="chat-thread">
+                                        <RuntimeOverview
+                                            serviceState={serviceState}
+                                            workspace={workspace}
+                                            executionSessionId={
+                                                executionSessionId
+                                            }
+                                            runtime={runtime}
+                                            isOwner={hasOwnerSession}
+                                        />
+                                        {pendingHandoffs.filter(
+                                            (handoff) =>
+                                                handoff.has_execution_manifest &&
+                                                handoff.status === "pending",
+                                        ).length ? (
+                                            <section
+                                                className="runtime-run-list"
+                                                aria-label="待执行交接任务"
+                                            >
+                                                {pendingHandoffs
+                                                    .filter(
+                                                        (handoff) =>
+                                                            handoff.has_execution_manifest &&
+                                                            handoff.status ===
+                                                                "pending",
+                                                    )
+                                                    .map((handoff) => (
+                                                        <button
+                                                            className="runtime-run running"
+                                                            disabled={Boolean(
+                                                                executionSessionId,
+                                                            )}
+                                                            key={handoff.id}
+                                                            onClick={() =>
+                                                                void executeHandoff(
+                                                                    handoff,
+                                                                )
+                                                            }
+                                                            title="领取并运行已批准的工作区内单文件任务"
+                                                        >
+                                                            <span>待领取</span>
+                                                            <strong>
+                                                                {
+                                                                    handoff.agent_id
+                                                                }
+                                                            </strong>
+                                                            <small>
+                                                                已批准的本地单文件任务
+                                                            </small>
+                                                        </button>
+                                                    ))}
+                                            </section>
+                                        ) : null}
+                                        {pendingHandoffs.filter(
+                                            (handoff) =>
+                                                handoff.status === "accepted" ||
+                                                handoff.status === "running",
+                                        ).length ? (
+                                            <section
+                                                className="runtime-run-list"
+                                                aria-label="需要人工确认的恢复任务"
+                                            >
+                                                {pendingHandoffs
+                                                    .filter(
+                                                        (handoff) =>
+                                                            handoff.status ===
+                                                                "accepted" ||
+                                                            handoff.status ===
+                                                                "running",
+                                                    )
+                                                    .map((handoff) => (
+                                                        <div
+                                                            className="runtime-run running"
+                                                            key={handoff.id}
+                                                        >
+                                                            <span>
+                                                                需要人工确认
+                                                            </span>
+                                                            <strong>
+                                                                {
+                                                                    handoff.agent_id
+                                                                }
+                                                            </strong>
+                                                            <small>
+                                                                {handoff.status ===
+                                                                "running"
+                                                                    ? "服务端记录为执行中，未自动重放"
+                                                                    : "已领取但尚未开始，未自动重放"}
+                                                            </small>
+                                                        </div>
+                                                    ))}
+                                            </section>
+                                        ) : null}
+                                        {runtime?.recent_runs.length ? (
+                                            <section
+                                                className="runtime-run-list"
+                                                aria-label="最近运行"
+                                            >
+                                                {runtime.recent_runs
+                                                    .slice(0, 4)
+                                                    .map((run) => (
+                                                        <button
+                                                            className={`runtime-run ${run.status}`}
+                                                            disabled={
+                                                                isLoadingRun
+                                                            }
+                                                            key={run.id}
+                                                            onClick={() =>
+                                                                void openRunDetail(
+                                                                    run.id,
+                                                                )
+                                                            }
+                                                            title="查看运行详情"
+                                                        >
+                                                            <span>
+                                                                {run.status ===
+                                                                "running"
+                                                                    ? "执行中"
+                                                                    : run.status ===
+                                                                        "completed"
+                                                                      ? "已完成"
+                                                                      : "失败"}
+                                                            </span>
+                                                            <strong>
+                                                                {run.agent_id}
+                                                            </strong>
+                                                            <small>
+                                                                {run.summary ||
+                                                                    run.error ||
+                                                                    `模型：${run.model_key}`}
+                                                            </small>
+                                                        </button>
+                                                    ))}
+                                            </section>
+                                        ) : null}
+                                        {chatMessages.map((message) => (
+                                            <article
+                                                className={`chat-message ${message.role}`}
+                                                key={message.id}
+                                            >
+                                                {message.role ===
+                                                "assistant" ? (
+                                                    <div className="assistant-avatar">
+                                                        I
+                                                    </div>
+                                                ) : null}
+                                                <div className="message-content">
+                                                    {message.content
+                                                        ? message.content
+                                                              .split("\n")
+                                                              .map(
+                                                                  (
+                                                                      line,
+                                                                      index,
+                                                                  ) => (
+                                                                      <p
+                                                                          key={
+                                                                              index
+                                                                          }
+                                                                      >
+                                                                          {line || (
+                                                                              <br />
+                                                                          )}
+                                                                      </p>
+                                                                  ),
+                                                              )
+                                                        : null}
+                                                    {message.streamStatus ? (
+                                                        <small className="chat-stream-status">
+                                                            {
+                                                                message.streamStatus
+                                                            }
+                                                        </small>
+                                                    ) : null}
+                                                </div>
+                                            </article>
+                                        ))}
+                                    </div>
+                                </div>
+                                <ChatComposer
+                                    input={chatInput}
+                                    setInput={setChatInput}
+                                    onSend={sendChatMessage}
+                                    isSending={isSending}
+                                    disabledAttachment
+                                    contextBlocks={contextBlocks}
+                                    onAddCurrentFile={addCurrentFileContext}
+                                    onRemoveContextBlock={removeContextBlock}
+                                    modelKey={modelKey}
+                                    setModelKey={setModelKey}
+                                    chatTarget={chatTarget}
+                                    setChatTarget={setChatTarget}
+                                />
+                            </section>
+                            <footer className="work-statusbar">
+                                <span>⌘ {status}</span>
+                                <span>
+                                    {serviceState === "online"
+                                        ? "在线服务"
+                                        : "本地工作区"}
+                                </span>
+                                {isOwnerClient &&
+                                hasOwnerSession &&
+                                approvals.pending.length ? (
+                                    <button
+                                        className="approval-badge"
+                                        title="打开设置查看审批"
+                                        onClick={openSettings}
+                                    >
+                                        ⚠ {approvals.pending.length}{" "}
+                                        个审批待处理
+                                    </button>
+                                ) : null}
+                                <span>智能体：IDEA</span>
+                            </footer>
+                        </main>
+                    )}
+                </section>
+            </div>
+            {selectedRun ? (
+                <RunDetailModal
+                    run={selectedRun}
+                    onClose={() => setSelectedRun(null)}
+                />
+            ) : null}
+            {showSettings ? (
+                <SettingsModal
+                    activeTab={settingsTab}
+                    setActiveTab={setSettingsTab}
+                    onClose={() => setShowSettings(false)}
+                    onSignOut={() => void signOut()}
+                    serviceConfig={serviceConfig}
+                    theme={theme}
+                    setTheme={setTheme}
+                    fontSize={fontSize}
+                    setFontSize={setFontSize}
+                    background={background}
+                    setBackground={setBackground}
+                    isOwnerClient={isOwnerClient}
+                    hasOwnerSession={hasOwnerSession}
+                    memories={memories}
+                    showMemoryPanel={showMemoryPanel}
+                    setShowMemoryPanel={setShowMemoryPanel}
+                    memoryContent={memoryContent}
+                    setMemoryContent={setMemoryContent}
+                    memoryCategory={memoryCategory}
+                    setMemoryCategory={setMemoryCategory}
+                    memoryScope={memoryScope}
+                    setMemoryScope={setMemoryScope}
+                    onSaveMemory={() => void saveMemory()}
+                    onRemoveMemory={(memory) => void removeMemory(memory)}
+                    onUpdateMemory={updateMemory}
+                    isSavingMemory={isSavingMemory}
+                    ownerDevices={ownerDevices}
+                    onOwnerDevice={(device, action) =>
+                        void updateOwnerDevice(device, action)
+                    }
+                    credentials={credentials}
+                    onIssueCredential={(capability) =>
+                        void issueCredential(capability)
+                    }
+                    onRecoverCredential={(credential) =>
+                        void recoverCredential(credential)
+                    }
+                    onRevokeCredential={(credential) =>
+                        void revokeCredential(credential)
+                    }
+                    issuedToken={issuedToken}
+                    credentialNotice={credentialNotice}
+                    approvals={approvals}
+                    onApproveApproval={(approval) =>
+                        void decideApproval(approval, "approve")
+                    }
+                    onDenyApproval={(approval) =>
+                        void decideApproval(approval, "deny")
+                    }
+                    grants={grants}
+                    onCreateGrant={(request) => void createGrant(request)}
+                    onRevokeGrant={(grant) => void revokeGrant(grant)}
+                    fileChanges={fileChanges}
+                    onAcceptChange={(change) => void acceptChange(change)}
+                    onRevertChange={(change) => void revertChange(change)}
+                    auditEvents={auditEvents}
+                    onRefreshAudit={() => void refreshAudit()}
+                />
+            ) : null}
+            {showFileSearch ? (
+                <div
+                    className="modal-backdrop"
+                    onMouseDown={() => setShowFileSearch(false)}
+                >
+                    <section
+                        className="file-search-modal"
+                        onMouseDown={(event) => event.stopPropagation()}
+                    >
+                        <header>
+                            <strong>搜索文件</strong>
+                            <button onClick={() => setShowFileSearch(false)}>
+                                ×
+                            </button>
+                        </header>
+                        <input
+                            autoFocus
+                            value={fileSearch}
+                            onChange={(event) =>
+                                setFileSearch(event.target.value)
+                            }
+                            placeholder="按文件名筛选"
+                        />{" "}
+                        <div>
+                            {flattenedFiles
+                                .filter((file) =>
+                                    file.name
+                                        .toLowerCase()
+                                        .includes(fileSearch.toLowerCase()),
+                                )
+                                .map((file) => (
+                                    <button
+                                        key={file.path}
+                                        onClick={() => void openLocalFile(file)}
+                                    >
+                                        {file.name}
+                                    </button>
+                                ))}
+                        </div>
+                    </section>
+                </div>
+            ) : null}
+            {showMarketplace ? (
+                <aside className="marketplace-panel">
+                    <header>
+                        <div>
+                            <strong>插件市场</strong>
+                            <small>本地插件</small>
+                        </div>
+                        <button onClick={() => setShowMarketplace(false)}>
+                            ×
+                        </button>
+                    </header>
+                    <div className="marketplace-search">
+                        ⌕{" "}
+                        <input
+                            value={pluginSearch}
+                            onChange={(event) =>
+                                setPluginSearch(event.target.value)
+                            }
+                            placeholder="搜索插件"
+                        />
+                    </div>
+                    <nav>
+                        <button
+                            className={
+                                marketplaceTab === "discovered" ? "active" : ""
+                            }
+                            onClick={() => setMarketplaceTab("discovered")}
+                        >
+                            已发现
+                        </button>
+                        <button
+                            className={
+                                marketplaceTab === "enabled" ? "active" : ""
+                            }
+                            onClick={() => setMarketplaceTab("enabled")}
+                        >
+                            已启用
+                        </button>
+                    </nav>
+                    <div className="plugin-list">
+                        {filteredPlugins.map((plugin) => (
+                            <article className="plugin-card" key={plugin.id}>
+                                <div className="plugin-icon">
+                                    {plugin.category === "语言支持"
+                                        ? "&lt;/&gt;"
+                                        : "⌘"}
+                                </div>
+                                <div>
+                                    <h3>
+                                        {plugin.name}{" "}
+                                        <small>v{plugin.version}</small>
+                                    </h3>
+                                    <p>{plugin.description}</p>
+                                </div>
+                                <button
+                                    className={
+                                        enabledPlugins.includes(plugin.id)
+                                            ? "plugin-toggle enabled"
+                                            : "plugin-toggle"
+                                    }
+                                    onClick={() => togglePlugin(plugin.id)}
+                                >
+                                    {enabledPlugins.includes(plugin.id)
+                                        ? "已启用"
+                                        : "启用"}
+                                </button>
+                            </article>
+                        ))}
+                        {!filteredPlugins.length ? (
+                            <p className="empty-list">没有匹配的插件。</p>
+                        ) : null}
+                    </div>
+                </aside>
+            ) : null}
+        </div>
+    );
 }

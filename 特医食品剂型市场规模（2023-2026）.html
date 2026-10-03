@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>特医食品液体剂型市场规模（2023—2026）</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #172033;
+      --muted: #68738a;
+      --grid: #dfe5ef;
+      --accent: #2563eb;
+      --accent-soft: #dbeafe;
+      --surface: #ffffff;
+      --background: #f4f7fb;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      padding: 32px 16px;
+      font-family: "Microsoft YaHei", "Noto Sans SC", sans-serif;
+      color: var(--ink);
+      background: var(--background);
+    }
+
+    .card {
+      width: min(960px, 100%);
+      padding: 32px clamp(20px, 5vw, 52px) 28px;
+      background: var(--surface);
+      border: 1px solid #e8edf5;
+      border-radius: 20px;
+      box-shadow: 0 16px 40px rgba(31, 48, 80, 0.08);
+    }
+
+    h1 {
+      margin: 0 0 8px;
+      text-align: center;
+      font-size: clamp(22px, 3vw, 30px);
+      letter-spacing: 0.02em;
+    }
+
+    .subtitle {
+      margin: 0 0 26px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .chart-wrap { width: 100%; overflow-x: auto; }
+
+    svg {
+      display: block;
+      width: 100%;
+      min-width: 620px;
+      height: auto;
+    }
+
+    .axis-label, .tick-label {
+      fill: var(--muted);
+      font-size: 13px;
+    }
+
+    .axis-title {
+      fill: var(--muted);
+      font-size: 14px;
+      font-weight: 600;
+    }
+
+    .grid-line {
+      stroke: var(--grid);
+      stroke-width: 1;
+      stroke-dasharray: 4 5;
+    }
+
+    .axis-line {
+      stroke: #b7c2d3;
+      stroke-width: 1.2;
+    }
+
+    .area {
+      fill: url(#areaGradient);
+    }
+
+    .trend-line {
+      fill: none;
+      stroke: var(--accent);
+      stroke-width: 4;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+
+    .point {
+      fill: var(--surface);
+      stroke: var(--accent);
+      stroke-width: 4;
+    }
+
+    .value-label {
+      fill: var(--ink);
+      font-size: 14px;
+      font-weight: 700;
+    }
+
+    .legend {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      margin: 8px 0 0 66px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .legend-swatch {
+      width: 24px;
+      height: 4px;
+      border-radius: 99px;
+      background: var(--accent);
+    }
+
+    .note {
+      margin: 22px 0 0;
+      padding-top: 16px;
+      border-top: 1px solid #edf0f5;
+      color: var(--muted);
+      font-size: 12px;
+    }
+  </style>
+</head>
+<body>
+  <main class="card">
+    <h1>特医食品液体剂型市场规模</h1>
+
+    <div class="chart-wrap">
+      <svg viewBox="0 0 860 470" role="img" aria-labelledby="chart-title chart-desc">
+        <title id="chart-title">2023年至2026年特医食品液体剂型市场规模折线图</title>
+        <desc id="chart-desc">市场规模从2023年的30.2亿元增长至2026年的53.4亿元。</desc>
+        <defs>
+          <linearGradient id="areaGradient" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stop-color="#2563eb" stop-opacity="0.20" />
+            <stop offset="100%" stop-color="#2563eb" stop-opacity="0.02" />
+          </linearGradient>
+        </defs>
+
+        <!-- 横向网格线与纵轴刻度：0—60亿元，每10亿元一格 -->
+        <g aria-hidden="true">
+          <line class="grid-line" x1="80" y1="390" x2="820" y2="390" />
+          <line class="grid-line" x1="80" y1="333.33" x2="820" y2="333.33" />
+          <line class="grid-line" x1="80" y1="276.67" x2="820" y2="276.67" />
+          <line class="grid-line" x1="80" y1="220" x2="820" y2="220" />
+          <line class="grid-line" x1="80" y1="163.33" x2="820" y2="163.33" />
+          <line class="grid-line" x1="80" y1="106.67" x2="820" y2="106.67" />
+          <line class="grid-line" x1="80" y1="50" x2="820" y2="50" />
+
+          <text class="tick-label" x="63" y="395" text-anchor="end">0</text>
+          <text class="tick-label" x="63" y="338.33" text-anchor="end">10</text>
+          <text class="tick-label" x="63" y="281.67" text-anchor="end">20</text>
+          <text class="tick-label" x="63" y="225" text-anchor="end">30</text>
+          <text class="tick-label" x="63" y="168.33" text-anchor="end">40</text>
+          <text class="tick-label" x="63" y="111.67" text-anchor="end">50</text>
+          <text class="tick-label" x="63" y="55" text-anchor="end">60</text>
+        </g>
+
+        <line class="axis-line" x1="80" y1="50" x2="80" y2="390" />
+        <line class="axis-line" x1="80" y1="390" x2="820" y2="390" />
+
+        <text class="axis-title" x="20" y="220" text-anchor="middle" transform="rotate(-90 20 220)">市场规模（亿元）</text>
+        <text class="axis-title" x="450" y="452" text-anchor="middle">年份</text>
+
+        <!-- 数据点：2023=30.2，2024=36.8，2025=44.7，2026=53.4 -->
+        <path class="area" d="M 110 218.87 L 343.33 181.47 L 576.67 136.70 L 810 87.40 L 810 390 L 110 390 Z" />
+        <path class="trend-line" d="M 110 218.87 L 343.33 181.47 L 576.67 136.70 L 810 87.40" />
+
+        <g>
+          <circle class="point" cx="110" cy="218.87" r="7" />
+          <circle class="point" cx="343.33" cy="181.47" r="7" />
+          <circle class="point" cx="576.67" cy="136.70" r="7" />
+          <circle class="point" cx="810" cy="87.40" r="7" />
+
+          <text class="value-label" x="110" y="195" text-anchor="middle">30.2</text>
+          <text class="value-label" x="343.33" y="157" text-anchor="middle">36.8</text>
+          <text class="value-label" x="576.67" y="113" text-anchor="middle">44.7</text>
+          <text class="value-label" x="810" y="64" text-anchor="middle">53.4</text>
+        </g>
+
+        <g class="axis-label">
+          <text x="110" y="416" text-anchor="middle">2023</text>
+          <text x="343.33" y="416" text-anchor="middle">2024</text>
+          <text x="576.67" y="416" text-anchor="middle">2025</text>
+          <text x="810" y="416" text-anchor="middle">2026</text>
+        </g>
+      </svg>
+    </div>
+
+    <div class="legend"><span class="legend-swatch"></span><span>液体剂型市场规模</span></div>
+    <p class="note">数据来源：特医食品剂型市场规模（2023-2026）.md</p>
+  </main>
+</body>
+</html>

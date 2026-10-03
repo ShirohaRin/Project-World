@@ -1,0 +1,14 @@
+{
+  "id": "browser",
+  "version": "0.1.0",
+  "kind": "tool-provider",
+  "displayName": "浏览器工具",
+  "description": "供客户端 Agent、云端 Agent 和自动化工作流复用的浏览器能力。",
+  "tools": [
+    { "name": "browser.navigate", "risk": "network", "executionTargets": ["local", "cloud"], "approval": "required" },
+    { "name": "browser.snapshot", "risk": "read", "executionTargets": ["local", "cloud"], "approval": "none" },
+    { "name": "browser.click", "risk": "write", "executionTargets": ["local", "cloud"], "approval": "required" },
+    { "name": "browser.type", "risk": "write", "executionTargets": ["local", "cloud"], "approval": "required" },
+    { "name": "browser.screenshot", "risk": "read", "executionTargets": ["local", "cloud"], "approval": "none" }
+  ]
+}

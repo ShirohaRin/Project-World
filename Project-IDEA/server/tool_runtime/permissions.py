@@ -118,6 +118,8 @@ class ToolPolicy:
     }
     READ_TOOLS = {"read_file", "list_dir", "search_content"}
     OWNER_WRITE_TOOLS = {"write_file", "edit_file", "restore_file"}
+    # 业务模块（modules/*）注册的工具：仅 Owner 上下文可执行，注册方需先填入 TOOL_RISKS。
+    OWNER_MODULE_TOOLS: set[str] = set()
 
     def decide(self, tool_name: str, context: Optional[ExecutionContext]) -> ToolPolicyResult:
         risk = self.TOOL_RISKS.get(tool_name, ToolRisk.DESTRUCTIVE)
@@ -133,4 +135,6 @@ class ToolPolicy:
             return ToolPolicyResult(PolicyDecision.ALLOW, "owner_write_allowed", risk)
         if context.is_owner and tool_name == "dispatch_to_agent":
             return ToolPolicyResult(PolicyDecision.ALLOW, "owner_delegation_allowed", risk)
+        if context.is_owner and tool_name in self.OWNER_MODULE_TOOLS:
+            return ToolPolicyResult(PolicyDecision.ALLOW, "owner_module_allowed", risk)
         return ToolPolicyResult(PolicyDecision.DENY, "role_not_permitted", risk)

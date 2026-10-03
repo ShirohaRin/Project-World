@@ -3,9 +3,22 @@ package cn.programidea.assistant
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.lazy.rememberLazyListState
+
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -51,12 +64,13 @@ private enum class Destination(val label: String) { Chat("对话"), Memory("记�
 
 @Composable
 private fun IdeaApp(store: SecureSessionStore) {
+    val api = remember { IdeaApi(store) }
     var session by remember { mutableStateOf(store.session()) }
-    if (session == null) LoginScreen(store) { session = store.session() } else HomeScreen(store) { session = null }
+    if (session == null) LoginScreen(api, store) { session = store.session() } else HomeScreen(api, store) { session = null }
 }
 
 @Composable
-private fun LoginScreen(store: SecureSessionStore, onLoggedIn: () -> Unit) {
+private fun LoginScreen(api: AuthRepository, store: SecureSessionStore, onLoggedIn: () -> Unit) {
     var email by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
     var serverUrl by remember { mutableStateOf(store.serverUrl) }
@@ -81,7 +95,7 @@ private fun LoginScreen(store: SecureSessionStore, onLoggedIn: () -> Unit) {
                 scope.launch {
                     runCatching {
                         store.serverUrl = serverUrl
-                        withContext(Dispatchers.IO) { IdeaApi(store).login(email.trim(), password) }
+                        withContext(Dispatchers.IO) { api.login(email.trim(), password) }
                     }.onFailure { error = it.message ?: "登录失败" }
                     busy = false
                 }
@@ -95,7 +109,7 @@ private fun LoginScreen(store: SecureSessionStore, onLoggedIn: () -> Unit) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun HomeScreen(store: SecureSessionStore, onLoggedOut: () -> Unit) {
+private fun HomeScreen(api: IdeaApi, store: SecureSessionStore, onLoggedOut: () -> Unit) {
     var destination by remember { mutableStateOf(Destination.Chat) }
     var showSettings by remember { mutableStateOf(false) }
     Scaffold(
@@ -109,75 +123,193 @@ private fun HomeScreen(store: SecureSessionStore, onLoggedOut: () -> Unit) {
         },
     ) { padding ->
         when (destination) {
-            Destination.Chat -> ChatScreen(store, Modifier.padding(padding))
-            Destination.Memory -> MemoryScreen(store, Modifier.padding(padding))
-            Destination.Sync -> SyncScreen(store, Modifier.padding(padding))
+            Destination.Chat -> ChatScreen(api, Modifier.padding(padding))
+            Destination.Memory -> MemoryScreen(api, Modifier.padding(padding))
+            Destination.Sync -> SyncScreen(api, Modifier.padding(padding))
         }
     }
     if (showSettings) SettingsDialog(store, onDismiss = { showSettings = false }, onLoggedOut = onLoggedOut)
 }
 
 @Composable
-private fun ChatScreen(store: SecureSessionStore, modifier: Modifier) {
-    val api = remember { IdeaApi(store) }
+private fun ChatScreen(api: ConversationRepository, modifier: Modifier) {
     val scope = remember { CoroutineScope(Dispatchers.Main) }
+    val messageListState = rememberLazyListState()
     var conversations by remember { mutableStateOf<List<ConversationSummary>>(emptyList()) }
     var messages by remember { mutableStateOf<List<ChatMessage>>(emptyList()) }
     var activeId by remember { mutableStateOf<String?>(null) }
     var input by remember { mutableStateOf("") }
     var error by remember { mutableStateOf<String?>(null) }
     var busy by remember { mutableStateOf(false) }
-    fun loadConversations() = scope.launch {
-        runCatching { withContext(Dispatchers.IO) { api.conversations() } }.onSuccess { conversations = it }.onFailure { error = it.message }
-    }
-    androidx.compose.runtime.LaunchedEffect(Unit) { loadConversations() }
 
-    Column(modifier = modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedButton(onClick = { activeId = null; messages = emptyList() }) { Text("新对话") }
-            OutlinedButton(onClick = { loadConversations() }) { Text("刷新") }
+    fun loadConversations() = scope.launch {
+        runCatching { withContext(Dispatchers.IO) { api.conversations() } }
+            .onSuccess { conversations = it }
+            .onFailure { error = it.message ?: "会话加载失败" }
+    }
+
+    fun openConversation(id: String) = scope.launch {
+        runCatching { withContext(Dispatchers.IO) { api.conversation(id) } }
+            .onSuccess {
+                activeId = it.id
+                messages = it.messages
+                error = null
+            }
+            .onFailure { error = it.message ?: "会话加载失败" }
+    }
+
+    androidx.compose.runtime.LaunchedEffect(Unit) { loadConversations() }
+    androidx.compose.runtime.LaunchedEffect(messages.size) {
+        if (messages.isNotEmpty()) messageListState.animateScrollToItem(messages.lastIndex)
+    }
+
+    Column(modifier = modifier.fillMaxSize().background(MaterialTheme.colorScheme.surface)) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = activeId?.let { "对话 ${it.takeLast(8)}" } ?: "新的对话",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Text("生活助手 · 科研助手", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            OutlinedButton(onClick = { activeId = null; messages = emptyList(); error = null }) { Text("新对话") }
         }
+
         if (conversations.isNotEmpty()) {
-            LazyColumn(modifier = Modifier.fillMaxWidth().weight(0.22f)) {
+            LazyRow(
+                modifier = Modifier.fillMaxWidth().height(74.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 16.dp),
+            ) {
                 items(conversations, key = { it.id }) { conversation ->
-                    Text(conversation.id, modifier = Modifier.fillMaxWidth().clickable {
-                        scope.launch {
-                            runCatching { withContext(Dispatchers.IO) { api.conversation(conversation.id) } }.onSuccess {
-                                activeId = it.id; messages = it.messages
-                            }.onFailure { error = it.message }
+                    Card(
+                        modifier = Modifier.width(150.dp).clickable { openConversation(conversation.id) },
+                        shape = RoundedCornerShape(14.dp),
+                    ) {
+                        Column(Modifier.padding(10.dp)) {
+                            Text(
+                                text = "IDEA ${conversation.id.takeLast(6)}",
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                fontWeight = FontWeight.Medium,
+                            )
+                            Text("${conversation.messages} 条消息", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
-                    }.padding(vertical = 6.dp), color = if (activeId == conversation.id) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface)
+                    }
                 }
             }
+            Spacer(Modifier.height(6.dp))
         }
-        LazyColumn(modifier = Modifier.fillMaxWidth().weight(0.78f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            items(messages) { message ->
-                Card(modifier = Modifier.fillMaxWidth()) { Column(Modifier.padding(12.dp)) { Text(if (message.role == "user") "你" else "IDEA", fontWeight = FontWeight.Medium); Text(message.content) } }
+
+        LazyColumn(
+            state = messageListState,
+            modifier = Modifier.fillMaxWidth().weight(1f),
+            contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 16.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            items(messages, key = { it.id.ifBlank { "${it.role}-${it.timestamp}-${it.content.hashCode()}" } }) { message ->
+                MessageBubble(message)
             }
-            if (busy) item { Text("IDEA 正在处理…", color = MaterialTheme.colorScheme.onSurfaceVariant) }
+            if (busy) item { TypingIndicator() }
         }
-        error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedTextField(input, { input = it }, label = { Text("输入消息") }, modifier = Modifier.weight(1f), maxLines = 4)
-            Button(onClick = {
-                val text = input.trim(); if (text.isEmpty()) return@Button
-                input = ""; busy = true; error = null
-                messages = messages + ChatMessage(role = "user", content = text)
-                scope.launch {
-                    runCatching { withContext(Dispatchers.IO) { api.chat(text, activeId) } }.onSuccess { reply ->
-                        activeId = reply.conversationId
-                        messages = messages + ChatMessage(role = "assistant", content = reply.reply)
-                        loadConversations()
-                    }.onFailure { error = it.message }.also { busy = false }
-                }
-            }, enabled = !busy) { Text("发送") }
+
+        error?.let {
+            Text(it, modifier = Modifier.padding(horizontal = 16.dp), color = MaterialTheme.colorScheme.error)
+        }
+
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(12.dp),
+            verticalAlignment = Alignment.Bottom,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            OutlinedTextField(
+                value = input,
+                onValueChange = { input = it },
+                placeholder = { Text("发消息给 IDEA") },
+                modifier = Modifier.weight(1f),
+                maxLines = 4,
+                shape = RoundedCornerShape(20.dp),
+            )
+            Button(
+                onClick = {
+                    val text = input.trim()
+                    if (text.isEmpty() || busy) return@Button
+                    input = ""
+                    busy = true
+                    error = null
+                    messages = messages + ChatMessage(role = "user", content = text)
+                    scope.launch {
+                        runCatching { withContext(Dispatchers.IO) { api.chat(text, activeId) } }
+                            .onSuccess { reply ->
+                                activeId = reply.conversationId
+                                messages = messages + ChatMessage(role = "assistant", content = reply.reply)
+                                loadConversations()
+                            }
+                            .onFailure { error = it.message ?: "发送失败" }
+                            .also { busy = false }
+                    }
+                },
+                enabled = !busy && input.isNotBlank(),
+                modifier = Modifier.height(56.dp),
+                shape = RoundedCornerShape(18.dp),
+            ) { Text("发送") }
         }
     }
 }
 
 @Composable
-private fun MemoryScreen(store: SecureSessionStore, modifier: Modifier) {
-    val api = remember { IdeaApi(store) }
+private fun MessageBubble(message: ChatMessage) {
+    val isUser = message.role == "user"
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start,
+        verticalAlignment = Alignment.Bottom,
+    ) {
+        if (!isUser) Avatar("I", MaterialTheme.colorScheme.primaryContainer)
+        if (!isUser) Spacer(Modifier.width(8.dp))
+        Box(
+            modifier = Modifier
+                .widthIn(max = 300.dp)
+                .clip(RoundedCornerShape(18.dp))
+                .background(if (isUser) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant)
+                .padding(horizontal = 14.dp, vertical = 10.dp),
+        ) {
+            Text(
+                message.content,
+                color = if (isUser) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        if (isUser) Spacer(Modifier.width(8.dp))
+        if (isUser) Avatar("你", MaterialTheme.colorScheme.primary)
+    }
+}
+
+@Composable
+private fun Avatar(label: String, color: Color) {
+    Box(
+        modifier = Modifier.size(34.dp).clip(RoundedCornerShape(17.dp)).background(color),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(label, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+    }
+}
+
+@Composable
+private fun TypingIndicator() {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Avatar("I", MaterialTheme.colorScheme.primaryContainer)
+        Spacer(Modifier.width(8.dp))
+        Text("IDEA 正在思考…", color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
+@Composable
+private fun MemoryScreen(api: MemoryRepository, modifier: Modifier) {
     val scope = remember { CoroutineScope(Dispatchers.Main) }
     var memories by remember { mutableStateOf<List<MemoryRecord>>(emptyList()) }
     var content by remember { mutableStateOf("") }
@@ -221,8 +353,7 @@ private fun MemoryDialog(memory: MemoryRecord, onDismiss: () -> Unit, onSave: (S
 }
 
 @Composable
-private fun SyncScreen(store: SecureSessionStore, modifier: Modifier) {
-    val api = remember { IdeaApi(store) }
+private fun SyncScreen(api: SyncRepository, modifier: Modifier) {
     val scope = remember { CoroutineScope(Dispatchers.Main) }
     var cursor by remember { mutableLongStateOf(0L) }
     var events by remember { mutableStateOf<List<SyncEvent>>(emptyList()) }
@@ -238,6 +369,7 @@ private fun SyncScreen(store: SecureSessionStore, modifier: Modifier) {
 
 @Composable
 private fun SettingsDialog(store: SecureSessionStore, onDismiss: () -> Unit, onLoggedOut: () -> Unit) {
+    val api = remember { IdeaApi(store) }
     var spaceId by remember { mutableStateOf(store.spaceId) }
     val scope = remember { CoroutineScope(Dispatchers.Main) }
     AlertDialog(onDismissRequest = onDismiss, title = { Text("连接设置") }, text = { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) { Text("设备：${store.deviceId}", style = MaterialTheme.typography.bodySmall); OutlinedTextField(spaceId, { spaceId = it }, label = { Text("空间 ID（可选）") }); Text("不填时由服务端选择可访问的默认空间。", style = MaterialTheme.typography.bodySmall) } }, confirmButton = { TextButton(onClick = { store.spaceId = spaceId; onDismiss() }) { Text("保存") } }, dismissButton = { Row { TextButton(onClick = { scope.launch { withContext(Dispatchers.IO) { IdeaApi(store).logout() }; onDismiss(); onLoggedOut() } }) { Text("退出登录", color = MaterialTheme.colorScheme.error) }; TextButton(onClick = onDismiss) { Text("取消") } } })

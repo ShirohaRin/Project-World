@@ -1,3 +1,5 @@
+> **已废弃/内容已合并**：本文为历史版本，内容已合并至[Project IDEA 内部总架构与总企划](idea-project-architecture.md)。请勿将本文作为当前方案依据。
+
 # Program IDEA 内部立项策划案
 
 ## 基本信息

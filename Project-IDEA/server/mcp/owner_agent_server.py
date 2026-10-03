@@ -1,6 +1,8 @@
 import contextvars
 import hashlib
 import json
+import re
+import time
 
 from mcp.server.fastmcp import FastMCP
 
@@ -83,7 +85,7 @@ async def idea_chat(message: str, conversation_id: str | None = None, use_memory
     other_context = global_context(context, conversation_id)
     if other_context:
         runner_message = f"以下是其他会话的最近摘要，仅作必要上下文：\n{other_context}\n\n当前用户请求：\n{runner_message}"
-    saved_context = memory_context(context, message, policy["memory_scopes"])
+    saved_context = memory_context(context, message, policy["memory_scopes"]) if use_memory else ""
     if saved_context:
         runner_message = f"以下是用户明确保存的长期记忆，仅作必要上下文：\n{saved_context}\n\n当前用户请求：\n{runner_message}"
 
@@ -217,19 +219,92 @@ def idea_task_handoff_create(conversation_id: str, target_runtime_id: str, relat
     return json.dumps({"status": "pending", "handoff": handoff, "approval_id": approval["approval_id"], "manifest": manifest}, ensure_ascii=False)
 
 
+_CJK_RUN = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]+")
+_LATIN_WORD = re.compile(r"[a-z0-9_]+")
+_MEMORY_LOOKBACK_LIMIT = 500
+_MEMORY_RECENCY_HALF_LIFE_DAYS = 180.0
+
+
+def _memory_normalize(text) -> str:
+    return " ".join(str(text or "").split()).lower()
+
+
+def _memory_tokens(text) -> set:
+    normalized = _memory_normalize(text)
+    tokens = {word for word in _LATIN_WORD.findall(normalized) if len(word) >= 2}
+    for run in _CJK_RUN.findall(normalized):
+        if len(run) <= 3:
+            tokens.add(run)
+        for size in (2, 3):
+            for index in range(max(0, len(run) - size + 1)):
+                tokens.add(run[index:index + size])
+    return tokens
+
+
+def _memory_score(query: str, query_tokens: set, memory: dict) -> float:
+    content = _memory_normalize(memory.get("content"))
+    category = _memory_normalize(memory.get("category"))
+    raw_query = _memory_normalize(query)
+    overlap = query_tokens & _memory_tokens(content)
+    if not overlap:
+        return 0.0
+    score = sum(len(token) ** 1.2 for token in overlap)
+    score /= 1.0 + 0.35 * max(0, len(query_tokens) - len(overlap))
+    if raw_query in content:
+        score *= 2.0
+    if raw_query in category:
+        score *= 1.5
+    age_days = max(0.0, (time.time() - float(memory.get("updated_at") or 0.0)) / 86400.0)
+    return score * (0.5 ** (age_days / _MEMORY_RECENCY_HALF_LIFE_DAYS))
+
+
+def _owner_namespace(context) -> str:
+    namespace = memory_namespaces(context).get("owner")
+    if not namespace:
+        raise PermissionError("当前身份无权访问 Owner 私域记忆")
+    return namespace
+
+
+def _owner_memories(context, category=None) -> list:
+    memories = platform_store.list_memories(
+        context.principal.account_id,
+        context.space_id,
+        [_owner_namespace(context)],
+        limit=_MEMORY_LOOKBACK_LIMIT,
+    )
+    if isinstance(category, str) and category.strip():
+        expected = category.strip().lower()
+        memories = [item for item in memories if _memory_normalize(item.get("category")) == expected]
+    return memories
+
+
+def _memory_payload(memory: dict) -> dict:
+    return {
+        "id": memory["id"],
+        "category": memory["category"],
+        "content": memory["content"],
+        "revision": memory["revision"],
+        "updated_at": memory["updated_at"],
+    }
+
+
 @mcp.tool()
 def idea_memory_save(content: str, category: str = "general") -> str:
-    """将确认过的长期事项写入当前 Owner 私域记忆，供其他获批设备续接使用。"""
+    """将确认过的长期事项写入当前 Owner 私域记忆，供其他获批设备续接使用。内容完全相同则不会重复写入。"""
     context = _context()
     if not isinstance(content, str) or not (1 <= len(content.strip()) <= max_memory_length):
         raise ValueError(f"content 必须为 1 到 {max_memory_length} 个字符")
     if not isinstance(category, str) or not (1 <= len(category.strip()) <= 80):
         raise ValueError("category 必须为 1 到 80 个字符")
 
-    namespaces = memory_namespaces(context)
-    namespace = namespaces.get("owner")
-    if not namespace:
-        raise PermissionError("当前身份无权写入 Owner 私域记忆")
+    namespace = _owner_namespace(context)
+    normalized = _memory_normalize(content)
+    existing = next((item for item in _owner_memories(context) if _memory_normalize(item["content"]) == normalized), None)
+    if existing is not None:
+        payload = dict(existing)
+        payload["deduplicated"] = True
+        return json.dumps(payload, ensure_ascii=False)
+
     memory = platform_store.create_memory(
         context.principal.account_id,
         context.space_id,
@@ -237,6 +312,7 @@ def idea_memory_save(content: str, category: str = "general") -> str:
         category.strip(),
         content.strip(),
         context.principal.principal_id,
+        metadata={"source": "idea-owner-mcp"},
     )
     platform_store.write_audit(
         "mcp.idea_memory_saved",
@@ -247,37 +323,130 @@ def idea_memory_save(content: str, category: str = "general") -> str:
         decision="allowed",
         metadata={"category": memory["category"], "namespace": namespace},
     )
-    return json.dumps(memory, ensure_ascii=False)
+    payload = dict(memory)
+    payload["deduplicated"] = False
+    return json.dumps(payload, ensure_ascii=False)
 
 
 @mcp.tool()
-def idea_memory_search(query: str, limit: int = 10) -> str:
-    """检索当前 Owner 私域长期记忆，不调用 LLM 或执行智能体任务。"""
+def idea_memory_search(query: str, limit: int = 8, category: str | None = None) -> str:
+    """按关键词检索 Owner 私域长期记忆。支持中文自然语言片段，按相关度和新鲜度排序，不调用 LLM。"""
     context = _context()
     if not isinstance(query, str) or not (1 <= len(query.strip()) <= 500):
         raise ValueError("query 必须为 1 到 500 个字符")
     if not isinstance(limit, int):
         raise ValueError("limit 必须是整数")
 
-    namespace = memory_namespaces(context).get("owner")
-    if not namespace:
-        raise PermissionError("当前身份无权读取 Owner 私域记忆")
-    memories = platform_store.list_memories(
-        context.principal.account_id,
-        context.space_id,
-        [namespace],
-        query=query.strip(),
-        limit=max(1, min(limit, 50)),
-    )
+    namespace = _owner_namespace(context)
+    query = query.strip()
+    query_tokens = _memory_tokens(query)
+    scored = []
+    for memory in _owner_memories(context, category):
+        score = _memory_score(query, query_tokens, memory)
+        if score > 0:
+            scored.append((score, memory))
+    scored.sort(key=lambda pair: (pair[0], float(pair[1].get("updated_at") or 0.0)), reverse=True)
+    results = []
+    for score, memory in scored[: max(1, min(limit, 50))]:
+        item = _memory_payload(memory)
+        item["score"] = round(score, 4)
+        results.append(item)
     platform_store.write_audit(
         "mcp.idea_memory_searched",
         context,
         action="search",
         resource_type="memory",
         decision="allowed",
-        metadata={"namespace": namespace, "result_count": len(memories)},
+        metadata={"namespace": namespace, "result_count": len(results), "candidates": len(scored)},
     )
-    return json.dumps({"count": len(memories), "memories": memories}, ensure_ascii=False)
+    return json.dumps({"count": len(results), "memories": results}, ensure_ascii=False)
+
+
+@mcp.tool()
+def idea_memory_list(category: str | None = None, limit: int = 20) -> str:
+    """按更新时间列出 Owner 私域长期记忆，用于了解近期上下文，不做相关性排序。"""
+    context = _context()
+    if not isinstance(limit, int):
+        raise ValueError("limit 必须是整数")
+    if category is not None and not isinstance(category, str):
+        raise ValueError("category 必须是字符串")
+    memories = _owner_memories(context, category)
+    memories = sorted(memories, key=lambda item: float(item.get("updated_at") or 0.0), reverse=True)
+    results = [_memory_payload(memory) for memory in memories[: max(1, min(limit, 100))]]
+    return json.dumps({"count": len(results), "total": len(memories), "memories": results}, ensure_ascii=False)
+
+
+@mcp.tool()
+def idea_memory_update(memory_id: str, content: str, category: str | None = None) -> str:
+    """修订一条已存在的 Owner 私域记忆；revision 自动取当前值，不需要手工传。"""
+    context = _context()
+    if not isinstance(memory_id, str) or not memory_id.strip():
+        raise ValueError("memory_id 格式无效")
+    if not isinstance(content, str) or not (1 <= len(content.strip()) <= max_memory_length):
+        raise ValueError(f"content 必须为 1 到 {max_memory_length} 个字符")
+    if category is not None and not isinstance(category, str):
+        raise ValueError("category 必须是字符串")
+
+    namespace = _owner_namespace(context)
+    current = next((item for item in _owner_memories(context) if item["id"] == memory_id.strip()), None)
+    if current is None:
+        raise ValueError("记忆不存在或无权访问")
+    next_category = category.strip() if category and category.strip() else current["category"]
+    memory, conflict = platform_store.update_memory(
+        context.principal.account_id,
+        context.space_id,
+        current["id"],
+        [namespace],
+        next_category,
+        content.strip(),
+        current["revision"],
+        context.principal.principal_id,
+    )
+    if conflict is not None or memory is None:
+        raise RuntimeError("记忆已被其他设备修改，请重新检索后再更新")
+    platform_store.write_audit(
+        "mcp.idea_memory_updated",
+        context,
+        action="update",
+        resource_type="memory",
+        resource_id=current["id"],
+        decision="allowed",
+        metadata={"category": memory["category"], "revision": memory["revision"]},
+    )
+    return json.dumps(_memory_payload(memory), ensure_ascii=False)
+
+
+@mcp.tool()
+def idea_memory_delete(memory_id: str) -> str:
+    """逻辑删除一条 Owner 私域记忆；保留审计与同步事件，不做物理清除。"""
+    context = _context()
+    if not isinstance(memory_id, str) or not memory_id.strip():
+        raise ValueError("memory_id 格式无效")
+
+    namespace = _owner_namespace(context)
+    current = next((item for item in _owner_memories(context) if item["id"] == memory_id.strip()), None)
+    if current is None:
+        raise ValueError("记忆不存在或无权访问")
+    deleted, conflict = platform_store.delete_memory(
+        context.principal.account_id,
+        context.space_id,
+        current["id"],
+        [namespace],
+        current["revision"],
+        context.principal.principal_id,
+    )
+    if conflict is not None or not deleted:
+        raise RuntimeError("记忆已被其他设备修改，请重新检索后再删除")
+    platform_store.write_audit(
+        "mcp.idea_memory_deleted",
+        context,
+        action="delete",
+        resource_type="memory",
+        resource_id=current["id"],
+        decision="allowed",
+        metadata={"category": current["category"]},
+    )
+    return json.dumps({"id": current["id"], "status": "deleted", "revision": current["revision"] + 1}, ensure_ascii=False)
 
 
 @mcp.tool()

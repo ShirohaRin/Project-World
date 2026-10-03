@@ -14,7 +14,19 @@ interface Window {
     passwordLogin: (email: string, password: string) => Promise<{ route: string; principal: { account_id: string; role: string } }>
     logout: () => Promise<void>
     testService: () => Promise<ServiceHealth>
-    getNekoRuntime: () => Promise<NekoRuntime>
+    openServiceTest: () => Promise<void>
+    getLocalAgentStatus: () => Promise<{ status: 'ready' | 'unconfigured'; runtime: 'local'; capabilities: string[]; model: LocalModelConfig }>
+    getLocalModelConfig: () => Promise<LocalModelConfig>
+    getLocalModels: () => Promise<ModelDescriptor[]>
+    getLocalExtensions: () => Promise<LocalExtensions>
+    saveLocalExtensions: (input: LocalExtensions) => Promise<LocalExtensions>
+    saveLocalModelConfig: (config: { id?: string; name?: string; displayName?: string; provider?: string; baseUrl: string; model: string; apiKey: string }) => Promise<LocalModelConfig>
+    sendLocalChatStream: (request: { agentId: string; message: string; contextBlocks?: Array<{ path: string; name: string; content: string }>; conversationId?: string; useMemory?: boolean; modelKey?: ModelKey }) => Promise<ServiceChatResponse>
+    listLiterature: (limit?: number, offset?: number) => Promise<LiteratureListResponse>
+    getLiteratureResearchDirection: () => Promise<LiteratureResearchDirection>
+    saveLiteratureResearchDirection: (direction: string) => Promise<LiteratureResearchDirection>
+    collectLiterature: () => Promise<LiteratureCollectResult>
+    downloadLiterature: (paperId: string) => Promise<LiteratureDownloadResult>
     getRagRuntime: () => Promise<RagRuntime>
     getRagStats: () => Promise<RagStats>
     getRagDocuments: () => Promise<RagDocList>
@@ -26,6 +38,7 @@ interface Window {
     sendChat: (request: { agentId: string; message: string; contextBlocks?: Array<{ path: string; name: string; content: string }>; conversationId?: string; useMemory?: boolean; modelKey?: ModelKey }) => Promise<ServiceChatResponse>
     sendChatStream: (request: { agentId: string; message: string; contextBlocks?: Array<{ path: string; name: string; content: string }>; conversationId?: string; useMemory?: boolean; modelKey?: ModelKey }) => Promise<ServiceChatResponse>
     onChatStreamEvent: (listener: (event: ChatStreamEvent) => void) => () => void
+    onLocalChatStreamEvent: (listener: (event: ChatStreamEvent) => void) => () => void
     listConversations: () => Promise<ConversationSummary[]>
     getConversation: (conversationId: string) => Promise<ConversationDetail>
     deleteConversation: (conversationId: string) => Promise<void>
@@ -39,6 +52,13 @@ interface Window {
     executeHandoff: (handoffId: string, workspace: string) => Promise<{ sessionId: string }>
     listRuns: () => Promise<RunSummary[]>
     getRunDetail: (runId: string) => Promise<RunSummary>
+    createComputeJob: (methodId: string, input: Record<string, string>) => Promise<ComputeJob>
+    getComputeJob: (jobId: string) => Promise<ComputeJob>
+    cancelComputeJob: (jobId: string) => Promise<ComputeJob>
+    listComputeJobEvents: (jobId: string) => Promise<ComputeJobEvent[]>
+    getComputeJobResult: (jobId: string) => Promise<ComputeJobResult>
+    openComputeJobResult: (jobId: string, target: 'report' | 'output') => Promise<{ path: string }>
+    getQueuePresets: () => Promise<{ path: string; presets: unknown[]; error?: string }>
     listMemories?: () => Promise<MemoryRecord[]>
     listOwnerDevices?: () => Promise<OwnerDevice[]>
     approveOwnerDevice?: (ownerDeviceId: string) => Promise<void>
@@ -64,20 +84,31 @@ interface Window {
   }
 }
 
+interface ComputeJob { id: string; methodId: string; methodVersion: string; status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'; progress: number; createdAt: string; error?: string; resultReference?: string }
+interface ComputeJobEvent { id: string; jobId: string; type: 'created' | 'progress' | 'completed' | 'failed' | 'cancelled'; message: string; progress?: number; createdAt: string }
+interface ComputeJobResult { jobId: string; status: 'available' | 'unavailable'; outcome?: unknown; outputs?: string[]; html?: string | null; log?: string | null; data?: unknown }
+
 interface ExecutionOutput { sessionId: string; stream: 'system' | 'stdout' | 'stderr'; content: string; terminal?: boolean }
 interface FileTreeEntry { name: string; path: string; kind: 'file' | 'directory'; children?: FileTreeEntry[] }
 interface ServiceConfig { serverUrl: string; spaceId: string; deviceId: string; signedIn: boolean; route?: string }
 interface ServiceHealth { status: string; version?: string; llmAvailable?: boolean }
-interface NekoRuntime { status: 'starting' | 'ready' | 'error' | 'stopped'; url?: string; error?: string }
+interface ModelDescriptor { id: string; name: string; displayName: string; provider: string; baseUrl: string; model: string; description?: string; official: boolean }
+interface LocalModelConfig extends ModelDescriptor { configured: boolean; hasApiKey: boolean }
+interface LocalExtensions { mcp: Array<{ name: string; url: string; enabled: boolean }>; rules: Array<{ name: string; content: string; enabled: boolean }> }
 interface RagRuntime { status: 'starting' | 'ready' | 'error' | 'stopped'; url?: string; error?: string }
+interface LiteraturePaper { literature_id: string; title: string; authors: string[]; source: string; venue: string; date: string; abstract: string; score: number | null; authority: number | null; url: string; download_url?: string | null }
+interface LiteratureResearchDirection { content: string | null }
+interface LiteratureListResponse { items: LiteraturePaper[]; total: number }
+interface LiteratureCollectResult { count: number; skipped?: number; sources?: Record<string, number>; reason?: string }
+interface LiteratureDownloadResult { saved: boolean; canceled?: boolean; path?: string }
 interface RagStats { status: string; private_records: number; public_records: number; novel_records: number; data_records: number; embedding_model: string }
 interface RagDocList { private: string[]; public: string[]; novel: string[]; data: string[] }
 interface RagSearchResult { rank: number; similarity: number; source: string; content: string }
 interface RagSearchResponse { query: string; collection: string; total_results: number; results: RagSearchResult[] }
 interface UpdateInfo { version: string; releaseNotes: string; publishedAt: string }
 interface UpdateStatus { state: 'checked' | 'current' | 'available' | 'downloading' | 'downloaded' | 'error'; update?: UpdateInfo; message?: string }
-type ModelKey = 'gpt' | 'deepseek-v4-flash'
-interface ServiceChatResponse { reply: string; conversationId: string; agentId: string; dispatchedTo?: string | null; modelKey: ModelKey; runId: string }
+type ModelKey = 'gpt-5.6-terra' | 'gpt-5.6-sol' | 'deepseek-v4-flash' | 'deepseek-v4-pro' | string
+interface ServiceChatResponse { reply: string; conversationId: string; agentId: string; dispatchedTo?: string | null; modelKey: string; runId: string }
 interface ChatStreamEvent { type: 'run.started' | 'model.text.delta' | 'tool.started' | 'tool.completed' | 'run.completed' | 'run.failed'; payload: Record<string, unknown> }
 interface RunEvent { id: string; type: 'run.started' | 'tool.started' | 'tool.completed' | 'tools.completed' | 'run.completed' | 'run.failed'; detail: string; created_at: number }
 interface RunSummary { id: string; conversation_id: string; task_id?: string | null; agent_id: string; status: 'running' | 'completed' | 'failed'; model_key: ModelKey; started_at: number; finished_at?: number | null; iterations?: number | null; tool_calls: Array<{ name: string; success: boolean }>; summary?: string | null; error?: string | null; events?: RunEvent[] }

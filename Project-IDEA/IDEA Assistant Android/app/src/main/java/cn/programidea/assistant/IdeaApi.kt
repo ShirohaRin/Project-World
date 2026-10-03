@@ -76,7 +76,11 @@ class SecureSessionStore(context: Context) {
     fun clearSession() = preferences.edit().remove("access_token").remove("refresh_token").remove("route").apply()
 }
 
-class IdeaApi(private val store: SecureSessionStore) {
+class IdeaApi(private val store: SecureSessionStore) :
+    AuthRepository,
+    ConversationRepository,
+    MemoryRepository,
+    SyncRepository {
     private val client = OkHttpClient.Builder().build()
     private val json = Json { ignoreUnknownKeys = true; explicitNulls = false }
 
@@ -87,38 +91,38 @@ class IdeaApi(private val store: SecureSessionStore) {
         return Session(login.accessToken, login.refreshToken, login.route).also(store::save)
     }
 
-    fun logout() {
+    override fun logout() {
         store.session()?.let { session ->
             runCatching { authorizedRequest("/api/auth/logout", "POST", "{\"refresh_token\":${json.encodeToString(String.serializer(), session.refreshToken)}}") }
         }
         store.clearSession()
     }
 
-    fun conversations(): List<ConversationSummary> = decode<ConversationList>(authorizedRequest("/api/conversations")).conversations
-    fun conversation(id: String): ConversationDetail = decode(authorizedRequest("/api/conversations/${encode(id)}"))
+    override fun conversations(): List<ConversationSummary> = decode<ConversationList>(authorizedRequest("/api/conversations")).conversations
+    override fun conversation(id: String): ConversationDetail = decode(authorizedRequest("/api/conversations/${encode(id)}"))
 
-    fun chat(message: String, conversationId: String?): ChatResponse {
+    override fun chat(message: String, conversationId: String?): ChatResponse {
         val request = ChatRequest(message = message, conversationId = conversationId, useMemory = true)
         return decode(authorizedRequest("/api/assistant/chat", "POST", json.encodeToString(ChatRequest.serializer(), request)))
     }
 
-    fun memories(): List<MemoryRecord> = decode<MemoryList>(authorizedRequest("/api/memories")).memories
+    override fun memories(): List<MemoryRecord> = decode<MemoryList>(authorizedRequest("/api/memories")).memories
 
-    fun createMemory(scope: String, category: String, content: String): MemoryRecord {
+    override fun createMemory(scope: String, category: String, content: String): MemoryRecord {
         val request = CreateMemoryRequest(scope = scope, category = category, content = content, confirmed = true)
         return decode(authorizedRequest("/api/memories", "POST", json.encodeToString(CreateMemoryRequest.serializer(), request)))
     }
 
-    fun updateMemory(memory: MemoryRecord, content: String, category: String): MemoryRecord {
+    override fun updateMemory(memory: MemoryRecord, content: String, category: String): MemoryRecord {
         val request = UpdateMemoryRequest(content, category, memory.revision)
         return decode(authorizedRequest("/api/memories/${encode(memory.id)}", "PUT", json.encodeToString(UpdateMemoryRequest.serializer(), request)))
     }
 
-    fun deleteMemory(memory: MemoryRecord) {
+    override fun deleteMemory(memory: MemoryRecord) {
         authorizedRequest("/api/memories/${encode(memory.id)}", "DELETE", "{\"expected_revision\":${memory.revision}}")
     }
 
-    fun sync(after: Long): Pair<List<SyncEvent>, Long> {
+    override fun sync(after: Long): Pair<List<SyncEvent>, Long> {
         val response = decode<SyncResponse>(authorizedRequest("/api/sync/events?after=${after.coerceAtLeast(0)}"))
         return response.events to response.nextCursor
     }

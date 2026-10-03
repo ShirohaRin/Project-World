@@ -1,0 +1,41 @@
+# ============================================================================
+# NapCat（OneBot v11）云端常驻部署 — QQ 通知通道
+# ----------------------------------------------------------------------------
+# 镜像与端口参考官方 NapCat-Docker 仓库：
+#   https://github.com/NapNeko/NapCat-Docker
+#   https://hub.docker.com/r/mlikiowa/napcat-docker
+#
+# 端口说明：
+#   6099  WebUI（扫码登录 + 网络配置），需安全组放行，登录后凭 token 访问
+#   3000  OneBot HTTP Server（我们 server 调用 /send_private_msg 等）
+#   3001  OneBot WebSocket（本方案暂不使用，预留）
+#
+# 持久化（容器重建不丢失登录态）：
+#   /app/.config/QQ        QQ 登录态
+#   /app/napcat/config     NapCat 网络配置
+#   /app/napcat/plugins    插件目录
+#
+# 登录后仍需在 WebUI「网络配置」新增一个 HTTP Server（监听 3000，
+# 设置 access_token），NapCat 才会真正监听 3000 端口。
+# ============================================================================
+
+services:
+  napcat:
+    image: mlikiowa/napcat-docker:latest
+    container_name: napcat
+    restart: always
+    environment:
+      - TZ=Asia/Shanghai
+      - NAPCAT_UID=0
+      - NAPCAT_GID=0
+      # 指定账号后 NapCat 启动时会尝试快速登录（登录态失效时才需要重新扫码）
+      - ACCOUNT=2418422770
+    ports:
+      # OneBot HTTP 仅绑定本机，避免暴露公网（IDEA server 在同一台机器上）
+      - "127.0.0.1:3000:3000"
+      - "3001:3001"
+      - "6099:6099"   # WebUI，扫码登录用；生产建议安全组限制来源 IP
+    volumes:
+      - ./data/QQ:/app/.config/QQ
+      - ./data/napcat:/app/napcat/config
+      - ./data/plugins:/app/napcat/plugins

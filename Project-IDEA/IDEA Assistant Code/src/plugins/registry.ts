@@ -1,3 +1,5 @@
+import { MODULE_MANIFESTS, type ToolModuleManifest } from '../tools/moduleContracts'
+
 export type Plugin = {
   id: string
   name: string
@@ -30,6 +32,12 @@ export const PLUGINS: Plugin[] = [
   { id: 'idea.language-rust', name: 'Rust', version: '1.0.0', description: '提供 Rust 语法支持，并使用本机 rustc 编译和运行。', category: '语言支持', languages: ['Rust'], extensions: ['.rs'], toolchain: 'rustc', enabledByDefault: false },
   { id: 'idea.workspace-tools', name: '工作区工具', version: '1.0.0', description: '提供文件树刷新、工作区选择和编辑器状态栏信息。', category: '工具', enabledByDefault: true },
 ]
+
+export const TOOL_MODULES: readonly ToolModuleManifest[] = MODULE_MANIFESTS
+
+export function toolModuleForId(id: string): ToolModuleManifest | undefined {
+  return TOOL_MODULES.find((module) => module.id === id)
+}
 
 export function languagePluginForFile(fileName: string): Plugin | undefined {
   const extension = fileName.slice(fileName.lastIndexOf('.')).toLowerCase()

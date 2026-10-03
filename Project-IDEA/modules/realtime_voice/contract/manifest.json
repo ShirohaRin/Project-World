@@ -1,0 +1,8 @@
+{
+  "id": "realtime_voice",
+  "version": "0.1.0",
+  "kind": "voice-provider",
+  "displayName": "实时语音对话",
+  "description": "为客户端提供端到端实时语音对话：音频通道、语音识别、端点检测、流式语音合成与打断控制。",
+  "dependencies": []
+}

@@ -4,6 +4,7 @@ dist
 dist-electron
 release
 .build
+config/official-models.json
 
 # Local logs and tooling state
 logs
