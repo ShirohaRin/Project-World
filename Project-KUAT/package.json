@@ -1,0 +1,14 @@
+{
+  "name": "project-kuat",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Project World 创作工作台",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "start": "..\\Environments\\Node\\node_modules\\.bin\\electron.cmd .",
+    "test": "node --test tests/*.test.cjs",
+    "check": "node --check src/app.js && node --check electron/main.cjs",
+    "package": "node build.mjs",
+    "installer": "npm run package && powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File scripts/build-installer.ps1"
+  }
+}

@@ -1,0 +1,85 @@
+<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>K.U.A.T 认证动画预览</title><style>*{box-sizing:border-box}body{margin:0;font:14px "Segoe UI","Microsoft YaHei",sans-serif;background:#101c25;color:#d5e9e9}button{cursor:pointer;font:inherit}main{min-height:100vh;display:grid;place-content:center;text-align:center;gap:18px}main button{background:#26434b;border:1px solid #6a999a;color:#d5e9e9;padding:14px 30px;border-radius:8px}main p{color:#97b5bb}dialog{padding:28px;border-radius:14px}.terminal-auth,.terminal-portal{color:#d5e9e9;background:#111f27;border:1px solid #345059;box-shadow:0 30px 120px #091c3560;font-family:inherit}
+.terminal-auth::backdrop,.terminal-portal::backdrop{background:#0b1826cc;backdrop-filter:blur(12px)}
+.terminal-auth{width:100vw;max-width:none;height:100vh;max-height:none;margin:0;border:0;border-radius:0;padding:30px 42px;background:radial-gradient(ellipse at 50% 45%,#23444b 0, #13252f 40%,#101c25 80%);overflow:auto}
+.terminal-caption,.terminal-auth footer{display:flex;justify-content:space-between;color:#93aeb5;font-size:10px;letter-spacing:2px}
+.terminal-auth footer{position:absolute;bottom:26px;left:42px;right:42px}
+.auth-center{margin:7vh auto 40px;text-align:center;max-width:660px}.terminal-eyebrow{font-size:10px;letter-spacing:2px;color:#91b7bc}
+.auth-orbit{width:140px;height:140px;margin:0 auto 30px;border:1px solid #53838988;border-radius:50%;display:grid;place-items:center;position:relative}
+.auth-orbit:before,.auth-orbit:after{content:'';position:absolute;inset:-14px;border:1px solid #739d9e33;border-radius:50%}.auth-orbit:after{inset:-2px;border-color:transparent;border-top-color:#a6d9d4;border-bottom-color:#a6d9d4;animation:terminal-turn 3s linear infinite}
+.auth-orbit img{width:60px;height:80px;filter:brightness(1.9) saturate(.5)}
+.auth-center h1{font-size:30px;font-weight:500;letter-spacing:5px;margin:20px 0 8px}.auth-description{color:#9cb4ba;font-size:13px}
+.auth-clearance{display:flex;align-items:center;justify-content:center;gap:22px;margin:28px 0;color:#aac0c4;font-size:11px}.auth-clearance strong{font-size:24px;color:#e0ecec}.auth-clearance strong span{font-size:13px;letter-spacing:3px}.auth-clearance small{border-left:1px solid #547079;padding-left:22px}
+.auth-track{height:2px;background:#2a454e;max-width:340px;margin:0 auto;overflow:hidden}.auth-track i{display:block;height:100%;background:#8ccac3;transform-origin:left;animation:terminal-load 1.6s ease-out both}.auth-footnote{font-size:11px;color:#93b0b5;letter-spacing:1px}
+.terminal-auth .terminal-enter{margin-top:22px;border:1px solid #5b7e83;background:#263e47;color:#d4e9e8;padding:10px 24px;border-radius:6px}
+.terminal-launch{margin:0 18px 15px;width:calc(100% - 36px);text-align:left;border:1px solid #dae2e9;background:#eef2f6;padding:12px 14px;border-radius:9px;color:#465b70}.terminal-launch span{font-weight:600}.terminal-launch small{display:block;margin-top:6px;font-size:9px;letter-spacing:1px;color:#718294}.terminal-launch b{float:right}
+.terminal-portal{width:min(940px,calc(100vw - 50px));max-width:none;max-height:90vh;padding:30px;border-radius:15px}.terminal-portal header{display:flex;justify-content:space-between;align-items:center}.terminal-portal h2{font-size:25px;font-weight:500;margin:10px 0}.terminal-portal .terminal-close{background:transparent;border:1px solid #46606a;color:#bad1d4}
+.terminal-summary{display:flex;align-items:center;justify-content:space-between;padding:22px 0 25px;margin-bottom:22px;border-bottom:1px solid #334950}.terminal-summary img{width:50px;height:64px;filter:brightness(1.8) saturate(.5);margin-right:20px}.terminal-chip{font-size:10px;letter-spacing:2px;border:1px solid #57747b;padding:5px 9px;border-radius:4px}.terminal-summary h3{font-size:19px;margin:15px 0 6px}.terminal-summary p{font-size:12px;color:#a3b9bf;margin:0}
+.terminal-modules{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}.terminal-portal .terminal-module{display:block;text-align:left;background:#182a33;color:#91a7b0;border:1px solid #31464f;border-radius:8px;padding:19px;min-height:153px;transition:border-color .2s,background .2s}.terminal-module small{font-size:9px;letter-spacing:1px}.terminal-module h3{font-size:16px;margin:18px 0 8px;font-weight:500}.terminal-module p{font-size:11px;margin:0 0 20px}.terminal-module span{font-size:10px}.terminal-portal .terminal-module.is-open{background:#234047;border-color:#66918f;color:#ddedeb}.terminal-portal .terminal-module:hover{border-color:#779599;background:#294049}
+.terminal-notice{font-size:11px;color:#abc0c3;min-height:18px;margin:23px 0 15px}.terminal-portal footer{border-top:1px solid #334950;padding-top:17px;font-size:9px;letter-spacing:1.5px;color:#77939c}
+#cloud-login{background:#142630;color:#d5e9e9;border:1px solid #405c66;padding:40px;width:440px;border-radius:14px}#cloud-login::backdrop{background:radial-gradient(ellipse at center,#29454c,#111f2b);opacity:1}#cloud-login h2{font-size:24px;font-weight:500;letter-spacing:2px}#cloud-login p{color:#a5bbc1;font-size:12px;line-height:1.8}#cloud-login label{color:#bdd0d4}#cloud-login input{background:#213640;color:#e9f3f3;border:1px solid #47616a}#cloud-login .primary{background:#a4d2cc;color:#19343b;border-color:#a4d2cc}#cloud-login #cloud-login-error{color:#efb6aa}#cloud-login button{margin-top:8px}.login-mark{width:36px;height:48px;filter:brightness(1.9) saturate(.5);margin-bottom:12px}
+@keyframes terminal-turn{to{transform:rotate(360deg)}}@keyframes terminal-load{from{transform:scaleX(0)}to{transform:scaleX(1)}}
+@media(max-width:1000px){.terminal-modules{grid-template-columns:repeat(2,1fr)}.auth-center{margin-top:4vh}}
+@media(prefers-reduced-motion:reduce){.auth-orbit:after,.auth-track i{animation:none}.terminal-module{transition:none}}
+label{display:block;font-size:12px;margin:18px 0}input{display:block;width:100%;padding:12px;margin-top:8px;border-radius:6px;font:inherit}#cloud-login button{padding:12px 22px;border-radius:6px;width:100%}button:disabled{opacity:.6;cursor:wait}
+#cloud-login{transition:opacity .5s ease,transform .5s cubic-bezier(.22,1,.36,1)}
+#cloud-login.auth-leaving{opacity:0;transform:scale(.9) translateY(12px);pointer-events:none}
+.terminal-auth[open]{animation:none}
+body.auth-active main{visibility:hidden}
+body{background:radial-gradient(ellipse at 50% 45%,#23444b 0,#13252f 40%,#101c25 80%)}
+#cloud-login::backdrop{background:radial-gradient(ellipse at 50% 45%,#23444b 0,#13252f 40%,#101c25 80%)}
+.terminal-auth[open] .auth-orbit{border-color:transparent}
+.terminal-auth[open] .auth-orbit img{animation:logo-in 1.1s .15s cubic-bezier(.22,1,.36,1) both}
+.terminal-auth[open] .auth-orbit:before{animation:ring-in 1.3s .65s ease both}
+.terminal-auth[open] .auth-orbit:after{animation:ring-in 1.3s .85s ease both,terminal-turn 5s .85s linear infinite}
+.terminal-auth[open] .terminal-caption{animation:detail-in .9s 1.1s ease both}
+.terminal-auth[open] .terminal-eyebrow{animation:detail-in .9s 1.35s ease both}
+.terminal-auth[open] h1{animation:detail-in 1s 1.65s ease both}
+.terminal-auth[open] .auth-description{animation:detail-in .9s 1.9s ease both}
+.terminal-auth[open] .auth-clearance{animation:detail-in 1s 2.2s ease both}
+.terminal-auth[open] .auth-track{animation:scene-in .3s 3.9s ease both}
+.terminal-auth[open] .auth-track i{animation:terminal-load 2.5s 3.9s ease-out both}
+.terminal-auth[open] .auth-footnote{animation:scene-in .3s 3.9s ease both}
+.terminal-auth[open] .terminal-enter,.terminal-auth[open] footer{animation:detail-in .9s 3s ease both}
+.terminal-auth.auth-exit{opacity:0;transform:scale(1.025);transition:opacity .65s ease,transform .65s ease;animation:none}
+@keyframes scene-in{from{opacity:0}to{opacity:1}}
+@keyframes logo-in{from{opacity:0;transform:scale(.82);filter:brightness(1.9) blur(8px)}to{opacity:1;transform:scale(1);filter:brightness(1.9) blur(0)}}
+@keyframes ring-in{from{opacity:0}to{opacity:1}}
+@keyframes detail-in{from{opacity:0;translate:0 10px}to{opacity:1;translate:0 0}}
+@media(prefers-reduced-motion:reduce){#cloud-login,.terminal-auth.auth-exit{transition:none}.terminal-auth[open],.terminal-auth[open] *,.terminal-auth[open] .auth-orbit:before,.terminal-auth[open] .auth-orbit:after{animation:none!important}}
+
+/* Match the application's light blue / slate palette across the entire transition. */
+body{color:#293347;background:radial-gradient(ellipse at 50% 40%,#fff 0,#f2f6fc 55%,#e9f0fa 100%)}
+main p{color:#7b88a0}main button{background:#edf1fa;color:#536384;border-color:#cbd6e6}
+#cloud-login{background:#ffffffed;color:#34415b;border-color:#dce5f1;box-shadow:0 24px 90px #53638418}
+#cloud-login::backdrop,.terminal-auth::backdrop{background:radial-gradient(ellipse at 50% 40%,#fff 0,#f2f6fc 55%,#e9f0fa 100%);opacity:1;backdrop-filter:none}
+#cloud-login p,#cloud-login label{color:#7b88a0}#cloud-login input{background:#f6f8fc;color:#34415b;border-color:#dce3ed}
+#cloud-login .primary{background:#6477bd;color:#fff;border-color:#6477bd}
+.login-mark,.auth-orbit img{filter:none}
+.terminal-auth{color:#34415b;background:radial-gradient(ellipse at 50% 40%,#fff 0,#f2f6fc 55%,#e9f0fa 100%)}
+.terminal-caption,.terminal-auth footer,.terminal-eyebrow{color:#8796ac}
+.auth-description,.auth-footnote,.auth-clearance{color:#7b88a0}.auth-clearance strong{color:#536384}.auth-clearance small{border-color:#d2dcea}
+.auth-orbit:before{border-color:#d5dfed}.auth-orbit:after{border-top-color:#8497be;border-bottom-color:#8497be}
+.auth-track{background:#e0e7f2}.auth-track i{background:#8194bc}
+@keyframes logo-in{from{opacity:0;transform:scale(.82);filter:blur(8px)}to{opacity:1;transform:scale(1);filter:blur(0)}}
+
+.auth-clearance strong{display:inline-flex;align-items:center;gap:10px;line-height:1}.auth-clearance strong .rank-symbol{display:inline-flex;align-items:center;justify-content:center;font-size:26px;line-height:32px;min-width:30px;letter-spacing:0}.auth-clearance strong .rank-name{font-size:14px;line-height:32px;letter-spacing:1.5px}
+</style><main><h1>K.U.A.T 开发工作区</h1><p>认证流程预览结束</p><button id="replay">重新体验登录认证</button></main><dialog id="cloud-login"><form id="preview-login"><img class="login-mark" src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA2NCA5NiIgZmlsbD0ibm9uZSI+CiAgPHRpdGxlPksuVS5BLlQg5Yeg5L2V546v5qCH6K+GPC90aXRsZT4KICA8cGF0aCBkPSJNMjkgMyA2IDIzIDIxIDM0IDI5IDI1WiIgZmlsbD0iIzUzNjM4NCIvPgogIDxwYXRoIGQ9Ik0zNCAzIDU4IDIzVjY1TDQyIDYwVjMyTDM0IDI1WiIgZmlsbD0iIzUzNjM4NCIvPgogIDxwYXRoIGQ9Ik01IDI5IDIxIDM5VjY1TDI5IDcyVjkzTDUgNzNaIiBmaWxsPSIjNTM2Mzg0Ii8+CiAgPHBhdGggZD0iTTQyIDY0IDU4IDcxIDM0IDkzVjcyWiIgZmlsbD0iIzUzNjM4NCIvPgo8L3N2Zz4K" alt=""><div class="terminal-eyebrow">K.U.A.T / UNIFIED TERMINAL</div><h2>终端身份认证</h2><p>演示模式 · 使用示例账号即可，不会连接认证服务。</p><label>账号<input name="username" value="Omega-Developer" autocomplete="off" required></label><label>密码<input name="password" type="password" value="preview" autocomplete="off" required></label><p id="preview-status" role="status">示例凭据仅用于观看动画，请勿填写真实密码。</p><button class="primary" type="submit">认证并接入 →</button></form></dialog><script>/* Fictional terminal presentation. Real authorization remains server controlled. */
+window.KuatTerminal=(()=>{
+ const auth=document.createElement('dialog');auth.className='terminal-auth';
+ auth.innerHTML=`<div class="terminal-caption">K.U.A.T / UNIFIED TERMINAL <span>IDENTITY GATEWAY</span></div><div class="auth-center"><div class="auth-orbit"><img src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA2NCA5NiIgZmlsbD0ibm9uZSI+CiAgPHRpdGxlPksuVS5BLlQg5Yeg5L2V546v5qCH6K+GPC90aXRsZT4KICA8cGF0aCBkPSJNMjkgMyA2IDIzIDIxIDM0IDI5IDI1WiIgZmlsbD0iIzUzNjM4NCIvPgogIDxwYXRoIGQ9Ik0zNCAzIDU4IDIzVjY1TDQyIDYwVjMyTDM0IDI1WiIgZmlsbD0iIzUzNjM4NCIvPgogIDxwYXRoIGQ9Ik01IDI5IDIxIDM5VjY1TDI5IDcyVjkzTDUgNzNaIiBmaWxsPSIjNTM2Mzg0Ii8+CiAgPHBhdGggZD0iTTQyIDY0IDU4IDcxIDM0IDkzVjcyWiIgZmlsbD0iIzUzNjM4NCIvPgo8L3N2Zz4K" alt="K.U.A.T"></div><p class="terminal-eyebrow">KNOWLEDGE · UNDERSTANDING · APPLICATION · TRANSFORM</p><h1>身份认证通过</h1><p class="auth-description">正在展开你的开发工作区</p><div class="auth-clearance"><span>权限认证：</span><strong><span class="rank-symbol">Ω</span><span class="rank-name">Omega</span></strong><small>PROJECT WORLD · 开发接入</small></div><div class="auth-track"><i></i></div><p class="auth-footnote">终端权限开放中</p></div><footer>K.U.A.T Administration <span>AUTHORIZED DEVELOPMENT ACCESS</span></footer>`;
+ document.body.append(auth);auth.addEventListener('cancel',e=>e.preventDefault());
+ function welcome(){return new Promise(resolve=>{auth.classList.remove('auth-exit');auth.showModal();let closing=false;const close=()=>{if(closing)return;closing=true;clearTimeout(timer);auth.classList.add('auth-exit');setTimeout(()=>{auth.close();auth.classList.remove('auth-exit');resolve();},650);};const timer=setTimeout(close,matchMedia('(prefers-reduced-motion: reduce)').matches?200:6400);});}
+ const modules=[['01','Project World','世界构建与设定开发','open'],['02','行政中枢','K.U.A.T Administration'],['03','产业统筹','集团协同与资源调度'],['04','工作发布','任务发布与执行调度'],['05','科研网络','研究项目与技术档案'],['06','星区事务','辖区协调与文明事务']];
+ function install(){
+  const button=document.createElement('button');button.className='terminal-launch';button.innerHTML='<span>◈ 总平台</span><small>OMEGA / 开发接入 <b>↗</b></small>';
+  document.querySelector('.workspace').after(button);
+  const portal=document.createElement('dialog');portal.className='terminal-portal';portal.innerHTML=`<header><div><p class="terminal-eyebrow">K.U.A.T / UNIFIED TERMINAL</p><h2>系统总览</h2></div><button class="terminal-close" aria-label="关闭总平台">✕</button></header><div class="terminal-summary"><div><span class="terminal-chip">Ω OMEGA</span><h3>开发接入区</h3><p>当前终端开放 Project World 创作模块。</p></div><img src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA2NCA5NiIgZmlsbD0ibm9uZSI+CiAgPHRpdGxlPksuVS5BLlQg5Yeg5L2V546v5qCH6K+GPC90aXRsZT4KICA8cGF0aCBkPSJNMjkgMyA2IDIzIDIxIDM0IDI5IDI1WiIgZmlsbD0iIzUzNjM4NCIvPgogIDxwYXRoIGQ9Ik0zNCAzIDU4IDIzVjY1TDQyIDYwVjMyTDM0IDI1WiIgZmlsbD0iIzUzNjM4NCIvPgogIDxwYXRoIGQ9Ik01IDI5IDIxIDM5VjY1TDI5IDcyVjkzTDUgNzNaIiBmaWxsPSIjNTM2Mzg0Ii8+CiAgPHBhdGggZD0iTTQyIDY0IDU4IDcxIDM0IDkzVjcyWiIgZmlsbD0iIzUzNjM4NCIvPgo8L3N2Zz4K" alt=""></div><div class="terminal-modules">${modules.map(([id,title,desc,open])=>`<button class="terminal-module ${open?'is-open':''}" data-module="${id}" ${open?'':'aria-disabled="true"'}><small>${id} / ${open?'AVAILABLE':'RESTRICTED'}</small><h3>${title}</h3><p>${desc}</p><span>${open?'进入创作工作区 ↗':'未开放 · ⌑'}</span></button>`).join('')}</div><p class="terminal-notice" role="status">未开放模块为世界观展示入口，暂不提供实际功能。</p><footer>KNOWLEDGE / UNDERSTANDING / APPLICATION / TRANSFORM</footer>`;document.body.append(portal);
+  button.onclick=()=>portal.showModal();portal.querySelector('.terminal-close').onclick=()=>portal.close();portal.querySelectorAll('[data-module]').forEach(b=>b.onclick=()=>{if(b.dataset.module==='01')portal.close();else portal.querySelector('.terminal-notice').textContent=b.querySelector('h3').textContent+'未向本终端开放。此入口仅作世界观展示。';});
+ }
+ return {welcome,install};
+})();
+
+const replay=document.querySelector('#replay'),login=document.querySelector('#cloud-login'),form=document.querySelector('#preview-login'),status=document.querySelector('#preview-status');
+login.addEventListener('cancel',e=>e.preventDefault());
+function start(){document.body.classList.add('auth-active');login.classList.remove('auth-leaving');form.querySelector('button').disabled=false;form.querySelector('button').textContent='认证并接入 →';status.textContent='示例凭据仅用于观看动画，请勿填写真实密码。';login.showModal();}
+form.onsubmit=async e=>{e.preventDefault();const button=form.querySelector('button');button.disabled=true;button.textContent='正在认证…';status.textContent='正在连接终端认证通道…';await new Promise(r=>setTimeout(r,650));status.textContent='正在核验接入身份…';await new Promise(r=>setTimeout(r,650));status.textContent='认证通过，正在载入开发工作区…';await new Promise(r=>setTimeout(r,450));login.classList.add('auth-leaving');await new Promise(r=>setTimeout(r,500));const welcome=KuatTerminal.welcome();login.close();await welcome;document.body.classList.remove('auth-active');replay.focus();};replay.onclick=start;start();</script></html>

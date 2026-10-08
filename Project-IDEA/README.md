@@ -1,94 +1,59 @@
-# Program IDEA
+# Project IDEA
 
-Program IDEA 是一个本地优先的智能体工作平台。当前开发重心是 `IDEA Assistant` 桌面应用、Python Agent Host、工作区访问控制与任务会话能力；Agent 的运行时装配、版本管理和扩展加载将在后续阶段接入。
+Project IDEA 是 [Project World](../README.md) 的第一子项目，旨在建立支持 Project World 开发工作与对应生物科研的平台。它侧重**工作能力、执行与复杂问题处理**，IDEA Assistant 的发展重点是生物科研工作。
 
-## 文档格式约定
+历史资料中也使用 `Program IDEA`。本目录是软件平台；仓库中的 [`IDEA/`](../IDEA/README.md) 则主要保存主项目的世界观、正文与设计资料，两者不要混淆。
 
-项目总览、架构说明、平台设计、Agent 定义、开发记录与操作指南统一使用 Markdown（`.md`）格式维护。新增相关文档应存放在项目根目录、`docs/` 或所属模块目录中，并使用 `.md` 扩展名；HTML 仅保留为已生成的展示材料或独立界面资源，不作为项目文档的源文件。
+## 与 IDEA 角色、K.U.A.T 的分工
 
-## 当前目录架构
+IDEA（伊迪亚）是服务白羽奈绪的角色与生活助手；IDEA Assistant 是工作平台中的助手产品。主项目侧保留 IDEA 的角色映射与生活助手需求，平台继续发展科研与开发能力。
 
-```text
-Program-IDEA/
-├── Agents/                         # 四个 Agent 的定义层；当前不参与运行时加载
-│   ├── IDEA/                       # L0：主智能体角色与系统定义
-│   ├── IDEA-ProgramWorldAdminister/# L1：项目管理 Agent 定义
-│   ├── IDEA-Reasearcher/           # L1：科研分析 Agent 定义
-│   ├── IDEA-AgentProducer/         # L1：Agent 生产 Agent 定义
-│   └── README.md                   # 定义层约定与后续扩展位置
-│
-├── IDEA Assistant/                 # IDEA Assistant Windows 客户端
-│   ├── src/                        # React + TypeScript 用户界面
-│   ├── electron/                   # Electron 主进程与安全 IPC 桥
-│   ├── public/                     # 桌面应用静态资源
-│   ├── dist/                       # 前端构建产物，可重新生成
-│   ├── dist-electron/              # Electron 编译产物，可重新生成
-│   └── release/                    # Windows 安装包与未打包程序
-│
-├── server/                         # Python Agent Host 与平台服务层
-│   ├── main.py                     # FastAPI API、会话、任务与工作区入口
-│   ├── agent_runner.py             # LLM 推理与工具调用循环
-│   ├── agents/                     # 当前平台内置的执行实现，不等同于 Agents/ 定义层
-│   ├── tools/                      # 文件、命令、网络等受控工具
-│   ├── llm/                        # 多模型客户端与提供方配置
-│   ├── memory/                     # 本地会话记忆与 SQLite 数据
-│   ├── static/                     # 旧版 Web 界面，保留作 API 调试入口
-│   └── config.yaml                 # 服务、模型和运行参数
-│
-├── .trae/agents/                   # TRAE 项目级 Subagent 适配定义
-├── docs/                           # 部署、跨设备与接入文档
-├── program-idea-proposal/          # 项目提案与技术说明材料
-└── README.md                       # 本文件
-```
+根据 2026-10-03 的项目划分，世界构建中的项目管理、关系可视化、设定卡片、逻辑连接、思维导图和多 Agent 世界模拟，交由第四子项目 [Project K.U.A.T](../Project-KUAT/README.md) 承接。拆分是为了让工作执行与管理构思分别得到充分发展。
 
-## 层级边界
+这是产品职责的调整。白羽奈绪已明确 K.U.A.T 没有可供迁移的代码，将从零开发；`Agents/` 中的历史项目管理 Agent 定义不能视为它的既有实现。科研任务中的 Agent 协作也不等同于世界模拟。
 
-| 层级 | 目录 | 当前职责 | 后续方向 |
-|---|---|---|---|
-| 平台界面 | `IDEA Assistant/` | 本地 IDE、Work 模式与工作区文件编辑 | 文件树、编辑器、终端记录、Diff 审阅 |
-| 平台服务 | `server/` | API、会话、工具权限和本地执行 | 流式响应、任务队列、权限审批、运行日志 |
-| Agent 定义 | `Agents/` | 四个 Agent 的角色卡与系统能力说明 | 可加载配置、版本、工具清单、知识与测试 |
-| TRAE 适配 | `.trae/agents/` | 在 TRAE 内调用项目级 Subagent | 与平台定义层同步或自动生成 |
+## 当前代码与文档入口
 
-## Agent 定义结构
+| 目录或文件 | 用途 |
+| --- | --- |
+| [IDEA Assistant Code/](IDEA%20Assistant%20Code/) | 桌面客户端源码，React、TypeScript 与 Electron；包含 Assistant / Owner 构建脚本 |
+| `IDEA Assistant/`、`IDEA Assistant SRH/`、`IDEA Assistant Android/` | 仓库内其他客户端相关目录，具体用途以各目录内容为准 |
+| [server/](server/) | Python 平台服务、账户与权限、Agent 执行等服务端实现 |
+| [modules/](modules/) | 生物分析、工作流、浏览器、自动化和实时语音等能力模块 |
+| [Agents/README.md](Agents/README.md) | Agent 定义层的结构与约定；定义文件不代表所有角色已经接入运行时 |
+| [memory/USAGE.md](memory/USAGE.md) | 长期记忆服务使用说明 |
+| [tests/README.md](tests/README.md) | 测试组织与说明 |
+| [CLIENT_SERVICE_BOUNDARIES.md](CLIENT_SERVICE_BOUNDARIES.md) | 客户端、IDEA 服务与 RAG 的访问边界 |
+| [PROJECT_RULES.md](PROJECT_RULES.md) | 唯一项目级开发规则入口，修改前必读 |
 
-每个已存在的 Agent 目前有两个基础文件：
+上述目录反映仓库已有内容，不是整个平台通过端到端验收的声明。具体功能状态、验证结果和限制，应查对应模块的设计与进度文档。
 
-```text
-Agents/<agent-name>/
-├── system.md                        # 职责、能力、约束与输出规范
-└── character.md                     # 人格、行为风格与记忆设定
-```
+## 科研能力入口
 
-后续由平台接管 Agent 开发时，统一在对应目录内追加以下文件或子目录，不改变现有路径：
+- [生物方法模块算法清单](modules/bio_analysis_function/生物方法模块算法清单.md)：算法规划与开发进度入口。
+- [fastp 预处理工作流](modules/workflow/workflow.md)：调用已有算法完成处理流程。
+- [breseq 工作流](modules/workflow/breseq/breseq_workflow.md)：参考比对与变异检测流程。
+- [实时语音模块设计](modules/realtime_voice/实时语音对话模块设计.md)：协议、模块边界与进度。
 
-```text
-Agents/<agent-name>/
-├── config.yaml                      # 模型、上下文与运行策略
-├── tools.yaml                       # 工具白名单与权限声明
-├── knowledge/                       # 专属知识与检索配置
-├── examples/                        # 对话与任务示例
-└── tests/                           # 行为、边界和回归测试
-```
+工作流是独立能力层，不在算法内部重复实现算法。各模块的验收条件遵循项目规则与专项文档。
 
-## 已授权工作区
+## 本地开发入口
 
-平台服务目前只允许 Agent 工具访问以下目录：
-
-- `Program-IDEA`：平台自身代码与配置。
-- `shared_rag`：独立的共享知识库服务。
-- `ShirohaV1.1`：独立的个人网站项目。
-
-这些目录会在桌面端作为可切换工作区显示。新增目录必须先在服务端白名单中显式登记，不能由 Agent 自行扩大访问范围。
-
-## 开发命令
-
-在 `IDEA Assistant/` 目录中执行：
+桌面客户端的以下命令来自 `IDEA Assistant Code/package.json`，在该目录下执行：
 
 ```powershell
+npm install
 npm run dev:electron
-npm run build
-npm run package:win
+npm run build:assistant
+npm run build:owner
 ```
 
-当前客户端是离线版，启动时不连接 `server/`、Agent Host 或线上服务。Electron 以 `index.html` 作为 React 应用的最小挂载入口，实际界面和功能代码分别位于 `src/App.tsx`、`src/styles.css` 与 `electron/`。
+这些分别用于安装依赖、启动开发环境以及执行两种客户端的构建脚本，并非要求依次全部运行。构建输出与打包行为以实际脚本为准；服务端配置与启动应另行核对 `server/` 及部署文档。此次总览整理没有运行应用或验证发布包。
+
+早期 README 中“只提供离线功能、不连接任何服务”的描述不再适合作为整个平台的当前说明。客户端访问服务应遵守已有账户和项目权限边界，不能从总览推定某个目录已获得访问授权。
+
+## Agent 定义与文档维护
+
+`Agents/` 保留 IDEA、IDEA-ProgramWorldAdminister、IDEA-Reasearcher、IDEA-AgentProducer 等角色定义。基础文件为 `system.md` 与 `character.md`；原有规划中的配置、工具清单、知识和行为测试属于后续扩展方向，不应仅凭定义目录认定已经支持运行时加载。
+
+项目总览、设计、Agent 定义、开发记录与操作指南使用 Markdown。详细开发约定统一维护在 `PROJECT_RULES.md`，模块进度留在对应模块文档；本页维护项目定位和阅读入口，避免复制易过时的权限白名单、测试数量或发布状态。

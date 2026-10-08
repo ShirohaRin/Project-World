@@ -23,6 +23,49 @@ document.querySelectorAll('.filter').forEach((filter) => {
   });
 });
 
+document.querySelectorAll('[data-project-editor]').forEach((editor) => {
+  const state = editor.querySelector('[data-editor-state]');
+  const resetButton = editor.querySelector('[data-editor-reset]');
+  const storageKey = `project-world-editor:${editor.dataset.projectEditor}`;
+  const fields = [...editor.querySelectorAll('[data-editor-field]')];
+  const defaults = Object.fromEntries(fields.map((field) => [field.name, field.value]));
+
+  const apply = (content) => {
+    fields.forEach((field) => {
+      const value = content[field.name] ?? defaults[field.name];
+      field.value = value;
+      document.querySelectorAll(`[data-edit-target="${field.name}"]`).forEach((target) => {
+        target.textContent = value;
+      });
+    });
+  };
+
+  try {
+    const draft = JSON.parse(localStorage.getItem(storageKey) || 'null');
+    if (draft && typeof draft === 'object') {
+      apply(draft);
+      state.textContent = 'DRAFT LOADED';
+    }
+  } catch {
+    localStorage.removeItem(storageKey);
+    state.textContent = 'DRAFT RESET';
+  }
+
+  editor.addEventListener('submit', (event) => {
+    event.preventDefault();
+    const draft = Object.fromEntries(fields.map((field) => [field.name, field.value.trim()]));
+    localStorage.setItem(storageKey, JSON.stringify(draft));
+    apply(draft);
+    state.textContent = 'DRAFT SAVED';
+  });
+
+  resetButton?.addEventListener('click', () => {
+    localStorage.removeItem(storageKey);
+    apply(defaults);
+    state.textContent = 'DEFAULT RESTORED';
+  });
+});
+
 const polyCanvas = document.querySelector('.polyhedron-canvas');
 if (polyCanvas && hero) {
   const context = polyCanvas.getContext('2d');
@@ -30,6 +73,7 @@ if (polyCanvas && hero) {
   const octa = [[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]];
   const tetra = [[1,1,1],[-1,-1,1],[-1,1,-1],[1,-1,-1]];
   const ico = (() => { const p=(1+Math.sqrt(5))/2; return [[-1,p,0],[1,p,0],[-1,-p,0],[1,-p,0],[0,-1,p],[0,1,p],[0,-1,-p],[0,1,-p],[p,0,-1],[p,0,1],[-p,0,-1],[-p,0,1]]; })();
+  const dodeca = (() => { const p=(1+Math.sqrt(5))/2, q=1/p; return [[-1,-1,-1],[-1,-1,1],[-1,1,-1],[-1,1,1],[1,-1,-1],[1,-1,1],[1,1,-1],[1,1,1],[0,-q,-p],[0,-q,p],[0,q,-p],[0,q,p],[-q,-p,0],[-q,p,0],[q,-p,0],[q,p,0],[-p,0,-q],[-p,0,q],[p,0,-q],[p,0,q]]; })();
   const irregular = [[-1.2,-.45,-.3],[.8,-.9,.45],[1.35,.24,-.55],[.38,1.1,.85],[-.85,.72,.4],[-.38,-.12,1.35],[.15,.3,-1.25]];
   const edgePairs = (points) => { const distances=[]; for(let a=0;a<points.length;a++) for(let b=a+1;b<points.length;b++) distances.push([a,b,Math.hypot(points[a][0]-points[b][0],points[a][1]-points[b][1],points[a][2]-points[b][2])]); const min=Math.min(...distances.map(([, ,d])=>d)); return distances.filter(([, ,d])=>d<min*1.08).map(([a,b])=>[a,b]); };
   const randomBetween = (min, max) => min + Math.random() * (max - min);
@@ -40,6 +84,8 @@ if (polyCanvas && hero) {
     { points:cube, edges:edgePairs(cube), x:.43,y:.77,size:28, speed:.00048, direction:-1, phase:1.3, color:[183,143,255], opacity:.36 },
     { points:octa, edges:edgePairs(octa), x:.84,y:.18,size:27, speed:.00066, direction:1, phase:2.1, color:[98,202,255], opacity:.34 },
     { points:ico, edges:edgePairs(ico), x:.13,y:.73,size:35, speed:.00036, direction:-1, phase:3, color:[151,132,255], opacity:.38 },
+    { points:dodeca, edges:edgePairs(dodeca), x:.90,y:.12,size:30, speed:.00042, direction:1, phase:3.6, color:[176,145,255], opacity:.34 },
+    { points:tetra, edges:edgePairs(tetra), x:.86,y:.84,size:24, speed:.00058, direction:-1, phase:4.2, color:[93,214,255], opacity:.34 },
     { points:irregular, edges:[[0,1],[1,2],[2,3],[3,4],[4,0],[0,5],[1,5],[3,5],[4,5],[0,6],[2,6],[3,6],[4,6],[1,3]], x:.33,y:.15,size:26, speed:.00054, direction:1, phase:4, color:[89,206,255], opacity:.24 }
   ];
   const createAmbientPolyhedron = (index = 0) => {
@@ -57,7 +103,7 @@ if (polyCanvas && hero) {
     };
   };
   const addAmbientPolyhedron = index => { const object = createAmbientPolyhedron(index); object.edges = randomEdges(object.points); objects.push(object); };
-  for (let index = 0; index < 5; index++) addAmbientPolyhedron(index);
+  for (let index = 0; index < 7 + Math.floor(Math.random() * 6); index++) addAmbientPolyhedron(index);
   const rotateRigid = ([x, y, z], rx, ry, rz) => { const cx=Math.cos(rx), sx=Math.sin(rx), cy=Math.cos(ry), sy=Math.sin(ry), cz=Math.cos(rz), sz=Math.sin(rz); const y1=y*cx-z*sx, z1=y*sx+z*cx; const x2=x*cy+z1*sy, z2=-x*sy+z1*cy; return [x2*cz-y1*sz, x2*sz+y1*cz, z2]; };
   let canvasWidth = 0, canvasHeight = 0;
   function resizeCanvas(){ const ratio=devicePixelRatio||1; const box=hero.getBoundingClientRect(); const width=Math.round(box.width*ratio), height=Math.round(box.height*ratio); if(width===canvasWidth && height===canvasHeight) return; canvasWidth=width; canvasHeight=height; polyCanvas.width=width; polyCanvas.height=height; polyCanvas.style.width=box.width + 'px'; polyCanvas.style.height=box.height + 'px'; context.setTransform(ratio,0,0,ratio,0,0); }
@@ -72,6 +118,7 @@ const coreShell = document.querySelector('.core-shell');
 const coreShellPoints = document.querySelector('.core-shell-points');
 const coreCenter = document.querySelector('.core-center');
 const coreNextCenter = document.querySelector('.core-next-center');
+const coreNextShell = document.querySelector('.core-next-shell');
 const coreWaves = document.querySelectorAll('.core-wave');
 const coreScan = document.querySelector('.geometry-scan');
 const coreRingGuide = document.querySelector('.geometry-ring');
@@ -195,7 +242,7 @@ const updateCorePoint = (pulse = null, instability = null, now = null) => {
   }
   if (coreBlastWhite) {
     const expanding = ease(between(outerBlast, 0, .38));
-    const holding = 1 - ease(between(coreBlastDecayProgress, 0, .18));
+    const holding = 1 - ease(between(coreBlastDecayProgress, 0, .34));
     const whiteScale = recovery > 0
       ? 1 - recovery * .79
       : .21 + expanding * .79;
@@ -223,6 +270,14 @@ const updateCorePoint = (pulse = null, instability = null, now = null) => {
       ? recovery.toFixed(3)
       : '0';
     coreNextCenter.style.transform = 'translate(-50%,-50%)';
+  }
+  if (coreNextShell) {
+    coreNextShell.style.background = 'rgb(255,137,177)';
+    coreNextShell.style.boxShadow = '0 0 4px 1px rgba(255,82,126,.22),0 0 11px 2px rgba(255,47,103,.1),0 0 20px 3px rgba(255,82,138,.05)';
+    coreNextShell.style.opacity = corePulseStartedAt && outerBlast > 0
+      ? recovery.toFixed(3)
+      : '0';
+    coreNextShell.style.transform = 'translate(-50%,-50%) scale(1)';
   }
   if (coreShell) {
     const shellFade = ease(between(outerBlast, .08, .82));
@@ -298,8 +353,14 @@ if (coreRectangle) {
   };
   window.setTimeout(rotateCoreRectangle, pause);
 }
+// #region debug-point A:core-init
+fetch('http://127.0.0.1:7777/event',{method:'POST',body:JSON.stringify({sessionId:'core-burst-regression',runId:'pre',hypothesisId:'A',location:'script.js:339',msg:'[DEBUG] Core presence checked',data:{hasCore:Boolean(corePoint),page:location.pathname},ts:Date.now()})}).catch(()=>{});
+// #endregion
 if (corePoint) {
   const triggerCorePulse = () => {
+    // #region debug-point A:trigger
+    fetch('http://127.0.0.1:7777/event',{method:'POST',body:JSON.stringify({sessionId:'core-burst-regression',runId:'pre',hypothesisId:'A',location:'script.js:340',msg:'[DEBUG] Core pulse triggered',data:{now:performance.now()},ts:Date.now()})}).catch(()=>{});
+    // #endregion
     burstSpawned = false;
     coreNextCenterScale = .78;
     corePulseStartedAt = performance.now();
@@ -342,10 +403,10 @@ if (corePoint) {
         const releaseAge = age - coreReleaseAt;
         const release = ease(between(releaseAge, 0, coreRingDuration));
         coreOuterBlastProgress = ease(between(releaseAge, 0, 520));
-        coreBlastDecayProgress = ease(between(releaseAge, 1150, 5000));
+        coreBlastDecayProgress = ease(between(releaseAge, 1550, 6200));
         coreInnerBlastProgress = ease(between(releaseAge, 0, 430));
-        corePromotionProgress = ease(between(releaseAge, 260, 1150));
-        coreNextBirthProgress = ease(between(releaseAge, 1150, 2350));
+        corePromotionProgress = ease(between(releaseAge, 340, 1550));
+        coreNextBirthProgress = ease(between(releaseAge, 1550, 2850));
         if (releaseAge < 34) coreWhiteCorePhase = 0;
         coreWhiteCorePhase = Math.max(coreWhiteCorePhase, coreNextBirthProgress);
         if (!burstSpawned) {

@@ -1,0 +1,10 @@
+{
+  "name": "project-world-environment",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Project World shared desktop development tools",
+  "devDependencies": {
+    "electron": "^43.0.0",
+    "@electron/packager": "^19.0.0"
+  }
+}

@@ -593,6 +593,30 @@ class RAGEngine:
             return []
         return sorted([f.name for f in Path(d).iterdir() if f.is_file()])
 
+    def get_document_path(self, collection: str, document_path: str) -> str:
+        mapping = {"private": PRIVATE_DOCS_DIR, "public": PUBLIC_DOCS_DIR, "novel": NOVEL_DOCS_DIR, "data": DATA_DOCS_DIR}
+        docs_dir = mapping.get(collection)
+        if docs_dir is None:
+            raise HTTPException(status_code=400, detail="未知知识库集合")
+        path = _fm_safe_path(docs_dir, document_path)
+        if not os.path.isfile(path):
+            raise HTTPException(status_code=404, detail="文档不存在")
+        return path
+
+    def list_document_paths(self, collection: str) -> list[str]:
+        mapping = {"private": PRIVATE_DOCS_DIR, "public": PUBLIC_DOCS_DIR, "novel": NOVEL_DOCS_DIR, "data": DATA_DOCS_DIR}
+        docs_dir = mapping.get(collection)
+        if docs_dir is None:
+            raise HTTPException(status_code=400, detail="未知知识库集合")
+        root = Path(docs_dir)
+        if not root.exists():
+            return []
+        return sorted(
+            path.relative_to(root).as_posix()
+            for path in root.rglob("*")
+            if path.is_file() and path.suffix.lower() in (".txt", ".md", ".pdf", ".docx")
+        )
+
     def add_document(self, collection: str, file_path: str) -> str:
         mapping = {"private": PRIVATE_DOCS_DIR, "public": PUBLIC_DOCS_DIR, "novel": NOVEL_DOCS_DIR, "data": DATA_DOCS_DIR}
         d = mapping[collection]
@@ -714,6 +738,36 @@ async def list_docs(request: Request):
         novel=rag.list_docs("novel"),
         data=rag.list_docs("data")
     )
+
+
+@app.get("/api/admin/documents/{collection}")
+async def list_admin_documents(request: Request, collection: str):
+    """管理员原生文档列举接口，返回集合内的相对路径。"""
+    verify_key(request, "admin")
+    return {"collection": collection, "documents": rag.list_document_paths(collection)}
+
+
+@app.get("/api/admin/documents/{collection}/{document_path:path}")
+async def read_admin_document(request: Request, collection: str, document_path: str):
+    """管理员原生文档读取接口，仅允许集合内的已存在文件。"""
+    verify_key(request, "admin")
+    path = rag.get_document_path(collection, document_path)
+    return FileResponse(path, filename=os.path.basename(path))
+
+
+@app.put("/api/admin/documents/{collection}/{document_path:path}")
+async def update_admin_document(request: Request, collection: str, document_path: str):
+    """管理员原生文档更新接口，仅允许更新集合内的 TXT 或 Markdown 文件。"""
+    verify_key(request, "admin")
+    if Path(document_path).suffix.lower() not in {".txt", ".md"}:
+        raise HTTPException(status_code=400, detail="仅支持更新 TXT 或 Markdown 文档")
+    path = rag.get_document_path(collection, document_path)
+    body = await request.json()
+    content = body.get("content") if isinstance(body, dict) else None
+    if not isinstance(content, str):
+        raise HTTPException(status_code=400, detail="content 必须是字符串")
+    Path(path).write_text(content, encoding="utf-8")
+    return {"status": "ok", "collection": collection, "document_path": document_path}
 
 
 @app.post("/api/documents/upload")

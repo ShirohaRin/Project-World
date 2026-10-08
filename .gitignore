@@ -81,3 +81,31 @@ Project-IDEA/IDEA Assistant Code/dist-owner/
 .pw-rainclass/
 # 竞赛与外部资料目录（非项目内容，不入库）
 /docs/
+
+# Shared local runtimes and caches; preserve reproducible manifests.
+/Environments/*
+!/Environments/Node/
+/Environments/Node/*
+!/Environments/Node/package.json
+!/Environments/Node/package-lock.json
+!/Environments/README.md
+
+# 本地运行时、临时工作区与备份（体积大或仅本机有效，不入库）
+/.local-libs/
+/.local-backup/
+/game/
+
+# OCR 运行时（虚拟环境、运行时依赖、中间图块）与模型缓存：体积大且可由脚本重建
+IDEA/ocr-runtime/paddle-venv/
+IDEA/ocr-runtime/runtime-paddleocr/
+IDEA/ocr-runtime/p59-views/
+IDEA/文风素材/**/ocr-cache/
+IDEA/ocr-cache-*.png
+
+# KUAT 客户端打包产物（release/ 由 Project-KUAT/.gitignore 忽略）
+Project-KUAT/Latest/
+Project-KUAT/.npm-cache/
+
+# 临时文件与敏感件
+.trae/tmp_kuat_section.md
+feishu-auth-qr.png

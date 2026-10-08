@@ -19,6 +19,13 @@ from mcp.server.stdio import stdio_server
 
 SERVER_URL = os.environ.get("RAG_SERVER_URL", "").rstrip("/")
 IDEA_OWNER_TOKEN = os.environ.get("RAG_IDEA_OWNER_TOKEN", "")
+ADMIN_KEY = os.environ.get("RAG_ADMIN_KEY", "")
+ADMIN_KEY_FILE = os.environ.get("RAG_ADMIN_KEY_FILE", "")
+if not ADMIN_KEY and ADMIN_KEY_FILE:
+    try:
+        ADMIN_KEY = Path(ADMIN_KEY_FILE).read_text(encoding="utf-8").strip()
+    except OSError as error:
+        raise RuntimeError("无法读取 RAG_ADMIN_KEY_FILE。") from error
 COLLECTIONS = {"public", "data", "novel"}
 UPLOAD_EXTENSIONS = {".txt", ".md", ".pdf", ".docx"}
 
@@ -55,10 +62,12 @@ def require_document_path(value: Any) -> str:
 def request_json(method: str, endpoint: str, *, params: dict[str, Any] | None = None, body: dict[str, Any] | None = None, files: dict[str, Any] | None = None) -> dict[str, Any]:
     if not SERVER_URL:
         raise RuntimeError("RAG_SERVER_URL 尚未配置。")
-    if not IDEA_OWNER_TOKEN:
-        raise RuntimeError("RAG_IDEA_OWNER_TOKEN 尚未配置。")
+    token = ADMIN_KEY or IDEA_OWNER_TOKEN
+    if not token:
+        raise RuntimeError("RAG_ADMIN_KEY 或 RAG_IDEA_OWNER_TOKEN 尚未配置。")
     try:
-        response = requests.request(method, f"{SERVER_URL}{endpoint}", headers={"Authorization": f"Bearer {IDEA_OWNER_TOKEN}"}, params=params, json=body, files=files, timeout=180)
+        headers = {"X-API-Key": token} if ADMIN_KEY else {"Authorization": f"Bearer {token}"}
+        response = requests.request(method, f"{SERVER_URL}{endpoint}", headers=headers, params=params, json=body, files=files, timeout=180)
         response.raise_for_status()
         return response.json()
     except requests.HTTPError as error:
@@ -69,15 +78,19 @@ def request_json(method: str, endpoint: str, *, params: dict[str, Any] | None = 
 
 def list_project_documents(project_id: str, collection: str) -> str:
     project_id, collection = require_project_id(project_id, optional=True), require_collection(collection)
+    if ADMIN_KEY:
+        return json.dumps(request_json("GET", f"/api/admin/documents/{collection}"), ensure_ascii=False, indent=2)
     return json.dumps(request_json("GET", f"/api/projects/{quote(project_id, safe='')}/documents/{collection}"), ensure_ascii=False, indent=2)
 
 
 def read_project_document(project_id: str, collection: str, document_path: str) -> str:
     project_id, collection, document_path = require_project_id(project_id, optional=True), require_collection(collection), require_document_path(document_path)
-    if not SERVER_URL or not IDEA_OWNER_TOKEN:
-        raise RuntimeError("RAG_SERVER_URL 或 RAG_IDEA_OWNER_TOKEN 尚未配置。")
+    if not SERVER_URL or not (ADMIN_KEY or IDEA_OWNER_TOKEN):
+        raise RuntimeError("RAG_SERVER_URL 及 RAG_ADMIN_KEY 或 RAG_IDEA_OWNER_TOKEN 尚未配置。")
+    endpoint = f"/api/admin/documents/{collection}/{quote(document_path, safe='/')}" if ADMIN_KEY else f"/api/projects/{quote(project_id, safe='')}/documents/{collection}/{quote(document_path, safe='/')}"
+    headers = {"X-API-Key": ADMIN_KEY} if ADMIN_KEY else {"Authorization": f"Bearer {IDEA_OWNER_TOKEN}"}
     try:
-        response = requests.get(f"{SERVER_URL}/api/projects/{quote(project_id, safe='')}/documents/{collection}/{quote(document_path, safe='/')}", headers={"Authorization": f"Bearer {IDEA_OWNER_TOKEN}"}, timeout=180)
+        response = requests.get(f"{SERVER_URL}{endpoint}", headers=headers, timeout=180)
         response.raise_for_status()
         if Path(document_path).suffix.lower() in {".txt", ".md"}:
             return response.content.decode("utf-8")
@@ -92,7 +105,8 @@ def update_project_document(project_id: str, collection: str, document_path: str
     project_id, collection, document_path = require_project_id(project_id, optional=True), require_collection(collection), require_document_path(document_path)
     if Path(document_path).suffix.lower() not in {".txt", ".md"} or not isinstance(content, str):
         raise ValueError("仅可用字符串内容更新 .txt 或 .md 文档。")
-    return json.dumps(request_json("PUT", f"/api/projects/{quote(project_id, safe='')}/documents/{collection}/{quote(document_path, safe='/')}", body={"content": content}), ensure_ascii=False, indent=2)
+    endpoint = f"/api/admin/documents/{collection}/{quote(document_path, safe='/')}" if ADMIN_KEY else f"/api/projects/{quote(project_id, safe='')}/documents/{collection}/{quote(document_path, safe='/')}"
+    return json.dumps(request_json("PUT", endpoint, body={"content": content}), ensure_ascii=False, indent=2)
 
 
 def upload_project_document(project_id: str, collection: str, local_path: str) -> str:
@@ -112,13 +126,16 @@ def delete_project_document(project_id: str, collection: str, document_path: str
 
 def rebuild_project_index(project_id: str, collection: str) -> str:
     project_id, collection = require_project_id(project_id, optional=True), require_collection(collection)
-    return json.dumps(request_json("POST", f"/api/projects/{quote(project_id, safe='')}/rebuild", params={"collection": collection}), ensure_ascii=False, indent=2)
+    endpoint = "/api/admin/rebuild" if ADMIN_KEY else f"/api/projects/{quote(project_id, safe='')}/rebuild"
+    return json.dumps(request_json("POST", endpoint, params={"collection": collection}), ensure_ascii=False, indent=2)
 
 
 def search_project_knowledge(project_id: str, collection: str, query: str, top_k: int = 5) -> str:
     project_id, collection = require_project_id(project_id, optional=True), require_collection(collection)
     if not isinstance(query, str) or not query.strip() or not isinstance(top_k, int):
         raise ValueError("query 必须非空，top_k 必须是整数。")
+    if ADMIN_KEY:
+        return json.dumps(request_json("POST", "/api/admin/search", params={"collection": collection}, body={"query": query.strip(), "top_k": max(1, min(top_k, 10))}), ensure_ascii=False, indent=2)
     return json.dumps(request_json("POST", f"/api/projects/{quote(project_id, safe='')}/search", params={"collection": collection}, body={"query": query.strip(), "top_k": max(1, min(top_k, 10))}), ensure_ascii=False, indent=2)
 
 
@@ -155,13 +172,13 @@ async def main() -> None:
         )
 
     async def call_tool(*args: Any) -> types.CallToolResult:
-        if len(args) == 1 and isinstance(args[0], types.CallToolRequestParams):
-            name = args[0].name
-            arguments = args[0].arguments or {}
+        # 新版 MCP SDK 传入 (request_context, CallToolRequestParams)，
+        # 旧版则可能直接传入 CallToolRequestParams 或 (name, arguments)。
+        params = next((item for item in args if isinstance(item, types.CallToolRequestParams)), None)
+        if params is not None:
+            name = params.name
+            arguments = params.arguments or {}
         else:
-            # 兼容新旧版 mcp SDK：回调参数顺序可能是 (name, arguments)、
-            # (request_context, name, arguments) 或 (name, request_context, arguments)，
-            # 因此按参数类型提取，避免把 ServerRequestContext 当作工具名。
             name = next((item for item in args if isinstance(item, str)), None)
             arguments = next((item for item in reversed(args) if isinstance(item, dict)), None)
             if name is None or arguments is None:
@@ -184,7 +201,7 @@ async def main() -> None:
         server.list_tools()(list_tools)
         server.call_tool()(call_tool)
 
-    log.info("Owner RAG MCP 已启动；服务地址：%s", SERVER_URL)
+    log.info("Owner RAG MCP 已启动；服务地址：%s，原生 Admin 模式：%s", SERVER_URL, "启用" if ADMIN_KEY else "未启用")
     async with stdio_server() as (read_stream, write_stream):
         await server.run(read_stream, write_stream, server.create_initialization_options())
 

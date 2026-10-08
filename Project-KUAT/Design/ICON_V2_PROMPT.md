@@ -1,0 +1,7 @@
+# 夸特内部平台图标 v2
+
+2026-10-04。作者否定蓝白折纸 K。以夸特内部工作平台为软件身份，黑青色、冰冷未来感；不是集团徽标。身份认证和工作发布仅为世界内背景，不实现功能。使用内置 image_gen，素材 assets/kuat-icon-v2.png 与多尺寸 ICO。
+
+## 最终提示词
+
+Use case: logo-brand. Design the actual production desktop app icon for K.U.A.T INTERNAL WORK PLATFORM, an in-universe administrative terminal of a vast sovereign industrial organization subordinate to the Shiroha clan. This is a software access/work terminal, NOT the organization's heraldic logo. Visual personality: cold, disciplined, impersonal, futuristic, black and cyan. Single square icon front facing, 1024 square. A matte near-black graphite squircle tile, sharp restrained bevels. In its center a bold cyan geometric command-aperture glyph: four robust angular bracket segments surrounding one small solid square core, with one deliberate asymmetric break and a short horizontal terminal bar. Strong simple silhouette; deliberate industrial proportions; graphic geometry reads clearly at 24px. Cyan is flat luminous pigment with only minimal edge emission, ample black negative space. Premium industrial operating-system identity, functional and severe, no decorative detail. Tile occupies 90 percent of square canvas; genuinely transparent outside tile. No letter K, no words, no blue-white folded ribbon, no orbital rings, no globe, no shield, no wings, no heraldry, no padlock, no authentication claim, no stars, no circuit-board maze, no neon haze, no glass blob, no background scene, no multiple versions. One isolated finished software icon.

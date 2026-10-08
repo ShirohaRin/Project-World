@@ -1,0 +1,19 @@
+[Unit]
+Description=K.U.A.T cloud workspace
+After=network.target
+[Service]
+Type=simple
+User=kuat
+Group=kuat
+WorkingDirectory=/opt/kuat-server
+Environment=KUAT_DB=/var/lib/kuat/workspace.sqlite3
+ExecStart=/usr/bin/python3 /opt/kuat-server/service.py
+Restart=on-failure
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/kuat
+UMask=0077
+[Install]
+WantedBy=multi-user.target

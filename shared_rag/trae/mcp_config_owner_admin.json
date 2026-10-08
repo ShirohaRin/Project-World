@@ -7,7 +7,8 @@
       ],
       "env": {
         "RAG_SERVER_URL": "https://你的域名",
-        "RAG_IDEA_OWNER_TOKEN": "在本机安全配置中提供 IDEA capability credential，不要提交真实 Token"
+        "RAG_IDEA_OWNER_TOKEN": "在本机安全配置中提供 IDEA capability credential，不要提交真实 Token",
+        "RAG_ADMIN_KEY": "临时原生 Admin key；配置后列举、读取、检索直连 RAG API，不要提交真实 Key"
       }
     }
   }

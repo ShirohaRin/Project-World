@@ -1,0 +1,3 @@
+const {test}=require('node:test');const assert=require('node:assert/strict');const {initial,validate,update}=require('../src/model.js');
+test('editing preserves history and flags external sync without mutating original',()=>{const changed=update(initial,{name:' 新世界 ',subtitle:'说明',background:'背景',concept:'概念',tags:['星际']});assert.equal(changed.name,'新世界');assert.equal(changed.pendingSync,true);assert.equal(changed.changes.length,1);assert.equal(initial.changes.length,0);assert.deepEqual(validate(JSON.parse(JSON.stringify(changed))),changed);});
+test('malformed stored archive is rejected',()=>{assert.throws(()=>validate({...initial,tags:'invalid'}));assert.throws(()=>validate({...initial,name:''}));assert.throws(()=>validate({...initial,schemaVersion:2}));});
